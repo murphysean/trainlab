@@ -4,6 +4,13 @@
 //! is the "scanmem / GameConqueror" style tool, but geared toward finding
 //! anchors for code caves and hooks.
 //!
+//! **Linux-only.** This tool reads `/proc/pid/mem` and imports
+//! `trainlab_core::memory::LinuxProcess` (a `#[cfg(unix)]` type), so it must
+//! not be built for the Windows target. The `#[cfg(unix)]` guards below
+//! prevent `cargo build --target x86_64-pc-windows-gnu` (whole workspace)
+//! from failing on this crate: on non-unix targets the binary compiles to a
+//! stub that reports it is Linux-only.
+//!
 //! Subcommands:
 //!
 //! - `list` — list processes (find the game's PID).
@@ -15,11 +22,18 @@
 //! - `scan <pid> <value>` — interactive value scan (first scan).
 //! - `next <pid> <value>` — refine a previous value scan.
 
-use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
-use trainlab_core::memory::{LinuxProcess, ProcessMemory};
-use trainlab_core::process;
+use anyhow::bail;
 
+#[cfg(unix)]
+use anyhow::{Context, Result};
+#[cfg(unix)]
+use clap::{Parser, Subcommand};
+#[cfg(unix)]
+use trainlab_core::process;
+#[cfg(unix)]
+use trainlab_core::memory::{LinuxProcess, ProcessMemory};
+
+#[cfg(unix)]
 #[derive(Parser)]
 #[command(name = "trainlab-scan", about = "Memory hunting/scanning for game training")]
 struct Cli {
@@ -27,6 +41,7 @@ struct Cli {
     command: Command,
 }
 
+#[cfg(unix)]
 #[derive(Subcommand)]
 enum Command {
     /// List processes to find the game's PID.
@@ -58,6 +73,14 @@ enum Command {
     Next { pid: i32, value: String },
 }
 
+/// Non-unix stub: the scanner is Linux-only, so on other targets we just
+/// report that and exit. This keeps the whole-workspace Windows build green.
+#[cfg(not(unix))]
+fn main() -> anyhow::Result<()> {
+    bail!("trainlab-scanner is Linux-only (reads /proc/pid/mem); not available on this target")
+}
+
+#[cfg(unix)]
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
@@ -72,6 +95,7 @@ fn main() -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn cmd_list() -> Result<()> {
     let procs = process::list();
     println!("{:<8}  {}", "PID", "NAME");
@@ -81,6 +105,7 @@ fn cmd_list() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn cmd_regions(pid: i32) -> Result<()> {
     let proc = LinuxProcess::new(pid);
     let regions = proc.regions().context("failed to read regions")?;
@@ -106,6 +131,7 @@ fn cmd_regions(pid: i32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn cmd_aob(pid: i32, pattern: &str) -> Result<()> {
     let pat = trainlab_core::aob::parse(pattern);
     if pat.is_empty() {
@@ -136,6 +162,7 @@ fn cmd_aob(pid: i32, pattern: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn cmd_read(pid: i32, address: &str, len: usize) -> Result<()> {
     let addr = parse_addr(address)?;
     let proc = LinuxProcess::new(pid);
@@ -144,6 +171,7 @@ fn cmd_read(pid: i32, address: &str, len: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn cmd_write(pid: i32, address: &str, hex: &str) -> Result<()> {
     let addr = parse_addr(address)?;
     let data = parse_hex(hex)?;
@@ -156,6 +184,7 @@ fn cmd_write(pid: i32, address: &str, hex: &str) -> Result<()> {
 /// A simple in-memory "previous scan" store for the interactive scan/next
 /// workflow. In a real tool this would persist across invocations; here we
 /// keep it in-process for the demo.
+#[cfg(unix)]
 fn cmd_scan(pid: i32, value: &str) -> Result<()> {
     let target = parse_value(value)?;
     let proc = LinuxProcess::new(pid);
@@ -187,12 +216,14 @@ fn cmd_scan(pid: i32, value: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn cmd_next(pid: i32, value: &str) -> Result<()> {
     // Placeholder: a real implementation would re-scan the previous match set.
     let _ = (pid, value);
     bail!("`next` requires a persistent match set; use `scan` then refine in a future version")
 }
 
+#[cfg(unix)]
 fn parse_addr(s: &str) -> Result<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -202,6 +233,7 @@ fn parse_addr(s: &str) -> Result<u64> {
     }
 }
 
+#[cfg(unix)]
 fn parse_hex(s: &str) -> Result<Vec<u8>> {
     let s = s.trim();
     let s = s.strip_prefix("0x").unwrap_or(s);
@@ -217,6 +249,7 @@ fn parse_hex(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+#[cfg(unix)]
 fn parse_value(s: &str) -> Result<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -226,6 +259,7 @@ fn parse_value(s: &str) -> Result<u64> {
     }
 }
 
+#[cfg(unix)]
 fn hexdump(start: u64, data: &[u8]) {
     for (i, chunk) in data.chunks(16).enumerate() {
         let addr = start + (i * 16) as u64;

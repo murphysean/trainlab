@@ -193,31 +193,208 @@ pub mod unix {
 
 #[cfg(windows)]
 pub mod windows {
-    //! Windows implementation using `ReadProcessMemory` / `WriteProcessMemory`.
-    //! (Stub — fill in with `windows-sys` when building on Windows.)
+    //! Windows implementation using `ReadProcessMemory` / `WriteProcessMemory`
+    //! and `VirtualQueryEx` for region enumeration.
 
     use super::{MemoryError, ProcessMemory, Region};
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        ReadProcessMemory, WriteProcessMemory,
+    };
+    use windows_sys::Win32::System::Memory::{
+        VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
+        PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
+        PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+    };
 
+    /// A handle to a Windows process, opened with `PROCESS_VM_READ |
+    /// PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION`.
     pub struct WindowsProcess {
-        handle: usize,
+        handle: HANDLE,
     }
 
     impl WindowsProcess {
-        pub fn new(handle: usize) -> Self {
+        /// Wrap an already-open process handle. The caller owns the handle;
+        /// this type does **not** close it on drop (the GUI/inject layer
+        /// manages handle lifetime).
+        pub fn new(handle: HANDLE) -> Self {
             Self { handle }
+        }
+
+        /// Open a process by PID with read/write/query access.
+        ///
+        /// Returns `Err` if the process cannot be opened (e.g. it exited or
+        /// access is denied).
+        pub fn open(pid: u32) -> Result<Self, MemoryError> {
+            use windows_sys::Win32::System::Threading::OpenProcess;
+            use windows_sys::Win32::System::Threading::{
+                PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+            };
+            let access = PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION;
+            // SAFETY: passing a valid PID and access mask.
+            let handle = unsafe { OpenProcess(access, 0, pid) };
+            if handle.is_null() {
+                return Err(MemoryError::Os(format!(
+                    "OpenProcess failed: {}",
+                    last_error()
+                )));
+            }
+            Ok(Self { handle })
+        }
+
+        /// The raw OS handle.
+        pub fn handle(&self) -> HANDLE {
+            self.handle
+        }
+    }
+
+    impl Drop for WindowsProcess {
+        fn drop(&mut self) {
+            // SAFETY: handle is a valid open handle owned by this struct.
+            unsafe {
+                CloseHandle(self.handle);
+            }
         }
     }
 
     impl ProcessMemory for WindowsProcess {
-        fn read(&self, _address: u64, _len: usize) -> Result<Vec<u8>, MemoryError> {
-            Err(MemoryError::Os("windows backend not yet implemented".into()))
+        fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, MemoryError> {
+            let mut buf = vec![0u8; len];
+            let mut read: usize = 0;
+            // SAFETY: buf is valid for `len` bytes; address is a remote VA.
+            let ok = unsafe {
+                ReadProcessMemory(
+                    self.handle,
+                    address as *const core::ffi::c_void,
+                    buf.as_mut_ptr() as *mut core::ffi::c_void,
+                    len,
+                    &mut read,
+                )
+            };
+            if ok == 0 {
+                return Err(MemoryError::Os(format!(
+                    "ReadProcessMemory failed: {}",
+                    last_error()
+                )));
+            }
+            if read != len {
+                return Err(MemoryError::PartialRead { address, len, got: read });
+            }
+            Ok(buf)
         }
-        fn write(&self, _address: u64, _data: &[u8]) -> Result<usize, MemoryError> {
-            Err(MemoryError::Os("windows backend not yet implemented".into()))
+
+        fn write(&self, address: u64, data: &[u8]) -> Result<usize, MemoryError> {
+            let mut written: usize = 0;
+            // SAFETY: data is valid for its length; address is a remote VA.
+            let ok = unsafe {
+                WriteProcessMemory(
+                    self.handle,
+                    address as *mut core::ffi::c_void,
+                    data.as_ptr() as *const core::ffi::c_void,
+                    data.len(),
+                    &mut written,
+                )
+            };
+            if ok == 0 {
+                return Err(MemoryError::Os(format!(
+                    "WriteProcessMemory failed: {}",
+                    last_error()
+                )));
+            }
+            Ok(written)
         }
+
         fn regions(&self) -> Result<Vec<Region>, MemoryError> {
-            Err(MemoryError::Os("windows backend not yet implemented".into()))
+            let mut out = Vec::new();
+            let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+            let mut addr: usize = 0;
+            loop {
+                // SAFETY: mbi is valid; addr walks the address space.
+                let n = unsafe {
+                    VirtualQueryEx(
+                        self.handle,
+                        addr as *const core::ffi::c_void,
+                        &mut mbi,
+                        core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                    )
+                };
+                if n == 0 {
+                    // Either we've walked off the end of the address space or
+                    // an error occurred. If addr is 0 we couldn't even start.
+                    if addr == 0 {
+                        return Err(MemoryError::Os(format!(
+                            "VirtualQueryEx failed: {}",
+                            last_error()
+                        )));
+                    }
+                    break;
+                }
+                let start = mbi.BaseAddress as u64;
+                let end = start + mbi.RegionSize as u64;
+                // Skip free regions; only report committed memory.
+                if mbi.State == MEM_COMMIT {
+                    let protect = mbi.Protect;
+                    out.push(Region {
+                        start,
+                        end,
+                        readable: is_readable(protect),
+                        writable: is_writable(protect),
+                        executable: is_executable(protect),
+                        name: region_name(mbi.Type),
+                    });
+                }
+                // Advance to the next region. Guard against overflow / no
+                // progress (a zero-size region would loop forever).
+                if end <= addr as u64 {
+                    break;
+                }
+                addr = end as usize;
+            }
+            Ok(out)
         }
+    }
+
+    /// Human-readable label for a region's allocation type.
+    fn region_name(ty: u32) -> Option<String> {
+        if ty == MEM_IMAGE {
+            Some("image".into())
+        } else if ty == MEM_MAPPED {
+            Some("mapped".into())
+        } else {
+            Some("private".into())
+        }
+    }
+
+    fn is_readable(protect: u32) -> bool {
+        matches!(
+            protect & 0xFF,
+            PAGE_READONLY
+                | PAGE_READWRITE
+                | PAGE_WRITECOPY
+                | PAGE_EXECUTE_READ
+                | PAGE_EXECUTE_READWRITE
+                | PAGE_EXECUTE_WRITECOPY
+        )
+    }
+
+    fn is_writable(protect: u32) -> bool {
+        matches!(
+            protect & 0xFF,
+            PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
+        )
+    }
+
+    fn is_executable(protect: u32) -> bool {
+        matches!(
+            protect & 0xFF,
+            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
+        )
+    }
+
+    fn last_error() -> String {
+        // SAFETY: GetLastError takes no arguments.
+        let code = unsafe { GetLastError() };
+        format!("Win32 error {code}")
     }
 }
 

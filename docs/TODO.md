@@ -14,23 +14,26 @@ the last. Check off as completed. This is the "how do I start building" guide.
 
 ## Phase 0 — Make the current workspace compile cleanly
 
-- [ ] **T-000 [P0] Fix `no_mangle` under edition 2024** (`crate: trainlab-inject`)
+- [x] **T-000 [P0] Fix `no_mangle` under edition 2024** (`crate: trainlab-inject`)
   - `crates/trainlab-inject/src/lib.rs:243`: change `#[no_mangle]` to
     `#[unsafe(no_mangle)]` (edition 2024 requires the `unsafe(...)` wrapper).
   - Verify with `cargo build` and `cargo test`.
-- [ ] **T-001 [P0] `git init` + commit the current scaffolding**
+- [x] **T-001 [P0] `git init` + commit the current scaffolding**
   - The workspace isn't a git repo yet (only referenced in `Cargo.toml`).
   - Add a `.gitignore` for `/target` and commit the working base so changes are
     tracked from here on.
 
 ## Phase 1 — Solidify the memory core (foundation)
 
-- [ ] **T-010 [P0] Implement the Windows memory backend** (`crate: trainlab-core`)
+- [x] **T-010 [P0] Implement the Windows memory backend** (`crate: trainlab-core`)
   - `trainlab-core::memory::windows`: implement `ReadProcessMemory`,
     `WriteProcessMemory`, and region enumeration via `VirtualQuery` (using
     `windows-sys`).
   - **Why first:** you'll do most real work against a Windows-under-Wine game;
     the Linux backend is done but the Windows one is a stub.
+  - Implemented in `memory.rs` (`WindowsProcess` with `open(pid)`, read/write,
+    and `VirtualQueryEx` region enumeration). Cross-compiles to
+    `x86_64-pc-windows-gnu`; runtime validation still needs Wine/Windows.
 - [ ] **T-011 [P0] Real value-scan algorithm with narrowing** (`crate: trainlab-core`)
   - Add a `scan` module supporting first-scan + refine by
     `changed/unchanged/increased/decreased` and exact/range value.
@@ -48,12 +51,15 @@ the last. Check off as completed. This is the "how do I start building" guide.
   (`crate: trainlab-scanner`)
   - Make scan/next actually work end-to-end so you can do the scanmem workflow
     from the CLI.
-- [ ] **T-015 [P0] Mark `trainlab-scanner` as Linux-only** (`crate: trainlab-scanner`)
+- [x] **T-015 [P0] Mark `trainlab-scanner` as Linux-only** (`crate: trainlab-scanner`)
   - The scanner imports `LinuxProcess` (a `#[cfg(unix)]` type) and reads
     `/proc/pid/mem`; it must not be built for the Windows target.
   - Add a `#[cfg(unix)]` guard on the binary or document that it's Linux-only
     (see `docs/BUILDING.md`). Prevents `cargo build --target
     x86_64-pc-windows-gnu` (whole workspace) from failing.
+  - Done: `#[cfg(unix)]` guards on all Linux-only items; a `#[cfg(not(unix))]`
+    stub `main` reports the tool is Linux-only. Whole-workspace Windows build
+    is now green.
 
 ## Phase 2 — First usable milestone: LLM-driven recon
 
