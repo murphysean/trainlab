@@ -60,19 +60,27 @@ APIs work.
 **Caveat:** Wine's heap emulation isn't always 1:1; some allocations may be
 merged/untagged. The high-level win (scan only private heap) still holds.
 
-## D6: Windows DLL + STL, with proxy-DLL as the load mechanism to evaluate
+## D6: Load the DLL via `CreateRemoteThread` + `LoadLibrary`
 
-**Decision:** Build a Windows trainer DLL that runs under Wine (via STL fork),
-and evaluate **proxy DLL (`WINEDLLOVERRIDES`)** vs **injection
-(`CreateRemoteThread`+`LoadLibrary`)** as the load mechanism.
+**Decision:** The Windows `trainlab-gui` injects the Agent DLL into the game
+process using **`CreateRemoteThread` + `LoadLibrary`** (the classic Windows
+injection primitive), then manages it over the process-to-process channel.
 
-**Why:** A Windows DLL running in the same Wine prefix can use native Windows
-APIs against the game. Proxy DLL needs no injection tooling (game loads it
-naturally) and is very portable.
+**Why:** This is the most direct and standard mechanism. The GUI (a Windows
+binary running under Wine via STL) can call `OpenProcess` +
+`CreateRemoteThread` + `LoadLibrary` against the game as a normal Windows
+process. It gives full control over when the DLL loads and lets the GUI manage
+the DLL's lifecycle (inject, ping, unload) explicitly.
+
+**Why not proxy DLL (`WINEDLLOVERRIDES`):** It loads the DLL automatically when
+the game starts, which is less explicit and gives the GUI less control over
+injection timing and lifecycle. It's a viable fallback but not the primary path.
 
 **Why not Vulkan layer:** Runs on the Linux side of the Wine boundary; can't
-natively touch the game's Windows memory without bridging. Proxy DLL is simpler
-and more direct for hooking a Windows game's memory.
+natively touch the game's Windows memory without bridging. Rejected.
+
+**Why not Linux `/proc/pid/mem` stub write:** Works but is more fragile and
+doesn't give the clean Windows-native lifecycle that `CreateRemoteThread` does.
 
 ## D7: The Trainer holds session state, not the LLM
 
@@ -100,11 +108,24 @@ native x86 caves.
 level. Urbek is a great first target to prove the framework against a real,
 tractable game.
 
+## D10: `trainlab-gui` is the central hub (injector + MCP server + proxy)
+
+**Decision:** The Windows `trainlab-gui` is the single control process. It:
+1. **Injects** the Agent DLL into the game via `CreateRemoteThread`+`LoadLibrary`.
+2. **Manages** the DLL over the process-to-process channel (the fast channel).
+3. **Hosts a full HTTP server** offering an MCP (`rmcp`) connection with tools
+   for all commands.
+4. **Proxies** MCP tool calls to the game DLL over the fast channel.
+
+**Why:** This makes the GUI the one place that owns both the low-level channel
+(to the DLL) and the reasoning channel (to the LLM). It's the enforcement point
+for safety (undo, region validation, confirmation) and the holder of session
+state (markers, undo log). The LLM talks only to the GUI; the GUI talks to the
+DLL.
+
 ## Open decisions (not yet made)
 
 - **OD1:** Fast channel — keep TCP or move to shared memory for hot loops?
 - **OD2:** Scripting layer — add Lua later if iteration speed demands it?
-- **OD3:** Load mechanism — proxy DLL vs `CreateRemoteThread` injection vs Linux
-  `/proc/pid/mem` stub write? (D6 lists these to evaluate.)
 - **OD4:** Remote connectivity — how to expose MCP for Steam Deck (bind address,
   SSH tunnel, Tailscale)?

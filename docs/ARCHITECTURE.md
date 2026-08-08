@@ -12,7 +12,8 @@ distills the design conversations into a concrete plan. It describes the
   LLM / agent
      │   MCP (HTTP, 127.0.0.1:PORT) — reasoning, orchestration, dialog
      ▼
-  Trainer (Rust, Windows, runs under Wine via STL)
+  trainlab-gui (Rust, Windows, runs under Wine via STL)  ← the central hub
+     │   injects the DLL via CreateRemoteThread + LoadLibrary
      │   fast channel — shared memory / TCP — low-level memory ops
      ▼
   Agent DLL (Rust cdylib, injected into the game process)
@@ -20,6 +21,10 @@ distills the design conversations into a concrete plan. It describes the
      ▼
   Game (Windows .exe under Proton/Wine)
 ```
+
+`trainlab-gui` is the **single control process**. It injects the DLL, manages it
+over the fast channel, hosts the MCP HTTP server, and proxies MCP tool calls to
+the DLL. It is the enforcement point for safety and the holder of session state.
 
 Rules that must never be violated:
 
@@ -166,29 +171,36 @@ read-only/executable code.** This is the "don't scan gigs of GPU assets" fix.
 
 ## 6. Injection / loading the DLL
 
-### The reality under Proton
+### The chosen mechanism: `CreateRemoteThread` + `LoadLibrary`
 
-The game is a Windows PE inside Wine. To get a Windows DLL in:
+The Windows `trainlab-gui` injects the Agent DLL into the game process using the
+classic Windows injection primitive:
 
-- **Trainer also runs under Wine** (via STL fork/inject, same prefix). Then it
-  can inject the DLL the normal Windows way (`CreateRemoteThread` +
-  `LoadLibrary`).
-- **Or** the Linux side writes the injection stub into `/proc/pid/mem` (the
-  Sins 2 approach) — the DLL is still Windows, but the *mechanism* is Linux.
+1. `OpenProcess` the game (with `PROCESS_ALL_ACCESS`).
+2. `VirtualAllocEx` a region in the game for the DLL path string.
+3. `WriteProcessMemory` the DLL path into that region.
+4. `CreateRemoteThread` a thread in the game that runs `LoadLibraryW(path)`.
+5. `WaitForSingleObject` for the thread; the DLL's `DllMain` runs and starts its
+   listener.
+
+The GUI then manages the DLL over the fast channel (ping, inject, unload).
 
 ### STL integration
 
-STL (Steam Tinker Launch) can **fork** the trainer alongside the game in the
-same Wine prefix, or **inject** it after the game loads. Both keep the trainer
-in the same Wine environment as the game, so it can use Windows APIs against it
+STL (Steam Tinker Launch) can **fork** the GUI alongside the game in the same
+Wine prefix, or **inject** it after the game loads. Both keep the GUI in the
+same Wine environment as the game, so it can use Windows APIs against it
 naturally. This is the distribution path for Steam machine / Steam Deck.
 
-### Proxy DLL alternative
+### Rejected alternatives
 
-`WINEDLLOVERRIDES` can force a game to load a custom DLL *instead of* one it
-would normally load. This gets your code in with **no injection tooling at all**
-— the game loads your DLL naturally. This is the classic "proxy DLL" trainer
-technique and is very portable. Worth evaluating against injection.
+- **Proxy DLL (`WINEDLLOVERRIDES`)** — loads the DLL automatically at game
+  start; less explicit control over injection timing/lifecycle. Viable fallback,
+  not primary.
+- **Vulkan layer** — runs on the Linux side of the Wine boundary; can't natively
+  touch the game's Windows memory without bridging.
+- **Linux `/proc/pid/mem` stub write** — works but more fragile; no clean
+  Windows-native lifecycle.
 
 ## 7. Mono support (for games like Urbek)
 

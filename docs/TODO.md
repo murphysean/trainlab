@@ -54,23 +54,27 @@ the last. Check off as completed. This is the "how do I start building" guide.
 This is the "wow, it works" point: an agent connects and does live recon on a
 game.
 
-- [ ] **T-020 [P0] New crate `trainlab-mcp`** — MCP server skeleton
-  - Use `rmcp`. Host an MCP server over HTTP (streamable HTTP/SSE) on
-    `127.0.0.1` with a configurable port.
+- [ ] **T-020 [P0] MCP server in `trainlab-gui`** — MCP server skeleton
+  - Use `rmcp`. The GUI hosts an MCP server over HTTP (streamable HTTP/SSE) on
+    `127.0.0.1` with a configurable port. (Decision D10 — the GUI is the hub.)
   - Expose a "ping" / "hello" tool and verify an agent (e.g., goose) can connect
     and call it.
-- [ ] **T-021 [P0] Expose read-only recon tools over MCP**
+- [ ] **T-021 [P0] Expose read-only recon tools over MCP, proxied to the DLL**
   - `list_regions`, `scan`, `aob_scan`, `read`, `pointer_chase`. These are
     read-only and safe for an agent to call freely.
-- [ ] **T-022 [P0] Session state: markers + undo log** (`crate: trainlab-mcp` + core)
+  - The GUI **proxies** each MCP tool call to the game DLL over the fast channel
+    (D10). The GUI is the translation layer between MCP tool calls and
+    `trainlab-core::protocol::Request` messages.
+- [ ] **T-022 [P0] Session state: markers + undo log** (`crate: trainlab-gui` + core)
   - `set_marker`/`get_markers` so the agent persists labeled addresses across
     turns (see D7).
   - Undo log structure (store original bytes for every mutation) — even if no
     mutating tools exist yet, build the structure now.
 - [ ] **T-023 [P0] Verify against a real target game**
-  - Get the DLL loaded into a game under Wine, run the MCP server, and have an
-    agent do the full recon loop: find a value, chase its pointer, dump a
-    struct, propose a patch. (Urbek is a good first target — Mono.)
+  - Get the DLL loaded into a game under Wine (T-040), run the MCP server in the
+    GUI, and have an agent do the full recon loop: find a value, chase its
+    pointer, dump a struct, propose a patch. (Urbek is a good first target —
+    Mono.)
 
 ## Phase 3 — Code caves & hooks
 
@@ -93,15 +97,16 @@ game.
 
 ## Phase 4 — Windows injection / load
 
-- [ ] **T-040 [P1] Load the DLL into a game under Wine**
-  - Implement and evaluate proxy-DLL (`WINEDLLOVERRIDES`) vs `CreateRemoteThread`
-    injection vs Linux `/proc/pid/mem` stub write (see D6 / OD3). Pick one to
-    standardize on.
+- [ ] **T-040 [P0] `CreateRemoteThread` + `LoadLibrary` injection** (`crate: trainlab-gui`)
+  - Implement the injection primitive in the GUI: `OpenProcess` →
+    `VirtualAllocEx` → `WriteProcessMemory` → `CreateRemoteThread` →
+    `WaitForSingleObject`. (Decision D6 — this is the chosen mechanism.)
+  - The GUI injects the DLL, then pings it over the fast channel to confirm.
 - [ ] **T-041 [P1] Windows allocate/free for caves** (`crate: trainlab-inject`)
   - Implement the Windows `allocate`/`free` stubs (`VirtualAlloc`/`VirtualFree`)
     so caves can be placed on the Windows path.
 - [ ] **T-042 [P2] STL integration** — document/script the fork+inject flow so the
-  trainer launches with the game on Steam machine / Steam Deck.
+  GUI launches with the game on Steam machine / Steam Deck.
 
 ## Phase 5 — Mono support (Urbek-class games)
 

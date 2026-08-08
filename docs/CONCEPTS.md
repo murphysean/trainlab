@@ -99,12 +99,13 @@ logic directly instead of reversing assembly.
   (the game is a PE, not an ELF).
 - **Wine-side DLL injection** — Windows DLL + `CreateRemoteThread`+`LoadLibrary`,
   done from within Wine. Standard path. Requires a Windows trainer under Wine.
+  **This is the chosen mechanism for `trainlab` (D6).**
 - **Proxy DLL (`WINEDLLOVERRIDES`)** — replace a DLL the game loads with yours.
-  No injection tooling; the game loads your DLL naturally. Very portable.
+  No injection tooling; the game loads your DLL naturally. Very portable. Viable
+  fallback, not primary.
 - **Vulkan layer** — gets loaded into the process (Proton renders via Vulkan),
   but runs on the Linux side of the Wine boundary; can't natively touch the
-  game's Windows memory without bridging. Generally worse than a proxy DLL for
-  hooking a Windows game's memory.
+  game's Windows memory without bridging. Rejected.
 - **External `/proc/pid/mem`** — no injection at all; the Sins 2 approach. Fast
   on your own machine, but offsets are per-game-version and harder to distribute.
 

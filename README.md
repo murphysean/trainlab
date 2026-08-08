@@ -25,7 +25,9 @@ framework that:
 - handles the **Proton/Wine** reality (Windows DLL inside a Wine prefix),
 - scopes memory scans intelligently (heap/VM regions, not whole address space),
 - exposes a clean **C ABI** for a **Rust** trainer DLL,
-- and lets an **LLM/agent drive the reversing loop** over **MCP**.
+- and lets an **LLM/agent drive the reversing loop** over **MCP**,
+- with `trainlab-gui` as the central hub that injects the DLL, manages it, and
+  proxies MCP tool calls to it.
 
 ## The core architecture
 
@@ -35,16 +37,17 @@ framework that:
 │   ┌────────────────────┐ │
 │   │ Agent DLL (Rust)   │ │   in-process: scan, AOB, cave, hooks
 │   │  cdylib, loaded    │ │
-│   │  via STL/loader    │ │
+│   │  via CreateRemote  │ │
+│   │  Thread+LoadLibrary│ │
 │   └─────────┬──────────┘ │
 └─────────────┼────────────┘
-              │ shared memory / TCP (fast, low-level)
+              │ fast channel: shared memory / TCP (low-level)
               ▼
 ┌──────────────────────────┐
-│  Trainer (Rust, Windows) │   hosts the MCP server
-│  under Wine (STL)        │
-│   ┌────────────────────┐ │
-│   │ MCP server (HTTP)  │ │   exposes scan/aob/read/cave tools
+│  trainlab-gui (Rust,    │   the central hub: injects the DLL,
+│  Windows, under Wine)   │   manages it, hosts the MCP server,
+│   ┌────────────────────┐ │   proxies MCP calls to the DLL
+│   │ MCP server (HTTP) │ │   exposes scan/aob/read/cave tools
 │   └─────────┬──────────┘ │
 └─────────────┼────────────┘
               │ MCP over HTTP (slow, reasoning)
@@ -69,7 +72,7 @@ and lets the trainer enforce safety (undo, region validation, confirmation gates
 | `trainlab-core` | Shared protocol (bincode + TCP framing), memory primitives, AOB scanning, process discovery |
 | `trainlab-inject` | `cdylib` (`.dll`/`.so`) loaded into the game; serves memory requests over TCP |
 | `trainlab-scanner` | CLI memory-hunting tool (`trainlab-scan`) |
-| `trainlab-gui` | egui control panel for a training session |
+| `trainlab-gui` | **The central hub**: injects the DLL (`CreateRemoteThread`+`LoadLibrary`), manages it over the fast channel, hosts the MCP HTTP server, and proxies MCP tool calls to the DLL |
 
 ## Quickstart
 
