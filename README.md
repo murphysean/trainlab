@@ -83,15 +83,26 @@ cargo run -p trainlab-scanner -- regions <pid>     # list memory regions
 cargo run -p trainlab-scanner -- aob <pid> "48 8B 05 ?? ?? ?? ??"   # AOB scan
 ```
 
-> **Note:** The workspace currently only compiles on Linux for the Linux paths
-> (the `windows` memory backend is a stub, and `trainlab-inject`'s `no_mangle`
-> needs `unsafe(...)` under edition 2024 — see `docs/TODO.md`).
+## Cross-compiling to Windows
+
+The GUI and inject DLL cross-compile to Windows from Linux (no Docker needed):
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+sudo pacman -S mingw-w64-gcc
+cargo build --target x86_64-pc-windows-gnu -p trainlab-gui
+cargo build --target x86_64-pc-windows-gnu -p trainlab-inject
+```
+
+The scanner is **Linux-only** (it reads `/proc/pid/mem`). See
+[`docs/BUILDING.md`](docs/BUILDING.md) for details.
 
 ## Docs
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — full architecture, data flow, decisions
 - [`docs/CONCEPTS.md`](docs/CONCEPTS.md) — the game-hacking concepts you need (code caves, Mono, Proton/Wine, injection)
 - [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — why each decision was made
+- [`docs/BUILDING.md`](docs/BUILDING.md) — how to build for Linux and Windows (cross-compile)
 - [`docs/TODO.md`](docs/TODO.md) — the build plan, in order
 - [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md) — how an LLM/agent should work on this codebase
 - [`docs/REVERSING_WORKFLOW.md`](docs/REVERSING_WORKFLOW.md) — the end-to-end reversing process this framework enables

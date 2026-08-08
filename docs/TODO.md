@@ -48,6 +48,12 @@ the last. Check off as completed. This is the "how do I start building" guide.
   (`crate: trainlab-scanner`)
   - Make scan/next actually work end-to-end so you can do the scanmem workflow
     from the CLI.
+- [ ] **T-015 [P0] Mark `trainlab-scanner` as Linux-only** (`crate: trainlab-scanner`)
+  - The scanner imports `LinuxProcess` (a `#[cfg(unix)]` type) and reads
+    `/proc/pid/mem`; it must not be built for the Windows target.
+  - Add a `#[cfg(unix)]` guard on the binary or document that it's Linux-only
+    (see `docs/BUILDING.md`). Prevents `cargo build --target
+    x86_64-pc-windows-gnu` (whole workspace) from failing.
 
 ## Phase 2 — First usable milestone: LLM-driven recon
 
