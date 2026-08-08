@@ -1,0 +1,13 @@
+[package]
+name = "trainlab-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared protocol, memory primitives, and AOB scanning for the trainlab workspace."
+
+[dependencies]
+serde.workspace = true
+bincode.workspace = true
+tracing.workspace = true
+libc = "0.2"

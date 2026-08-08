@@ -1,0 +1,16 @@
+[package]
+name = "trainlab-inject"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The injectable .dll/.so that runs inside the game process and serves memory commands."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+trainlab-core = { path = "../trainlab-core" }
+tokio.workspace = true
+tracing.workspace = true
+libc = "0.2"
