@@ -15,6 +15,9 @@ pub mod aob;
 pub mod memory;
 pub mod process;
 pub mod protocol;
+pub mod scan;
+#[cfg(unix)]
+pub mod wine;
 
 /// Re-export the version so other crates can report it consistently.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

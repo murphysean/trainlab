@@ -34,12 +34,16 @@ the last. Check off as completed. This is the "how do I start building" guide.
   - Implemented in `memory.rs` (`WindowsProcess` with `open(pid)`, read/write,
     and `VirtualQueryEx` region enumeration). Cross-compiles to
     `x86_64-pc-windows-gnu`; runtime validation still needs Wine/Windows.
-- [ ] **T-011 [P0] Real value-scan algorithm with narrowing** (`crate: trainlab-core`)
+- [x] **T-011 [P0] Real value-scan algorithm with narrowing** (`crate: trainlab-core`)
   - Add a `scan` module supporting first-scan + refine by
     `changed/unchanged/increased/decreased` and exact/range value.
   - Needs a **persistent match set** (the current `trainlab-scanner next` is a
     stub precisely because there's no persistent set).
   - Types: at minimum `i32/u32/f32/f64`; add more later.
+  - Done: `trainlab_core::scan` with `Scan` (persistent `(addr, value)` match
+    set), `ValueType` (i32/u32/f32/f64), `ScanOp` (Exact/Range/Changed/
+    Unchanged/Increased/Decreased), `first_scan` + `refine`. Unit-tested with a
+    mock process.
 - [ ] **T-012 [P0] Region scoping / classification** (`crate: trainlab-core`)
   - Add helpers to classify regions: private heap vs `MEM_IMAGE`/`MEM_MAPPED` vs
     code. Expose a "scan these regions" filter.
@@ -47,6 +51,14 @@ the last. Check off as completed. This is the "how do I start building" guide.
     `VirtualQuery` (see D5).
 - [ ] **T-013 [P1] Pointer-chase primitive** (`crate: trainlab-core`)
   - `pointer_chase(base, offsets: &[u64]) -> Vec<u64>` reporting each hop.
+- [x] **T-016 [P0] Wine-aware region discovery + tagging (Linux side)** (`crate: trainlab-core`)
+  - Detect whether a PID is part of a Wine/Proton tree (walk `/proc` ancestry
+    for `wineserver`/`wine`).
+  - Tag `/proc/pid/maps` regions as heap/stack/image/mapped/other so scans can
+    be scoped to private heap (the Linux half of D5).
+  - Expose via `trainlab-scanner wine list|check|regions`.
+  - The Windows-API half of D5 (`GetProcessHeaps`/`HeapWalk`/`VirtualQuery`
+    from the injected DLL) is a later phase.
 - [ ] **T-014 [P0] Wire `trainlab-scanner next` to the persistent match set**
   (`crate: trainlab-scanner`)
   - Make scan/next actually work end-to-end so you can do the scanmem workflow

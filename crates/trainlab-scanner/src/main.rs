@@ -43,11 +43,27 @@ struct Cli {
 
 #[cfg(unix)]
 #[derive(Subcommand)]
+enum WineCmd {
+    /// List processes that are part of a Wine/Proton tree.
+    List,
+    /// Check whether a specific PID is a Wine/Proton process.
+    Check { pid: i32 },
+    /// List a process's memory regions tagged by kind (heap/stack/image/mapped).
+    Regions { pid: i32 },
+}
+
+#[cfg(unix)]
+#[derive(Subcommand)]
 enum Command {
     /// List processes to find the game's PID.
     List,
-    /// List readable memory regions of a process.
+    /// List readable memory regions of a process, tagged by kind.
     Regions { pid: i32 },
+    /// Wine/Proton helpers: detect wine processes and tag regions.
+    Wine {
+        #[command(subcommand)]
+        cmd: WineCmd,
+    },
     /// Scan a process's readable memory for an AOB pattern.
     Aob {
         pid: i32,
@@ -92,7 +108,66 @@ fn main() -> Result<()> {
         Command::Write { pid, address, hex } => cmd_write(pid, &address, &hex),
         Command::Scan { pid, value } => cmd_scan(pid, &value),
         Command::Next { pid, value } => cmd_next(pid, &value),
+        Command::Wine { cmd } => match cmd {
+            WineCmd::List => cmd_wine_list(),
+            WineCmd::Check { pid } => cmd_wine_check(pid),
+            WineCmd::Regions { pid } => cmd_wine_regions(pid),
+        },
     }
+}
+
+#[cfg(unix)]
+fn cmd_wine_list() -> Result<()> {
+    use trainlab_core::wine::is_wine_process;
+    println!("{:<8}  {:<24}  {}", "PID", "NAME", "WINE?");
+    for p in process::list() {
+        let wine = if is_wine_process(p.pid) { "yes" } else { "" };
+        println!("{:<8}  {:<24}  {}", p.pid, p.name, wine);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn cmd_wine_check(pid: i32) -> Result<()> {
+    use trainlab_core::wine::is_wine_process;
+    let wine = is_wine_process(pid);
+    println!(
+        "PID {pid} is {}a Wine/Proton process",
+        if wine { "" } else { "NOT " }
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn cmd_wine_regions(pid: i32) -> Result<()> {
+    use trainlab_core::wine::{regions_of_kind, tag_regions, RegionKind};
+    let tagged = tag_regions(pid).context("failed to read /proc/pid/maps")?;
+    println!("{:<18} {:<18}  {:<4}  {:<8}  {}", "START", "END", "PERMS", "KIND", "NAME");
+    for t in &tagged {
+        if !t.region.readable {
+            continue;
+        }
+        let perms = format!(
+            "{}{}{}",
+            if t.region.readable { "r" } else { "-" },
+            if t.region.writable { "w" } else { "-" },
+            if t.region.executable { "x" } else { "-" }
+        );
+        println!(
+            "0x{:016x} 0x{:016x}  {:<4}  {:<8}  {}",
+            t.region.start,
+            t.region.end,
+            perms,
+            t.kind.label(),
+            t.region.name.as_deref().unwrap_or("")
+        );
+    }
+    // Summary of scan-worthy (heap) regions.
+    let heap_total: u64 = regions_of_kind(&tagged, RegionKind::Heap)
+        .map(|t| t.region.len())
+        .sum();
+    eprintln!("{} heap region(s), {heap_total} bytes total", regions_of_kind(&tagged, RegionKind::Heap).count());
+    Ok(())
 }
 
 #[cfg(unix)]
