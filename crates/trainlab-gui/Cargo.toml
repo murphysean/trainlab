@@ -1,0 +1,37 @@
+[package]
+name = "trainlab-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GUI app that connects to the injected DLL and sends memory commands."
+
+[dependencies]
+trainlab-core = { path = "../trainlab-core" }
+eframe.workspace = true
+egui.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+rmcp = { workspace = true }
+axum = { workspace = true }
+tokio-util = "0.7.19"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = { workspace = true }
+schemars = { version = "1.0", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+] }
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+serde_json = "1.0.151"

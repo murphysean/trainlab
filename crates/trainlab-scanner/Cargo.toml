@@ -1,0 +1,18 @@
+[package]
+name = "trainlab-scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI memory hunting/scanning tool for digging into a game process."
+
+[[bin]]
+name = "trainlab-scan"
+path = "src/main.rs"
+
+[dependencies]
+trainlab-core = { path = "../trainlab-core" }
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# trainlab runtime artifacts (cheat profiles are generated at runtime)
+/cheats/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
+
+# Local goose state
+/.goose/

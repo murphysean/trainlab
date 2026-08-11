@@ -1,0 +1,22 @@
+[package]
+name = "trainlab-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared protocol, memory primitives, and AOB scanning for the trainlab workspace."
+
+[dependencies]
+serde.workspace = true
+bincode.workspace = true
+tracing.workspace = true
+libc = "0.2"
+iced-x86.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }

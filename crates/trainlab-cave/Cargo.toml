@@ -1,0 +1,10 @@
+[package]
+name = "trainlab-cave"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Code cave shellcode emission and installation for trainlab."
+
+[dependencies]
+trainlab-core = { path = "../trainlab-core" }
