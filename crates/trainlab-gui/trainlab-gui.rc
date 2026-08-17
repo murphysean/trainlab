@@ -1,0 +1,5 @@
+// trainlab-gui.rc
+// Embed the application manifest as an RT_MANIFEST resource so the trainer
+// requests elevation (requireAdministrator). This lets it OpenProcess games
+// that run elevated (e.g. Helldivers runs as admin).
+1 24 "trainlab-gui.manifest"
