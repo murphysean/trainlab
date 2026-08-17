@@ -5,10 +5,12 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- Run elevated so we can OpenProcess elevated games (e.g. Helldivers
-             which runs as administrator). Without this, a non-elevated trainer
-             gets access denied reading the game's memory. -->
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <!-- Run at the same integrity level as the launching process (no
+             elevation). Elevation is not needed: games like Helldivers run at
+             Medium integrity, and an elevated trainer can cause a UAC prompt
+             that can't be shown under Wine/Proton in Steam Deck Game Mode,
+             which makes the trainer hang or crash on launch. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>
