@@ -1,3 +1,7 @@
+// Produce a GUI-subsystem Windows PE so no console window is spawned when the
+// trainer runs under Wine/Proton (a console-subsystem exe gets a conhost window).
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 //! # trainlab-gui
 //!
 //! A desktop GUI (built with `egui`/`eframe`) that connects to the injected

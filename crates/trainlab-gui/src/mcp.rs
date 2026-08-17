@@ -2305,9 +2305,18 @@ pub async fn serve(
     };
 
     let ct = tokio_util::sync::CancellationToken::new();
-    let config = StreamableHttpServerConfig::default()
+    let mut config = StreamableHttpServerConfig::default()
         .with_sse_keep_alive(Some(std::time::Duration::from_secs(30)))
         .with_cancellation_token(ct.child_token());
+    // The server binds to 0.0.0.0 so a laptop/desktop can reach it on the LAN
+    // (see LAUNCHING.md). rmcp's default `allowed_hosts` only permits loopback,
+    // which would reject every remote Host header (the client sends the LAN IP,
+    // which we can't know in advance). When binding to all interfaces, disable
+    // the host check so remote MCP clients can connect. Loopback-only binds keep
+    // the default allowlist.
+    if host == "0.0.0.0" {
+        config = config.disable_allowed_hosts();
+    }
 
     // Shared session state (game pid, markers, undo log, scan) across all MCP
     // sessions. The GUI writes `game_pid`; scan-family tools open it here.
