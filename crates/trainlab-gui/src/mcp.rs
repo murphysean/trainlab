@@ -23,6 +23,14 @@ use crate::session::{CheatKind, PendingKind, SharedSession};
 const DLL_HOST: &str = "127.0.0.1";
 const DLL_PORT: u16 = 31337;
 
+/// Format the last Windows error code for diagnostics.
+#[cfg(windows)]
+fn last_error() -> String {
+    // SAFETY: GetLastError takes no arguments.
+    let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+    format!("Win32 error {code}")
+}
+
 /// Open the game process externally (via `WindowsProcess::open`) so
 /// scan-family tools can read memory gracefully — a fault while scanning a big
 /// heap from a *separate* process is a caught error, not a crash (which is why
@@ -1046,6 +1054,137 @@ impl TrainlabMcpServer {
                 ]))
             }
             Err(e) => Err(err(format!("read failed: {e}"))),
+        }
+    }
+
+    /// Report the Windows integrity level of the game process and the trainer
+    /// itself, so you can tell whether the game runs elevated (admin) and
+    /// whether the trainer matches. Levels: 0x1000=Untrusted, 0x2000=Low,
+    /// 0x3000=Medium, 0x4000=High (elevated/admin), 0x5000=System.
+    #[tool(description = "Report the Windows integrity level of the game process and the trainer itself (e.g. Medium vs High/elevated). Use to diagnose access-denied (error 5) when reading game memory.")]
+    fn check_integrity(&self) -> Result<CallToolResult, ErrorData> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::Security::{
+                GetTokenInformation, TokenIntegrityLevel, TOKEN_QUERY,
+            };
+            use windows_sys::Win32::System::Threading::{
+                GetCurrentProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION,
+            };
+
+            fn integrity_of(process: windows_sys::Win32::Foundation::HANDLE) -> Result<u32, String> {
+                let mut token: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+                // SAFETY: valid process handle and token pointer.
+                let ok = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+                if ok == 0 {
+                    return Err(format!("OpenProcessToken failed: {}", last_error()));
+                }
+                // Query the token integrity level. First call with null buffer to get size.
+                let mut size: u32 = 0;
+                // SAFETY: querying size with null buffer.
+                let _ = unsafe {
+                    GetTokenInformation(
+                        token,
+                        TokenIntegrityLevel,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut size,
+                    )
+                };
+                let mut buf = vec![0u8; size as usize];
+                // SAFETY: valid buffer of the reported size.
+                let ok = unsafe {
+                    GetTokenInformation(
+                        token,
+                        TokenIntegrityLevel,
+                        buf.as_mut_ptr() as *mut _,
+                        size,
+                        &mut size,
+                    )
+                };
+                // SAFETY: token handle.
+                unsafe { CloseHandle(token) };
+                if ok == 0 {
+                    return Err(format!("GetTokenInformation failed: {}", last_error()));
+                }
+                // The TOKEN_MANDATORY_LABEL has a SID; the integrity level is the
+                // last sub-authority of that SID.
+                // SAFETY: buf holds a TOKEN_MANDATORY_LABEL whose Label is a SID.
+                let label = buf.as_ptr() as *const windows_sys::Win32::Security::TOKEN_MANDATORY_LABEL;
+                let sid = unsafe { (*label).Label.Sid };
+                // SAFETY: sid is a valid SID pointer.
+                let count = unsafe { windows_sys::Win32::Security::GetSidSubAuthorityCount(sid) };
+                // SAFETY: count is a valid pointer to the sub-authority count.
+                let n = unsafe { *count } as u32;
+                // SAFETY: index n-1 is the last sub-authority.
+                let sub = unsafe { windows_sys::Win32::Security::GetSidSubAuthority(sid, n - 1) };
+                // SAFETY: sub is a valid pointer to the integrity value.
+                Ok(unsafe { *sub })
+            }
+
+            let game = {
+                let pid = {
+                    let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                    s.game_pid()
+                };
+                match pid {
+                    Some(pid) => {
+                        // SAFETY: OpenProcess with query access on a valid pid.
+                        let h = unsafe {
+                            windows_sys::Win32::System::Threading::OpenProcess(
+                                PROCESS_QUERY_INFORMATION,
+                                0,
+                                pid,
+                            )
+                        };
+                        if h.is_null() {
+                            format!("(could not open game pid {pid}: {})", last_error())
+                        } else {
+                            let r = integrity_of(h);
+                            // SAFETY: valid handle.
+                            unsafe { CloseHandle(h) };
+                            match r {
+                                Ok(v) => format!("0x{v:x}"),
+                                Err(e) => format!("(error: {e})"),
+                            }
+                        }
+                    }
+                    None => "(no game attached)".to_string(),
+                }
+            };
+
+            // SAFETY: GetCurrentProcess returns a pseudo-handle (no close needed).
+            let self_h = unsafe { GetCurrentProcess() };
+            let trainer = match integrity_of(self_h) {
+                Ok(v) => format!("0x{v:x}"),
+                Err(e) => format!("(error: {e})"),
+            };
+
+            let level_name = |v: &str| -> String {
+                match v {
+                    "0x1000" => "Untrusted".to_string(),
+                    "0x2000" => "Low".to_string(),
+                    "0x3000" => "Medium".to_string(),
+                    "0x4000" => "High (elevated/admin)".to_string(),
+                    "0x5000" => "System".to_string(),
+                    _ => "unknown".to_string(),
+                }
+            };
+
+            Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                format!(
+                    "game integrity: {} ({})\ntrainer integrity: {} ({})",
+                    game,
+                    level_name(&game),
+                    trainer,
+                    level_name(&trainer),
+                ),
+            )]))
+        }
+        #[cfg(not(windows))]
+        {
+            Err(err("check_integrity requires the Windows GUI"))
         }
     }
 
