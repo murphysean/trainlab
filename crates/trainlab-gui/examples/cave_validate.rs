@@ -34,6 +34,10 @@
 //!               fields (types: i8/u8/i16/u16/i32/u32/i64/u64/f32/f64/ptr/cstr/bytes).
 //!   cave <target> [hook=trampoline|override] [payload-hex] [confirm]
 //!               - stage a cave install at a target.
+//!   capture <target> [reg=rcx] [value_type=ptr] [capacity=32] [one_shot=true]
+//!               - arm a passive, non-stalling register capture at a code site.
+//!   readcaptures <id> - read back the captured register values for a capture.
+//!   uninstallcapture <id> - restore the original bytes + free the scratch ring.
 //!   pending     - list staged (unconfirmed) mutations.
 //!   confirm <id> - apply a staged mutation (human gate).
 //!   reject <id> - discard a staged mutation.
@@ -460,6 +464,42 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
                 do_confirm,
             )
             .await?;
+        }
+        "capture" => {
+            // capture <target> [reg] [value_type] [capacity] [one_shot]
+            let target = std::env::args().nth(2).expect("target arg");
+            let reg = std::env::args().nth(3).unwrap_or_else(|| "rcx".into());
+            let value_type = std::env::args().nth(4).unwrap_or_else(|| "ptr".into());
+            let capacity: usize = std::env::args().nth(5).map(|s| s.parse().unwrap_or(32)).unwrap_or(32);
+            let one_shot = std::env::args().nth(6).map(|s| s == "true").unwrap_or(true);
+            let r = client
+                .call_tool(CallToolRequestParams::new("capture_reg").with_arguments(args(&[
+                    ("target", serde_json::json!(target)),
+                    ("reg", serde_json::json!(reg)),
+                    ("value_type", serde_json::json!(value_type)),
+                    ("capacity", serde_json::json!(capacity)),
+                    ("one_shot", serde_json::json!(one_shot)),
+                ])))
+                .await?;
+            println!("{}", extract_text(&r));
+        }
+        "readcaptures" => {
+            let id: u64 = std::env::args().nth(2).expect("capture id arg").parse().expect("numeric id");
+            let r = client
+                .call_tool(CallToolRequestParams::new("read_captures").with_arguments(args(&[
+                    ("id", serde_json::json!(id)),
+                ])))
+                .await?;
+            println!("{}", extract_text(&r));
+        }
+        "uninstallcapture" => {
+            let id: u64 = std::env::args().nth(2).expect("capture id arg").parse().expect("numeric id");
+            let r = client
+                .call_tool(CallToolRequestParams::new("uninstall_capture_reg").with_arguments(args(&[
+                    ("id", serde_json::json!(id)),
+                ])))
+                .await?;
+            println!("{}", extract_text(&r));
         }
         "clear" => {
             let r = client

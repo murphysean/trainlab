@@ -61,11 +61,19 @@ fn game_process(
 
 /// Send a request to the injected DLL over the fast channel and return the
 /// response.
+///
+/// Every socket op carries a timeout so a hung/unresponsive DLL returns an
+/// error instead of blocking the calling MCP tool indefinitely (which wedges
+/// the whole handler). `connect`, `write`, and both `read_exact` phases all
+/// share the same deadline.
 fn call_dll(req: &Request) -> Result<Response, String> {
+    const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let addr = format!("{DLL_HOST}:{DLL_PORT}");
     let mut stream = std::net::TcpStream::connect(&addr)
         .map_err(|e| format!("connect to DLL ({addr}) failed: {e}"))?;
     let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let frame = protocol::encode(req).map_err(|e| format!("encode error: {e}"))?;
     use std::io::Write;
     stream
@@ -328,6 +336,53 @@ fn default_hook_kind() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct UndoArgs {
     /// The undo id returned by `install_cave`/`write`.
+    pub id: u64,
+}
+
+/// Arguments for [`capture_reg`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureRegArgs {
+    /// Code address to hook (decimal or `0x` hex; module-relative like
+    /// "helldivers.exe+0x1b42e9" recommended so it is restart-stable).
+    pub target: String,
+    /// Register to capture when the site executes: rax, rcx, rdx, rbx, rsp,
+    /// rbp, rsi, rdi, r8..r15, or an XMM reg (xmm0..xmm7) for a double/float.
+    /// Default "rcx".
+    #[serde(default = "default_reg")]
+    pub reg: String,
+    /// How to interpret the captured value: "ptr" (raw 64-bit, default),
+    /// "i64", "u64", "f64" (double), or "f32" (float).
+    #[serde(default = "default_value_type")]
+    pub value_type: String,
+    /// Number of captures to keep in the ring buffer (default 32).
+    #[serde(default = "default_capacity")]
+    pub capacity: usize,
+    /// Disarm after the first capture (default true).
+    #[serde(default = "default_true")]
+    pub one_shot: bool,
+}
+
+fn default_reg() -> String {
+    "rcx".to_string()
+}
+fn default_value_type() -> String {
+    "ptr".to_string()
+}
+fn default_capacity() -> usize {
+    32
+}
+
+/// Arguments for [`read_captures`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReadCapturesArgs {
+    /// The capture id returned by `capture_reg`.
+    pub id: u64,
+}
+
+/// Arguments for [`uninstall_capture_reg`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UninstallCaptureArgs {
+    /// The capture id returned by `capture_reg`.
     pub id: u64,
 }
 
@@ -1539,6 +1594,106 @@ impl TrainlabMcpServer {
                 ]))
             }
             Err(e) => Err(err(format!("disassemble failed: {e}"))),
+        }
+    }
+
+    /// Arm a passive, non-stalling register capture at a code address.
+    ///
+    /// Installs a transparent trampoline at `target` that records the chosen
+    /// register each time the site executes, replays the stolen instructions,
+    /// and jumps back — the game never stops. This is the "register-anchor"
+    /// primitive: given a stable code site, reproduce a resource address
+    /// without re-scanning. Read the recorded values back with
+    /// `read_captures`, and clean up with `uninstall_capture_reg`.
+    #[tool(description = "Arm a passive, non-stalling register capture at a code address: records a chosen register (e.g. rcx) each time the site executes, replays stolen instructions, never stops the game. Returns a capture id + scratch buffer address; read back with 'read_captures', remove with 'uninstall_capture_reg'.")]
+    fn capture_reg(
+        &self,
+        Parameters(args): Parameters<CaptureRegArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use trainlab_core::capture::{CaptureRegSpec, Register, ValueType};
+        let target = parse_addr(&args.target)?;
+        let reg = Register::parse(&args.reg)
+            .ok_or_else(|| err(format!("unknown register '{}' (try rax/rcx/rbx/... or xmm0..xmm7)", args.reg)))?;
+        let value_type = ValueType::parse(&args.value_type)
+            .ok_or_else(|| err(format!("unknown value_type '{}' (try ptr/i64/u64/f64/f32)", args.value_type)))?;
+        let spec = CaptureRegSpec::new(reg, value_type);
+        match call_dll(&Request::CaptureReg {
+            target,
+            spec,
+            capacity: args.capacity,
+            one_shot: args.one_shot,
+        }) {
+            Ok(Response::CaptureInstalled {
+                id,
+                scratch,
+                target: _,
+                original: _,
+            }) => Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(format!(
+                    "armed non-stalling capture id {id} at {:#x}: capturing {} as {} (capacity {}) (one_shot={}).\nscratch buffer: {:#x} (readable via 'read').\nRead back with 'read_captures' (id {id}); uninstall with 'uninstall_capture_reg' (id {id}).",
+                    target,
+                    reg.name(),
+                    value_type.name(),
+                    args.capacity,
+                    args.one_shot,
+                    scratch,
+                )),
+            ])),
+            Ok(Response::Error { message }) => Err(err(message)),
+            Ok(_) => Err(err("unexpected response from DLL")),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    /// Read back the entries recorded by a `capture_reg` capture.
+    #[tool(description = "Read back the register values recorded by a passive 'capture_reg' capture (by id). Returns each captured entry: sequence, decoded value, raw 64-bit value, and the site address that was executing.")]
+    fn read_captures(
+        &self,
+        Parameters(args): Parameters<ReadCapturesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match call_dll(&Request::ReadCaptures { id: args.id }) {
+            Ok(Response::ReadCaptures { entries }) => {
+                if entries.is_empty() {
+                    return Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text(format!(
+                            "capture {} has not recorded any hits yet (the site has not executed since arming).",
+                            args.id
+                        )),
+                    ]));
+                }
+                let mut lines = vec![format!("capture {} — {} recorded hit(s):", args.id, entries.len())];
+                for e in entries {
+                    lines.push(format!(
+                        "  seq={} reg_value={:.4} raw=0x{:016x} rip=0x{:016x}",
+                        e.seq, e.reg_value, e.raw, e.rip
+                    ));
+                }
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(lines.join("\n")),
+                ]))
+            }
+            Ok(Response::Error { message }) => Err(err(message)),
+            Ok(_) => Err(err("unexpected response from DLL")),
+            Err(e) => Err(err(e)),
+        }
+    }
+
+    /// Uninstall a passive register capture: restore the original bytes at the
+    /// patched site and free the scratch ring.
+    #[tool(description = "Uninstall a passive 'capture_reg' capture by id: restores the original bytes at the patched code site and frees the scratch ring. No residual patch remains.")]
+    fn uninstall_capture_reg(
+        &self,
+        Parameters(args): Parameters<UninstallCaptureArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match call_dll(&Request::UninstallCapture { id: args.id }) {
+            Ok(Response::CaptureUninstalled { id }) => Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(format!(
+                    "uninstalled capture {id}: original bytes restored, scratch freed."
+                )),
+            ])),
+            Ok(Response::Error { message }) => Err(err(message)),
+            Ok(_) => Err(err("unexpected response from DLL")),
+            Err(e) => Err(err(e)),
         }
     }
 

@@ -8,3 +8,6 @@ description = "Code cave shellcode emission and installation for trainlab."
 
 [dependencies]
 trainlab-core = { path = "../trainlab-core" }
+
+[dev-dependencies]
+libc = "0.2"

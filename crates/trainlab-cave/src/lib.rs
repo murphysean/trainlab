@@ -16,5 +16,6 @@
 //! The injected DLL (`trainlab-inject`) provides the in-process `read`/`write`/
 //! `allocate` closures that [`cave::install`] needs.
 
+pub mod capture;
 pub mod cave;
 pub mod emitter;

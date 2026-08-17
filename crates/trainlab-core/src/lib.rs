@@ -12,6 +12,7 @@
 //! - **`process`** — lightweight process discovery / enumeration helpers.
 
 pub mod aob;
+pub mod capture;
 pub mod cave_hook;
 pub mod disasm;
 pub mod memory;

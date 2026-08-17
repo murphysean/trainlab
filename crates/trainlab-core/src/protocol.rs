@@ -98,6 +98,28 @@ pub enum Request {
         address: u64,
         one_shot: bool,
     },
+    /// Arm a **non-stalling, passive register capture** at a code address.
+    ///
+    /// Installs a transparent trampoline at `target` that records the value of
+    /// `spec.reg` into a DLL-owned ring buffer each time the site executes,
+    /// then replays the stolen instructions and jumps back — the game never
+    /// stops. The recorded values are read back with
+    /// [`Request::ReadCaptures`]. This is the register-anchor primitive for
+    /// reproducing a resource address across sessions without re-scanning.
+    ///
+    /// `capacity` (default 32) is the number of entries the ring keeps.
+    /// `one_shot` (default true) disarms after the first capture.
+    CaptureReg {
+        target: u64,
+        spec: crate::capture::CaptureRegSpec,
+        capacity: usize,
+        one_shot: bool,
+    },
+    /// Read back the entries recorded by a `CaptureReg` capture.
+    ReadCaptures { id: u64 },
+    /// Restore the original bytes at a `CaptureReg` target and free the
+    /// scratch ring. No residual patch.
+    UninstallCapture { id: u64 },
     /// Disarm any active watchpoint or breakpoint and restore any patched bytes.
     ClearBreakpoints,
     /// Poll for a hit from an armed watchpoint/breakpoint that fired since the
@@ -166,8 +188,38 @@ pub enum Response {
     /// Reply to [`Request::PollHit`]. `hit` is `Some` if a watchpoint/breakpoint
     /// fired since the last poll.
     PollHit { hit: Option<WatchHitInfo> },
+    /// Reply to [`Request::CaptureReg`]. `id` identifies the capture for
+    /// [`Request::ReadCaptures`] / [`Request::UninstallCapture`]; `scratch` is
+    /// the DLL-allocated ring buffer address (readable via `read`); `target`
+    /// and `original` are the patched site for undo.
+    CaptureInstalled {
+        id: u64,
+        scratch: u64,
+        target: u64,
+        original: Vec<u8>,
+    },
+    /// Reply to [`Request::ReadCaptures`]: the recorded entries, oldest first.
+    ReadCaptures { entries: Vec<CaptureEntry> },
+    /// Reply to [`Request::UninstallCapture`].
+    CaptureUninstalled { id: u64 },
     /// An error occurred while handling the request.
     Error { message: String },
+}
+
+/// A single register value captured by a `CaptureReg` capture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureEntry {
+    /// Sequence number (0-based, increments each capture).
+    pub seq: u64,
+    /// The captured register value, decoded per the spec's `value_type`.
+    pub reg_value: f64,
+    /// The value as a raw 64-bit word (always present, un-decoded).
+    pub raw: u64,
+    /// The return address captured alongside (the instruction that was
+    /// executing when the site hit — i.e. `target`).
+    pub rip: u64,
+    /// Whether the game is still running (captures are passive; always true).
+    pub captured_at: u64,
 }
 
 /// A memory region description, used by [`Request::ListRegions`].

@@ -26,6 +26,9 @@ use trainlab_core::protocol::{self, Request, Response};
 #[cfg(windows)]
 mod watch;
 
+/// Non-stalling register capture registry + handlers.
+mod captures;
+
 /// Non-Windows stubs so the crate still builds (and behaves gracefully) on
 /// Linux. All watchpoint/breakpoint requests return a "not supported" error.
 #[cfg(not(windows))]
@@ -86,7 +89,17 @@ pub fn start(port: u16) -> std::io::Result<u16> {
                 match conn {
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
-                        handle_connection(stream);
+                        // Handle each connection on its own thread so a single
+                        // slow/lingering client (e.g. a Wine TCP socket that
+                        // never sends FIN) can't wedge the listener for the
+                        // rest of the trainers. The GUI keeps connections open
+                        // while reading responses, so accept + handle serially
+                        // would stall every subsequent request behind one stuck
+                        // connection. Each request is short-lived; a thread per
+                        // connection is cheap here.
+                        let _ = thread::Builder::new()
+                            .name("trainlab-inject-conn".into())
+                            .spawn(move || handle_connection(stream));
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "accept failed");
@@ -316,6 +329,28 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 hit: Some(hit_to_info(hit)),
             },
             None => Response::PollHit { hit: None },
+        },
+        Request::CaptureReg {
+            target,
+            spec,
+            capacity,
+            one_shot: _,
+        } => match captures::install(target, spec, capacity) {
+            Ok((id, original)) => Response::CaptureInstalled {
+                id,
+                scratch: captures::scratch(id).unwrap_or(0),
+                target,
+                original,
+            },
+            Err(e) => Response::Error { message: e },
+        },
+        Request::ReadCaptures { id } => match captures::read(id) {
+            Ok(entries) => Response::ReadCaptures { entries },
+            Err(e) => Response::Error { message: e },
+        },
+        Request::UninstallCapture { id } => match captures::uninstall(id) {
+            Ok(()) => Response::CaptureUninstalled { id },
+            Err(e) => Response::Error { message: e },
         },
     }
 }
