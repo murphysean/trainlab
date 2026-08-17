@@ -358,6 +358,30 @@ mod tests {
     }
 
     #[test]
+    fn first_scan_range_f32_fractional() {
+        // Simulate a game resource stored as f32 with a fractional part that
+        // the UI rounds to a whole number: 14790.3, 14790.0, 14791.7, 14792.5.
+        let vals = [14790.3f32, 14790.0, 14791.7, 14792.5];
+        let mut buf = Vec::new();
+        for v in vals {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let proc = MockProcess::new(buf);
+        let mut scan = Scan::new(ValueType::F32);
+        // Range 14760..14820 should catch all four (they're all in [14760,14820]).
+        let n = scan
+            .first_scan(&proc, &[region_to(16)], ScanOp::Range { min: 14760.0, max: 14820.0 })
+            .unwrap();
+        assert_eq!(n, 4);
+        // A tighter range 14790.0..14790.5 should catch only 14790.0 and 14790.3.
+        let mut scan = Scan::new(ValueType::F32);
+        let n = scan
+            .first_scan(&proc, &[region_to(16)], ScanOp::Range { min: 14790.0, max: 14790.5 })
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
     fn refine_unchanged_and_changed() {
         // 8 i32 values, all 100.
         let mut buf = Vec::new();

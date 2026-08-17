@@ -157,8 +157,14 @@ pub struct UndoInfoArgs {
 pub struct ScanArgs {
     /// Value type: i32, u32, f32, i64, u64, f64, or ptr.
     pub value_type: String,
-    /// Value to scan for (as a number).
+    /// Value to scan for (as a number). For a range scan this is the min.
     pub value: f64,
+    /// Optional max for a range scan. If present, the first scan matches
+    /// values in `[value, max]` (inclusive) instead of an exact match. This is
+    /// essential for floats with fractional storage (e.g. UI shows 14790 but
+    /// the f32 is 14790.3). Omit for an exact scan (backward compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
     /// Optional byte alignment for candidate addresses (default: value size).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment: Option<usize>,
@@ -1082,12 +1088,20 @@ impl TrainlabMcpServer {
     /// Start a value scan over the game's memory (via the DLL).
     ///
     /// The match set is stored in the session so you can narrow it with
-    /// `next`. Value types: i32, u32, f32, i64, u64, f64, ptr.
-    #[tool(description = "First value scan: find all addresses holding a value. Stores the match set in the session for narrowing with 'next'.")]
+    /// `next`. Value types: i32, u32, f32, i64, u64, f64, ptr. Pass `max` to
+    /// do a range first-scan (matches `[value, max]`), useful for floats with
+    /// fractional storage.
+    #[tool(description = "First value scan: find all addresses holding a value (exact, or a range if 'max' is given). Stores the match set in the session for narrowing with 'next'.")]
     fn scan(&self, Parameters(args): Parameters<ScanArgs>) -> Result<CallToolResult, ErrorData> {
         let value_type = parse_value_type(&args.value_type)?;
         let alignment = args.alignment.unwrap_or(0);
-        let op = trainlab_core::scan::ScanOp::Exact { value: args.value };
+        let op = match args.max {
+            Some(max) => trainlab_core::scan::ScanOp::Range {
+                min: args.value,
+                max,
+            },
+            None => trainlab_core::scan::ScanOp::Exact { value: args.value },
+        };
         // Run the first scan externally (graceful errors on a big heap, unlike
         // an in-process scan which can fault the game).
         let proc = game_process(&self.session)?;
