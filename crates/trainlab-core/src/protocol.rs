@@ -108,13 +108,19 @@ pub enum Request {
     /// reproducing a resource address across sessions without re-scanning.
     ///
     /// `capacity` (default 32) is the number of entries the ring keeps.
-    /// `one_shot` (default true) disarms after the first capture.
+    /// `disarm` (default true) makes the payload capture at most once and then
+    /// set the ring's disarmed flag (one_shot / stop_on_match).
     CaptureReg {
         target: u64,
         spec: crate::capture::CaptureRegSpec,
         capacity: usize,
-        one_shot: bool,
+        disarm: bool,
     },
+    // The `spec.gate` field carries the decoupled "capture X only when register
+    // Y compares Z" gate (reg, cmp, value/min/max). A gate with a register that
+    // needs a range uses const_a/const_b in the ring header; `whole` uses x87
+    // frndint. If `disarm` is set, the payload records at most one entry and
+    // flips the ring's disarmed flag, so a second execution short-circuits.
     /// Read back the entries recorded by a `CaptureReg` capture.
     ReadCaptures { id: u64 },
     /// Restore the original bytes at a `CaptureReg` target and free the
@@ -198,8 +204,13 @@ pub enum Response {
         target: u64,
         original: Vec<u8>,
     },
-    /// Reply to [`Request::ReadCaptures`]: the recorded entries, oldest first.
-    ReadCaptures { entries: Vec<CaptureEntry> },
+    /// Reply to [`Request::ReadCaptures`]: the recorded entries, oldest first,
+    /// plus whether the capture has disarmed itself (one_shot / stop_on_match
+    /// fired).
+    ReadCaptures {
+        entries: Vec<CaptureEntry>,
+        disarmed: bool,
+    },
     /// Reply to [`Request::UninstallCapture`].
     CaptureUninstalled { id: u64 },
     /// An error occurred while handling the request.
@@ -218,6 +229,9 @@ pub struct CaptureEntry {
     /// The return address captured alongside (the instruction that was
     /// executing when the site hit — i.e. `target`).
     pub rip: u64,
+    /// The gate register's value at capture time, decoded per the spec's
+    /// `value_type` (0.0 if the capture is ungated).
+    pub gate_value: f64,
     /// Whether the game is still running (captures are passive; always true).
     pub captured_at: u64,
 }

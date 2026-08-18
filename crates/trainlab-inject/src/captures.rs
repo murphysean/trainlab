@@ -22,6 +22,7 @@ struct LiveCapture {
     scratch: u64,
     capacity: usize,
     value_type: ValueType,
+    gate_value_type: ValueType,
 }
 
 struct Registry {
@@ -44,6 +45,7 @@ pub fn install(
     target: u64,
     spec: CaptureRegSpec,
     capacity: usize,
+    disarm: bool,
 ) -> Result<(u64, Vec<u8>), String> {
     let mem = SelfProcess;
     let read = |addr: u64, len: usize| mem.read(addr, len).map_err(|e| e.to_string());
@@ -54,6 +56,7 @@ pub fn install(
         target,
         spec,
         capacity,
+        disarm,
         read,
         write,
         alloc,
@@ -71,13 +74,16 @@ pub fn install(
             scratch: cap.scratch,
             capacity: cap.capacity,
             value_type: cap.value_type,
+            gate_value_type: cap.gate_value_type,
         },
     );
     Ok((id, original))
 }
 
-/// Read back the recorded entries for a capture.
-pub fn read(id: u64) -> Result<Vec<trainlab_core::protocol::CaptureEntry>, String> {
+/// Read back the recorded entries + the ring's disarmed flag for a capture.
+pub fn read(
+    id: u64,
+) -> Result<(Vec<trainlab_core::protocol::CaptureEntry>, bool), String> {
     let reg = registry().lock().map_err(|_| "capture registry poisoned".to_string())?;
     let c = reg
         .captures
@@ -85,7 +91,15 @@ pub fn read(id: u64) -> Result<Vec<trainlab_core::protocol::CaptureEntry>, Strin
         .ok_or_else(|| format!("no capture with id {id}"))?;
     let mem = SelfProcess;
     let read = |addr: u64, len: usize| mem.read(addr, len).map_err(|e| e.to_string());
-    trainlab_cave::capture::read_captures(c.scratch, c.capacity, c.value_type, read)
+    let entries = trainlab_cave::capture::read_captures(
+        c.scratch,
+        c.capacity,
+        c.value_type,
+        c.gate_value_type,
+        read,
+    )?;
+    let disarmed = trainlab_cave::capture::read_disarmed(c.scratch, &read)?;
+    Ok((entries, disarmed))
 }
 
 /// Uninstall a capture: restore original bytes at its target and free the ring.

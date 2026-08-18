@@ -27,54 +27,7 @@ mod inject;
 mod profile;
 mod session;
 
-fn main() -> eframe::Result<()> {
-    tracing_subscriber::fmt::init();
 
-    // One shared session state across the GUI and the MCP server. The GUI sets
-    // `game_pid` when it injects the game; the MCP server reads it to open the
-    // game process externally for scan-family tools (see D7).
-    let session: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(SessionState::new()));
-
-    // Start the MCP server on a background tokio runtime. The GUI owns the
-    // control flow; the MCP server runs alongside it so an agent can connect.
-    // Bind to all interfaces (0.0.0.0) so a laptop/desktop can reach the
-    // trainer over the network (e.g. Steam Deck / Steam machine use case).
-    let mcp_host = std::env::var("TRAINLAB_MCP_HOST").unwrap_or_else(|_| "0.0.0.0".into());
-    // Port for the MCP server, overridable via TRAINLAB_MCP_PORT.
-    let mcp_port = std::env::var("TRAINLAB_MCP_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(MCP_DEFAULT_PORT);
-    let mcp_session = session.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build MCP tokio runtime");
-        rt.block_on(async {
-            match mcp::serve(&mcp_host, mcp_port, mcp_session).await {
-                Ok((url, ct)) => {
-                    tracing::info!(%url, "MCP server ready");
-                    // Keep the runtime alive until the process exits. `serve`
-                    // returns immediately after spawning the axum task, so we
-                    // must not let the runtime drop (which would kill the task).
-                    ct.cancelled().await;
-                }
-                Err(e) => tracing::error!("failed to start MCP server: {e}"),
-            }
-        });
-    });
-
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 640.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "trainlab",
-        options,
-        Box::new(move |_cc| Box::new(TrainlabApp::with_session(session))),
-    )
-}
 
 /// Default port for the MCP server.
 const MCP_DEFAULT_PORT: u16 = 8123;
@@ -117,12 +70,27 @@ struct TrainlabApp {
     mem_ops: Vec<MemOp>,
     aob_scans: Vec<AobScan>,
     regions: Vec<trainlab_core::protocol::RegionInfo>,
-    log: Vec<String>,
 
     // Cheats panel: editable value strings keyed by cheat id, and a flag to
     // show the panel.
     cheat_values: std::collections::HashMap<u64, String>,
     show_cheats: bool,
+
+    // Active Tab state
+    active_tab: ActiveTab,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveTab {
+    Cheats,
+    DiscoverScan,
+    PointersOffsets,
+}
+
+impl Default for ActiveTab {
+    fn default() -> Self {
+        ActiveTab::Cheats
+    }
 }
 
 impl Default for TrainlabApp {
@@ -149,9 +117,9 @@ impl TrainlabApp {
             mem_ops: vec![MemOp::default()],
             aob_scans: vec![AobScan::default()],
             regions: Vec::new(),
-            log: Vec::new(),
             cheat_values: std::collections::HashMap::new(),
             show_cheats: true,
+            active_tab: ActiveTab::Cheats,
         }
     }
 
@@ -161,9 +129,8 @@ impl TrainlabApp {
     }
 
     fn log(&mut self, msg: impl Into<String>) {
-        self.log.push(msg.into());
-        if self.log.len() > 500 {
-            self.log.remove(0);
+        if let Ok(mut s) = self.session.lock() {
+            s.log_activity("UI", msg);
         }
     }
 
@@ -442,35 +409,98 @@ impl TrainlabApp {
     }
 }
 
+fn main() -> eframe::Result<()> {
+    tracing_subscriber::fmt::init();
+
+    // One shared session state across the GUI and the MCP server. The GUI sets
+    // `game_pid` when it injects the game; the MCP server reads it to open the
+    // game process externally for scan-family tools (see D7).
+    let session: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(SessionState::new()));
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 640.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "trainlab",
+        options,
+        Box::new(move |cc| {
+            let ctx = cc.egui_ctx.clone();
+
+            // Start the MCP server on a background tokio runtime.
+            let mcp_host = std::env::var("TRAINLAB_MCP_HOST").unwrap_or_else(|_| "0.0.0.0".into());
+            let mcp_port = std::env::var("TRAINLAB_MCP_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(MCP_DEFAULT_PORT);
+            let mcp_session = session.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build MCP tokio runtime");
+                rt.block_on(async {
+                    match mcp::serve(&mcp_host, mcp_port, mcp_session, Some(ctx)).await {
+                        Ok((url, ct)) => {
+                            tracing::info!(%url, "MCP server ready");
+                            ct.cancelled().await;
+                        }
+                        Err(e) => tracing::error!("failed to start MCP server: {e}"),
+                    }
+                });
+            });
+
+            Box::new(TrainlabApp::with_session(session))
+        }),
+    )
+}
+
 impl eframe::App for TrainlabApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check window OS focus state to ensure controller / navigation inputs
+        // only affect the GUI when the trainer window is focused.
+        let is_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+
+        // Handle tab switching & controller navigation if the window is focused
+        // and the user is NOT currently typing into a text field (ctx.wants_keyboard_input()).
+        if is_focused && !ctx.wants_keyboard_input() {
+            ctx.input(|i| {
+                if i.key_pressed(egui::Key::PageDown) || i.key_pressed(egui::Key::Q) {
+                    self.active_tab = match self.active_tab {
+                        ActiveTab::Cheats => ActiveTab::PointersOffsets,
+                        ActiveTab::DiscoverScan => ActiveTab::Cheats,
+                        ActiveTab::PointersOffsets => ActiveTab::DiscoverScan,
+                    };
+                } else if i.key_pressed(egui::Key::PageUp) || i.key_pressed(egui::Key::E) {
+                    self.active_tab = match self.active_tab {
+                        ActiveTab::Cheats => ActiveTab::DiscoverScan,
+                        ActiveTab::DiscoverScan => ActiveTab::PointersOffsets,
+                        ActiveTab::PointersOffsets => ActiveTab::Cheats,
+                    };
+                }
+            });
+        }
+
         // Refresh connection display from the shared session (which the MCP
         // server may also update) so the GUI always reflects current state.
         if let Ok(s) = self.session.lock() {
             self.connected = s.connected();
-            if !self.connected && self.status.is_empty() {
+            if self.connected {
+                let ver = s.inject_version().unwrap_or("active");
+                let game = s.game_name();
+                self.status = format!("connected to {game} (v{ver})");
+            } else {
                 self.status = "not connected".into();
             }
         }
-        egui::TopBottomPanel::top("conn").show(ctx, |ui| {
+
+        // Top panel showing status bar and MCP server info
+        egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Host:");
-                ui.text_edit_singleline(&mut self.host);
-                ui.label("Port:");
-                ui.text_edit_singleline(&mut self.port);
-                if ui.button("Connect").clicked() {
-                    let req = Request::Ping;
-                    match self.request(&req) {
-                        Some(Response::Pong { version }) => {
-                            self.log(format!("connected, inject v{version}"));
-                        }
-                        Some(Response::Error { message }) => {
-                            self.log(format!("error: {message}"));
-                        }
-                        _ => {}
-                    }
-                }
+                ui.heading("trainlab");
                 ui.separator();
+                ui.label("Status:");
                 ui.colored_label(
                     if self.connected {
                         egui::Color32::GREEN
@@ -479,227 +509,337 @@ impl eframe::App for TrainlabApp {
                     },
                     &self.status,
                 );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Game:");
-                ui.text_edit_singleline(&mut self.game_name);
-                if ui.button("Scan for games").clicked() {
-                    self.refresh_game_candidates();
+
+                ui.separator();
+                if is_focused {
+                    ui.colored_label(egui::Color32::LIGHT_BLUE, "🎯 Focused (Input Active)");
+                } else {
+                    ui.colored_label(egui::Color32::GRAY, "⏸ Unfocused (Input Muted)");
                 }
-                ui.label("DLL:");
-                ui.text_edit_singleline(&mut self.dll_path);
-                if ui.button("Find & Inject").clicked() {
-                    self.inject_and_connect();
+
+                if self.connected {
+                    ui.separator();
+                    if ui.button("Disconnect").clicked() {
+                        if let Ok(mut s) = self.session.lock() {
+                            s.set_connected(false);
+                        }
+                        self.connected = false;
+                        self.status = "disconnected".into();
+                    }
                 }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.monospace(&self.mcp_addr);
+                    ui.label("MCP server:");
+                });
             });
-            if !self.game_candidates.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.label("Candidates:");
-                    let names: Vec<String> = self
-                        .game_candidates
-                        .iter()
-                        .map(|p| format!("{} (pid {})", p.name, p.pid))
-                        .collect();
-                    let mut sel = self
-                        .game_candidates
-                        .iter()
-                        .position(|p| p.name == self.game_name)
-                        .unwrap_or(0);
-                    egui::ComboBox::from_id_source("game_candidates")
-                        .selected_text(names.get(sel).cloned().unwrap_or_default())
-                        .show_ui(ui, |ui| {
-                            for (i, n) in names.iter().enumerate() {
-                                if ui.selectable_value(&mut sel, i, n).clicked() {
-                                    self.game_name = self.game_candidates[i].name.clone();
+        });
+
+        if !self.connected {
+            // State 1: Welcome & Attach Screen
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::both().show(ui, |ui| {
+                    ui.add_space(20.0);
+                    ui.vertical_centered(|ui| {
+                        ui.heading("Welcome to trainlab");
+                        ui.label("The MCP-enabled control room for process memory analysis & injection.");
+                    });
+                    ui.add_space(20.0);
+
+                    ui.group(|ui| {
+                        ui.heading("MCP Server Status");
+                        ui.label(format!("• Running on {}", self.mcp_addr));
+                        ui.label("• Ready for AI agents & remote connections.");
+                    });
+
+                    ui.add_space(15.0);
+
+                    ui.group(|ui| {
+                        ui.heading("Attach & Inject Game");
+                        ui.add_space(5.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Target Game Exe:");
+                            ui.text_edit_singleline(&mut self.game_name);
+                            if ui.button("Scan running processes").clicked() {
+                                self.refresh_game_candidates();
+                            }
+                        });
+
+                        if !self.game_candidates.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.label("Found Candidates:");
+                                let names: Vec<String> = self
+                                    .game_candidates
+                                    .iter()
+                                    .map(|p| format!("{} (pid {})", p.name, p.pid))
+                                    .collect();
+                                let mut sel = self
+                                    .game_candidates
+                                    .iter()
+                                    .position(|p| p.name == self.game_name)
+                                    .unwrap_or(0);
+                                egui::ComboBox::from_id_source("game_candidates")
+                                    .selected_text(names.get(sel).cloned().unwrap_or_default())
+                                    .show_ui(ui, |ui| {
+                                        for (i, n) in names.iter().enumerate() {
+                                            if ui.selectable_value(&mut sel, i, n).clicked() {
+                                                self.game_name = self.game_candidates[i].name.clone();
+                                            }
+                                        }
+                                    });
+                            });
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label("DLL Path:");
+                            ui.text_edit_singleline(&mut self.dll_path);
+                        });
+
+                        ui.add_space(5.0);
+                        if ui.button("🚀 Find & Inject DLL").clicked() {
+                            self.inject_and_connect();
+                        }
+                    });
+
+                    ui.add_space(15.0);
+
+                    ui.group(|ui| {
+                        ui.heading("Manual Listener Connection");
+                        ui.horizontal(|ui| {
+                            ui.label("Host:");
+                            ui.text_edit_singleline(&mut self.host);
+                            ui.label("Port:");
+                            ui.text_edit_singleline(&mut self.port);
+                            if ui.button("Connect").clicked() {
+                                let req = Request::Ping;
+                                match self.request(&req) {
+                                    Some(Response::Pong { version }) => {
+                                        self.log(format!("connected, inject v{version}"));
+                                    }
+                                    Some(Response::Error { message }) => {
+                                        self.log(format!("error: {message}"));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        });
+                    });
+
+                    ui.add_space(15.0);
+                    ui.heading("Activity Log");
+                    let activity_log = self
+                        .session
+                        .lock()
+                        .map(|s| s.list_activity_log())
+                        .unwrap_or_default();
+                    egui::ScrollArea::vertical()
+                        .max_height(150.0)
+                        .show(ui, |ui| {
+                            for line in &activity_log {
+                                if line.starts_with("UI:") {
+                                    ui.colored_label(egui::Color32::LIGHT_BLUE, line);
+                                } else if line.starts_with("MCP:") {
+                                    ui.colored_label(egui::Color32::YELLOW, line);
+                                } else {
+                                    ui.monospace(line);
                                 }
                             }
                         });
                 });
-            }
-            ui.horizontal(|ui| {
-                ui.label("MCP server:");
-                ui.monospace(&self.mcp_addr);
-                ui.label("(connect an agent here)");
             });
-        });
+        } else {
+            // State 2: Active Session (Tab Navigation)
+            egui::SidePanel::left("nav")
+                .resizable(true)
+                .default_width(180.0)
+                .show(ctx, |ui| {
+                    ui.heading("Navigation");
+                    ui.separator();
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::Cheats, "🎮 Cheats");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::DiscoverScan, "🔍 Discover & Scan");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::PointersOffsets, "🎯 Pointers & Offsets");
+                });
 
-        egui::SidePanel::left("nav")
-            .resizable(true)
-            .default_width(180.0)
-            .show(ctx, |ui| {
-                ui.heading("trainlab");
-                ui.separator();
-                ui.label("Panels:");
-                // Simple tab state via a local enum stored in the app.
-                // We'll just render all panels stacked for simplicity.
-                ui.label("• Memory");
-                ui.label("• AOB Scan");
-                ui.label("• Regions");
-                ui.label("• Log");
-            });
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::ScrollArea::both().show(ui, |ui| {
+                    match self.active_tab {
+                        ActiveTab::Cheats => {
+                            self.show_cheats_panel(ui);
+                            ui.separator();
+                            self.show_session_panel(ui);
+                        }
+                        ActiveTab::DiscoverScan => {
+                            ui.heading("AOB Scan");
+                            ui.horizontal(|ui| {
+                                if ui.button("Scan").clicked() {
+                                    let scans: Vec<(usize, Vec<Option<u8>>)> = self
+                                        .aob_scans
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(i, s)| {
+                                            let p = trainlab_core::aob::parse(&s.pattern);
+                                            if p.is_empty() {
+                                                None
+                                            } else {
+                                                Some((i, p))
+                                            }
+                                        })
+                                        .collect();
+                                    for (i, pattern) in scans {
+                                        let result = match self.request(&Request::ScanAob {
+                                            pattern,
+                                            start: None,
+                                            end: None,
+                                        }) {
+                                            Some(Response::ScanAob { matches }) => {
+                                                let shown: Vec<String> = matches
+                                                    .iter()
+                                                    .take(20)
+                                                    .map(|m| format!("0x{m:x}"))
+                                                    .collect();
+                                                format!("{} matches: {}", matches.len(), shown.join(", "))
+                                            }
+                                            Some(Response::Error { message }) => message,
+                                            _ => "no response".into(),
+                                        };
+                                        if let Some(scan) = self.aob_scans.get_mut(i) {
+                                            scan.result = result;
+                                        }
+                                    }
+                                }
+                                if ui.button("+").clicked() {
+                                    self.aob_scans.push(AobScan::default());
+                                }
+                            });
+                            for scan in self.aob_scans.iter_mut() {
+                                ui.horizontal(|ui| {
+                                    ui.label("Pattern:");
+                                    ui.text_edit_singleline(&mut scan.pattern);
+                                });
+                                ui.label(&scan.result);
+                            }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.show_cheats_panel(ui);
-
-            ui.separator();
-            self.show_session_panel(ui);
-
-            ui.separator();
-            ui.heading("Memory");
-            ui.horizontal(|ui| {
-                if ui.button("Read").clicked() {
-                    let ops: Vec<(usize, u64, usize)> = self
-                        .mem_ops
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, op)| {
-                            parse_addr(&op.address)
-                                .ok()
-                                .map(|addr| (i, addr, parse_len(&op.value).unwrap_or(16)))
-                        })
-                        .collect();
-                    for (i, addr, len) in ops {
-                        let result = match self.request(&Request::Read { address: addr, len }) {
-                            Some(Response::Read { data }) => hexdump(&data),
-                            Some(Response::Error { message }) => message,
-                            _ => "no response".into(),
-                        };
-                        if let Some(op) = self.mem_ops.get_mut(i) {
-                            op.result = result;
+                            ui.separator();
+                            ui.heading("Memory Regions");
+                            if ui.button("List regions").clicked() {
+                                match self.request(&Request::ListRegions) {
+                                    Some(Response::ListRegions { regions }) => {
+                                        self.regions = regions;
+                                        self.log(format!("listed {} regions", self.regions.len()));
+                                    }
+                                    Some(Response::Error { message }) => self.log(message),
+                                    _ => {}
+                                }
+                            }
+                            egui::ScrollArea::vertical()
+                                .max_height(200.0)
+                                .show(ui, |ui| {
+                                    for r in &self.regions {
+                                        let perms = format!(
+                                            "{}{}{}",
+                                            if r.readable { "r" } else { "-" },
+                                            if r.writable { "w" } else { "-" },
+                                            if r.executable { "x" } else { "-" }
+                                        );
+                                        ui.monospace(format!(
+                                            "0x{:016x} - 0x{:016x}  {}  {}",
+                                            r.start,
+                                            r.end,
+                                            perms,
+                                            r.name.as_deref().unwrap_or("")
+                                        ));
+                                    }
+                                });
+                        }
+                        ActiveTab::PointersOffsets => {
+                            ui.heading("Pointers & Offsets (Memory Inspection)");
+                            ui.horizontal(|ui| {
+                                if ui.button("Read").clicked() {
+                                    let ops: Vec<(usize, u64, usize)> = self
+                                        .mem_ops
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(i, op)| {
+                                            parse_addr(&op.address)
+                                                .ok()
+                                                .map(|addr| (i, addr, parse_len(&op.value).unwrap_or(16)))
+                                        })
+                                        .collect();
+                                    for (i, addr, len) in ops {
+                                        let result = match self.request(&Request::Read { address: addr, len }) {
+                                            Some(Response::Read { data }) => hexdump(&data),
+                                            Some(Response::Error { message }) => message,
+                                            _ => "no response".into(),
+                                        };
+                                        if let Some(op) = self.mem_ops.get_mut(i) {
+                                            op.result = result;
+                                        }
+                                    }
+                                }
+                                if ui.button("Write").clicked() {
+                                    let ops: Vec<(usize, u64, Vec<u8>)> = self
+                                        .mem_ops
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(i, op)| {
+                                            parse_addr(&op.address)
+                                                .ok()
+                                                .map(|addr| (i, addr, parse_bytes(&op.value)))
+                                        })
+                                        .collect();
+                                    for (i, addr, data) in ops {
+                                        let result = match self.request(&Request::Write { address: addr, data }) {
+                                            Some(Response::Write { bytes_written }) => {
+                                                format!("wrote {bytes_written} bytes")
+                                            }
+                                            Some(Response::Error { message }) => message,
+                                            _ => "no response".into(),
+                                        };
+                                        if let Some(op) = self.mem_ops.get_mut(i) {
+                                            op.result = result;
+                                        }
+                                    }
+                                }
+                                if ui.button("+").clicked() {
+                                    self.mem_ops.push(MemOp::default());
+                                }
+                            });
+                            for op in self.mem_ops.iter_mut() {
+                                ui.horizontal(|ui| {
+                                    ui.label("Addr:");
+                                    ui.text_edit_singleline(&mut op.address);
+                                    ui.label("Value:");
+                                    ui.text_edit_singleline(&mut op.value);
+                                });
+                                ui.label(&op.result);
+                            }
                         }
                     }
-                }
-                if ui.button("Write").clicked() {
-                    let ops: Vec<(usize, u64, Vec<u8>)> = self
-                        .mem_ops
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, op)| {
-                            parse_addr(&op.address)
-                                .ok()
-                                .map(|addr| (i, addr, parse_bytes(&op.value)))
-                        })
-                        .collect();
-                    for (i, addr, data) in ops {
-                        let result = match self.request(&Request::Write { address: addr, data }) {
-                            Some(Response::Write { bytes_written }) => {
-                                format!("wrote {bytes_written} bytes")
+
+                    ui.separator();
+                    ui.heading("Activity Log");
+                    let activity_log = self
+                        .session
+                        .lock()
+                        .map(|s| s.list_activity_log())
+                        .unwrap_or_default();
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            for line in &activity_log {
+                                if line.starts_with("UI:") {
+                                    ui.colored_label(egui::Color32::LIGHT_BLUE, line);
+                                } else if line.starts_with("MCP:") {
+                                    ui.colored_label(egui::Color32::YELLOW, line);
+                                } else {
+                                    ui.monospace(line);
+                                }
                             }
-                            Some(Response::Error { message }) => message,
-                            _ => "no response".into(),
-                        };
-                        if let Some(op) = self.mem_ops.get_mut(i) {
-                            op.result = result;
-                        }
-                    }
-                }
-                if ui.button("+").clicked() {
-                    self.mem_ops.push(MemOp::default());
-                }
+                        });
+                });
             });
-            for op in self.mem_ops.iter_mut() {
-                ui.horizontal(|ui| {
-                    ui.label("Addr:");
-                    ui.text_edit_singleline(&mut op.address);
-                    ui.label("Value:");
-                    ui.text_edit_singleline(&mut op.value);
-                });
-                ui.label(&op.result);
-            }
-
-            ui.separator();
-            ui.heading("AOB Scan");
-            ui.horizontal(|ui| {
-                if ui.button("Scan").clicked() {
-                    let scans: Vec<(usize, Vec<Option<u8>>)> = self
-                        .aob_scans
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, s)| {
-                            let p = trainlab_core::aob::parse(&s.pattern);
-                            if p.is_empty() {
-                                None
-                            } else {
-                                Some((i, p))
-                            }
-                        })
-                        .collect();
-                    for (i, pattern) in scans {
-                        let result = match self.request(&Request::ScanAob {
-                            pattern,
-                            start: None,
-                            end: None,
-                        }) {
-                            Some(Response::ScanAob { matches }) => {
-                                let shown: Vec<String> = matches
-                                    .iter()
-                                    .take(20)
-                                    .map(|m| format!("0x{m:x}"))
-                                    .collect();
-                                format!("{} matches: {}", matches.len(), shown.join(", "))
-                            }
-                            Some(Response::Error { message }) => message,
-                            _ => "no response".into(),
-                        };
-                        if let Some(scan) = self.aob_scans.get_mut(i) {
-                            scan.result = result;
-                        }
-                    }
-                }
-                if ui.button("+").clicked() {
-                    self.aob_scans.push(AobScan::default());
-                }
-            });
-            for scan in self.aob_scans.iter_mut() {
-                ui.horizontal(|ui| {
-                    ui.label("Pattern:");
-                    ui.text_edit_singleline(&mut scan.pattern);
-                });
-                ui.label(&scan.result);
-            }
-
-            ui.separator();
-            ui.heading("Regions");
-            if ui.button("List regions").clicked() {
-                match self.request(&Request::ListRegions) {
-                    Some(Response::ListRegions { regions }) => {
-                        self.regions = regions;
-                        self.log(format!("listed {} regions", self.regions.len()));
-                    }
-                    Some(Response::Error { message }) => self.log(message),
-                    _ => {}
-                }
-            }
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for r in &self.regions {
-                        let perms = format!(
-                            "{}{}{}",
-                            if r.readable { "r" } else { "-" },
-                            if r.writable { "w" } else { "-" },
-                            if r.executable { "x" } else { "-" }
-                        );
-                        ui.monospace(format!(
-                            "0x{:016x} - 0x{:016x}  {}  {}",
-                            r.start,
-                            r.end,
-                            perms,
-                            r.name.as_deref().unwrap_or("")
-                        ));
-                    }
-                });
-
-            ui.separator();
-            ui.heading("Log");
-            egui::ScrollArea::vertical()
-                .max_height(120.0)
-                .show(ui, |ui| {
-                    for line in &self.log {
-                        ui.monospace(line);
-                    }
-                });
-        });
+        }
     }
 }
 

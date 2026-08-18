@@ -466,20 +466,55 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         "capture" => {
-            // capture <target> [reg] [value_type] [capacity] [one_shot]
+            // capture <target> [reg] [value_type] [capacity] [stop_on_match]
+            //           [gate_reg gate_cmp gate_value|gate_min gate_max]
+            //
+            // Gate syntax (after stop_on_match):
+            //   capture <target> <reg> <vt> <cap> <som> <g_reg> <g_cmp> [g_val|g_min g_max]
+            // Examples:
+            //   capture 0x1401b42e9 rcx f64 32 true rbp range 0 100000
+            //   capture 0x1401b42e9 rcx f64 32 true rbp eq 3.0
+            //   capture 0x1401b42e9 rcx f64 32 true rbp whole
             let target = std::env::args().nth(2).expect("target arg");
             let reg = std::env::args().nth(3).unwrap_or_else(|| "rcx".into());
             let value_type = std::env::args().nth(4).unwrap_or_else(|| "ptr".into());
             let capacity: usize = std::env::args().nth(5).map(|s| s.parse().unwrap_or(32)).unwrap_or(32);
-            let one_shot = std::env::args().nth(6).map(|s| s == "true").unwrap_or(true);
+            let stop_on_match = std::env::args().nth(6).map(|s| s == "true").unwrap_or(true);
+
+            // Optional gate args: gate_reg gate_cmp [val|min max] [gate_value_type]
+            let mut tool_args = vec![
+                ("target", serde_json::json!(target)),
+                ("reg", serde_json::json!(reg)),
+                ("value_type", serde_json::json!(value_type)),
+                ("capacity", serde_json::json!(capacity)),
+                ("stop_on_match", serde_json::json!(stop_on_match)),
+            ];
+            if let (Some(g_reg), Some(g_cmp)) = (std::env::args().nth(7), std::env::args().nth(8)) {
+                let mut gate = serde_json::Map::new();
+                gate.insert("reg".into(), serde_json::json!(g_reg));
+                gate.insert("cmp".into(), serde_json::json!(g_cmp));
+                // Optional gate value_type (arg 11 for range, arg 10 for single/whole).
+                let g_vt_opt = if g_cmp == "range" {
+                    std::env::args().nth(11)
+                } else {
+                    std::env::args().nth(10)
+                };
+                if let Some(g_vt) = g_vt_opt {
+                    gate.insert("value_type".into(), serde_json::json!(g_vt));
+                }
+                if g_cmp == "range" {
+                    let min: f64 = std::env::args().nth(9).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let max: f64 = std::env::args().nth(10).and_then(|s| s.parse().ok()).unwrap_or(min);
+                    gate.insert("min".into(), serde_json::json!(min));
+                    gate.insert("max".into(), serde_json::json!(max));
+                } else if g_cmp != "whole" {
+                    let val: f64 = std::env::args().nth(9).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    gate.insert("value".into(), serde_json::json!(val));
+                }
+                tool_args.push(("gate", serde_json::Value::Object(gate)));
+            }
             let r = client
-                .call_tool(CallToolRequestParams::new("capture_reg").with_arguments(args(&[
-                    ("target", serde_json::json!(target)),
-                    ("reg", serde_json::json!(reg)),
-                    ("value_type", serde_json::json!(value_type)),
-                    ("capacity", serde_json::json!(capacity)),
-                    ("one_shot", serde_json::json!(one_shot)),
-                ])))
+                .call_tool(CallToolRequestParams::new("capture_reg").with_arguments(args(&tool_args)))
                 .await?;
             println!("{}", extract_text(&r));
         }

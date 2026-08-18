@@ -441,10 +441,222 @@ pub use windows::WindowsProcess;
 /// DLL). Reads/writes are plain pointer dereferences.
 pub struct SelfProcess;
 
+/// True if the whole byte range `[address, address+len)` lies inside a
+/// readable (and, for writes, writable) committed region of *this* process.
+///
+/// The injected DLL runs inside the game; dereferencing a bad address there is
+/// a hard SIGSEGV that kills the game. We use this probe (via
+/// `VirtualQueryEx`/`/proc/self/maps`) to turn a bad read/write into a clean
+/// `MemoryError` instead. `need_readable` only relaxes the writable check (reads
+/// require readability; writes require both).
+fn region_covers(address: u64, len: usize, need_readable: bool) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let end = address.saturating_add(len as u64);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+        // Walk regions from the start address until we cover `end` or leave the
+        // address space. Every page in the range must be committed and (for
+        // reads) readable / (for writes) writable.
+        let mut cur = address as usize;
+        let target = end as usize;
+        while cur < target {
+            let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+            // SAFETY: mbi is valid; VirtualQuery is a read-only introspection call.
+            let n = unsafe {
+                VirtualQuery(
+                    cur as *const core::ffi::c_void,
+                    &mut mbi,
+                    core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                )
+            };
+            if n == 0 {
+                return false;
+            }
+            if mbi.State != MEM_COMMIT {
+                return false;
+            }
+            // Region [start, region_end) — but only pages >= `cur` matter.
+            let region_end = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize as usize);
+            let page_end = region_end.min(target);
+            // We need the protection of this region to allow our access. Use the
+            // low-byte protect mask (page protection bits).
+            let prot = mbi.Protect & 0xFF;
+            use windows_sys::Win32::System::Memory::{
+                PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_READONLY,
+                PAGE_READWRITE, PAGE_WRITECOPY,
+            };
+            let readable = matches!(
+                prot,
+                PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ
+                    | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
+            );
+            let writable = matches!(
+                prot,
+                PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
+            );
+            let ok = if need_readable { readable } else { readable && writable };
+            if !ok {
+                return false;
+            }
+            // Advance; guard against no progress.
+            if page_end <= cur {
+                return false;
+            }
+            cur = page_end;
+        }
+        true
+    }
+    #[cfg(unix)]
+    {
+        // Walk /proc/self/maps for a region covering [address, end).
+        let maps = match std::fs::read_to_string("/proc/self/maps") {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        for line in maps.lines() {
+            let mut it = line.split_whitespace();
+            let range = match it.next() {
+                Some(r) => r,
+                None => continue,
+            };
+            let perms = match it.next() {
+                Some(p) => p,
+                None => continue,
+            };
+            let (start, end_r) = match range.split_once('-') {
+                Some((s, e)) => (
+                    u64::from_str_radix(s, 16).unwrap_or(0),
+                    u64::from_str_radix(e, 16).unwrap_or(0),
+                ),
+                None => continue,
+            };
+            // Does this region cover [address, end)?
+            if start <= address && end_r >= end {
+                let readable = perms.contains('r');
+                let writable = perms.contains('w');
+                let ok = if need_readable { readable } else { readable && writable };
+                return ok;
+            }
+        }
+        false
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (address, end);
+        false
+    }
+}
+
+/// Write `data` into the current process at `address`, temporarily making the
+/// target page(s) writable first.
+///
+/// This is the fix for the "every code cave crashes every game" bug: a code
+/// cave install writes a `jmp` detour into the game's `.text` page, which is
+/// mapped read-only/executable. A raw `ptr::copy` there faults the whole game
+/// process with an access violation. We instead flip the pages to writable
+/// (preserving execute), copy, then restore the original protection — the same
+/// approach the breakpoint path (`watch::write_byte`) already used and proved.
+fn write_in_process(address: u64, data: &[u8]) -> Result<usize, MemoryError> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE};
+        let ptr = address as *mut core::ffi::c_void;
+        let mut old = 0u32;
+        // SAFETY: VirtualProtect on our own address space; ptr/data are valid.
+        let ok = unsafe { VirtualProtect(ptr, data.len(), PAGE_EXECUTE_READWRITE, &mut old) };
+        if ok == 0 {
+            return Err(MemoryError::Os("VirtualProtect (make writable) failed".into()));
+        }
+        // SAFETY: the range is now writable; data is a valid slice.
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len()); }
+        // Restore original protection (best-effort).
+        // SAFETY: restoring our own page protection.
+        unsafe {
+            VirtualProtect(ptr, data.len(), old, &mut old);
+        }
+        Ok(data.len())
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: sysconf(_SC_PAGESIZE) has no side effects and always succeeds.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_mask = page - 1;
+        // Align start down and end up to page boundaries.
+        let start = (address as usize) & !page_mask;
+        let end = ((address as usize) + data.len() + page_mask) & !page_mask;
+        let len = end - start;
+        // SAFETY: mprotect on our own mapped pages.
+        let rc = unsafe {
+            libc::mprotect(start as *mut libc::c_void, len, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC)
+        };
+        if rc != 0 {
+            return Err(MemoryError::Os("mprotect (make writable) failed".into()));
+        }
+        // SAFETY: the range is now writable.
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len()); }
+        // Restore the page's original protection, re-derived from the maps.
+        let orig = protection_of(address);
+        // SAFETY: restoring our own page protection.
+        unsafe {
+            libc::mprotect(start as *mut libc::c_void, len, orig);
+        }
+        Ok(data.len())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = ptr;
+        Err(MemoryError::Os("in-process writes unsupported on this target".into()))
+    }
+}
+
+/// Best-effort current page protection (RWX) for a Unix address, for restoring
+/// after a temporary writable flip. Reads `/proc/self/maps`.
+#[cfg(unix)]
+fn protection_of(address: u64) -> libc::c_int {
+    use std::fs;
+    let base: libc::c_int = libc::PROT_READ | libc::PROT_EXEC; // sensible default for code
+    if let Ok(maps) = fs::read_to_string("/proc/self/maps") {
+        for line in maps.lines() {
+            let mut it = line.split_whitespace();
+            let range = match it.next() { Some(r) => r, None => continue };
+            let perms = match it.next() { Some(p) => p, None => continue };
+            let (start, end_r) = match range.split_once('-') {
+                Some((s, e)) => (
+                    u64::from_str_radix(s, 16).unwrap_or(0),
+                    u64::from_str_radix(e, 16).unwrap_or(0),
+                ),
+                None => continue,
+            };
+            if start <= address && address < end_r {
+                let mut p = 0;
+                if perms.contains('r') { p |= libc::PROT_READ; }
+                if perms.contains('w') { p |= libc::PROT_WRITE; }
+                if perms.contains('x') { p |= libc::PROT_EXEC; }
+                return p;
+            }
+        }
+    }
+    base
+}
+
 impl ProcessMemory for SelfProcess {
     fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, MemoryError> {
         if address == 0 {
             return Err(MemoryError::OutOfRange { address });
+        }
+        // Probe that the whole range is readable in this process before
+        // forming a slice. A bad in-process address would otherwise be a hard
+        // SIGSEGV that takes down the whole game process (the injected DLL runs
+        // inside it) with no clean error. We instead return a clean error so
+        // the fast channel stays up and the game is untouched.
+        if !region_covers(address, len, /*need_readable=*/ true) {
+            return Err(MemoryError::PartialRead { address, len, got: 0 });
         }
         let ptr = address as *const u8;
         // SAFETY: caller is responsible for the address being valid in this
@@ -457,13 +669,13 @@ impl ProcessMemory for SelfProcess {
         if address == 0 {
             return Err(MemoryError::OutOfRange { address });
         }
-        let ptr = address as *mut u8;
-        // SAFETY: caller is responsible for the address being valid and
-        // writable in this process.
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-        }
-        Ok(data.len())
+        // The target might be a read-only/executable code page (e.g. when we
+        // write a code-cave `jmp` detour into the game's .text). A raw
+        // `ptr::copy` there would fault the whole game process with an access
+        // violation (the "every code cave crashes every game" bug). So we
+        // always flip the page(s) writable first, then restore the original
+        // protection — exactly what the breakpoint path does.
+        write_in_process(address, data)
     }
 
     fn scan_region(
@@ -598,5 +810,60 @@ impl ProcessMemory for SelfProcess {
         {
             Ok(Vec::new())
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// The core cave-crash regression test: writing into a page that is mapped
+    /// read-only + executable (like a game's .text code page) must succeed via
+    /// `write_in_process` (which flips it writable first), NOT fault the
+    /// process. Before the fix, this raw `ptr::copy` into a PROT_EXEC (no W)
+    /// page would SIGSEGV — the "every code cave crashes every game" bug.
+    #[test]
+    fn write_to_readonly_exec_page_succeeds() {
+        // Allocate a page with PROT_READ|PROT_EXEC only (no write).
+        let page = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert!(page != libc::MAP_FAILED, "mmap exec-only page");
+        let addr = page as u64;
+        // Sanity: the page starts zeroed.
+        let probe = SelfProcess.read(addr, 8).unwrap();
+        assert_eq!(&probe[..], &[0u8; 8]);
+
+        // Write through the SelfProcess path — must flip protection and succeed.
+        let payload = [
+            0xFFu8, 0x25, 0x00, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let n = SelfProcess
+            .write(addr, &payload)
+            .expect("write into exec-only page should succeed");
+        assert_eq!(n, payload.len());
+
+        // Verify the bytes landed.
+        let back = SelfProcess.read(addr, payload.len()).unwrap();
+        assert_eq!(back, payload.to_vec());
+
+        unsafe {
+            libc::munmap(page, 4096);
+        }
+    }
+
+    /// A read of an unmapped/out-of-range address must return a clean error,
+    /// not fault the process (the fast-channel robustness fix).
+    #[test]
+    fn read_out_of_range_returns_error() {
+        let r = SelfProcess.read(0x0000_0000_0100_0000, 8);
+        assert!(r.is_err(), "reading a non-region address should error, got {r:?}");
     }
 }

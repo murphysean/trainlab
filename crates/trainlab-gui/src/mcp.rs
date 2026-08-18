@@ -103,12 +103,24 @@ fn call_dll(req: &Request) -> Result<Response, String> {
 /// findings and mutations persist across tool calls (D7, D8).
 pub struct TrainlabMcpServer {
     session: SharedSession,
+    egui_ctx: Option<eframe::egui::Context>,
 }
 
 impl TrainlabMcpServer {
     /// Create a handler sharing the given session state.
     pub fn with_session(session: SharedSession) -> Self {
-        Self { session }
+        Self { session, egui_ctx: None }
+    }
+
+    /// Create a handler sharing the given session state and egui context for repaint notifications.
+    pub fn with_session_and_ctx(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -> Self {
+        Self { session, egui_ctx }
+    }
+
+    fn request_repaint(&self) {
+        if let Some(ctx) = &self.egui_ctx {
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -357,9 +369,43 @@ pub struct CaptureRegArgs {
     /// Number of captures to keep in the ring buffer (default 32).
     #[serde(default = "default_capacity")]
     pub capacity: usize,
-    /// Disarm after the first capture (default true).
+    /// Disarm after the first capture that passes the gate (default true).
+    /// Set false to keep capturing into the ring in continuous mode.
     #[serde(default = "default_true")]
-    pub one_shot: bool,
+    pub stop_on_match: bool,
+    /// Optional gate that decides *when* to capture. This is the decoupled
+    /// "capture register X only when register Y compares Z" primitive. Provide
+    /// a JSON object with `reg`, `cmp` (eq/ne/gt/lt/ge/le/range/whole), and
+    /// either `value` (for eq/ne/gt/lt/ge/le) or `min`/`max` (for range).
+    /// `cmp="whole"` retains only clean whole numbers (floats). If absent, the
+    /// capture records on every execution.
+    pub gate: Option<CaptureGateArgs>,
+}
+
+/// JSON-serializable gate spec for `capture_reg`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CaptureGateArgs {
+    /// Register to test (e.g. "rbp"). The value and the pointer are both live
+    /// at the site, so you gate on the value register and capture the pointer.
+    pub reg: String,
+    /// Comparison: eq, ne, gt, lt, ge, le, range, whole.
+    pub cmp: String,
+    /// How to interpret the gate register for the compare AND for reporting
+    /// `gate_value`: "ptr", "i64", "u64", "f64", or "f32". Defaults to the
+    /// capture's value_type. For Lua/script double value registers, set "f64"
+    /// so a value like 3.0 is compared/decoded as a double, not as a giant
+    /// integer/ptr (which would break range filtering).
+    #[serde(default)]
+    pub value_type: Option<String>,
+    /// Constant for eq/ne/gt/lt/ge/le (interpreted per value_type).
+    #[serde(default)]
+    pub value: Option<f64>,
+    /// Lower bound for range.
+    #[serde(default)]
+    pub min: Option<f64>,
+    /// Upper bound for range.
+    #[serde(default)]
+    pub max: Option<f64>,
 }
 
 fn default_reg() -> String {
@@ -563,12 +609,14 @@ impl TrainlabMcpServer {
         match result {
             Ok(version) => {
                 let pid = {
-                    let s = self
+                    let mut s = self
                         .session
                         .lock()
                         .map_err(|_| err("session lock poisoned"))?;
+                    s.log_activity("MCP", format!("attached to '{}', version {version}", args.game));
                     s.game_pid().map(|p| p.to_string()).unwrap_or_else(|| "unknown".into())
                 };
+                self.request_repaint();
                 Ok(CallToolResult::success(vec![
                     rmcp::model::ContentBlock::text(format!(
                         "attached to '{}' (pid {pid}), inject v{version}",
@@ -576,7 +624,13 @@ impl TrainlabMcpServer {
                     )),
                 ]))
             }
-            Err(e) => Err(err(format!("attach failed: {e}"))),
+            Err(e) => {
+                if let Ok(mut s) = self.session.lock() {
+                    s.log_activity("MCP", format!("attach to '{}' failed: {e}", args.game));
+                }
+                self.request_repaint();
+                Err(err(format!("attach failed: {e}")))
+            }
         }
     }
 
@@ -689,7 +743,9 @@ impl TrainlabMcpServer {
             .lock()
             .map_err(|_| err("session lock poisoned"))?;
         let id = s.add_cheat(&args.label, kind, args.note.as_deref());
+        s.log_activity("MCP", format!("added cheat '{}' (id {id})", args.label));
         drop(s);
+        self.request_repaint();
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(format!(
                 "added cheat '{}' (id {id}); it's now in the GUI Cheats panel",
@@ -1450,6 +1506,7 @@ impl TrainlabMcpServer {
             .map_err(|_| err("session lock poisoned"))?;
         s.set_marker(&args.label, address, args.note.as_deref())
             .map_err(|e| err(e))?;
+        self.request_repaint();
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(format!(
                 "marker '{}' set to {address:#018x}",
@@ -1610,35 +1667,73 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<CaptureRegArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        use trainlab_core::capture::{CaptureRegSpec, Register, ValueType};
+        use trainlab_core::capture::{CaptureRegSpec, Gate, GateCmp, Register, ValueType};
         let target = parse_addr(&args.target)?;
         let reg = Register::parse(&args.reg)
             .ok_or_else(|| err(format!("unknown register '{}' (try rax/rcx/rbx/... or xmm0..xmm7)", args.reg)))?;
         let value_type = ValueType::parse(&args.value_type)
             .ok_or_else(|| err(format!("unknown value_type '{}' (try ptr/i64/u64/f64/f32)", args.value_type)))?;
-        let spec = CaptureRegSpec::new(reg, value_type);
+        // Build the optional gate (decoupled "capture X if Y compares Z").
+        let gate = match &args.gate {
+            None => None,
+            Some(g) => {
+                let greg = Register::parse(&g.reg).ok_or_else(|| {
+                    err(format!("unknown gate register '{}'", g.reg))
+                })?;
+                let cmp = GateCmp::parse(&g.cmp).ok_or_else(|| {
+                    err(format!("unknown gate cmp '{}' (try eq/ne/gt/lt/ge/le/range/whole)", g.cmp))
+                })?;
+                // The gate has its own value_type (defaults to the capture's).
+                let gate_vt = match &g.value_type {
+                    None => value_type,
+                    Some(v) => ValueType::parse(v).ok_or_else(|| {
+                        err(format!("unknown gate value_type '{}' (try ptr/i64/u64/f64/f32)", v))
+                    })?,
+                };
+                let value = g.value.unwrap_or(0.0);
+                let min = g.min.unwrap_or(0.0);
+                let max = g.max.unwrap_or(0.0);
+                Some(Gate { reg: greg, cmp, value_type: gate_vt, value, min, max })
+            }
+        };
+        let spec = CaptureRegSpec::new(reg, value_type).with_optional_gate(gate);
         match call_dll(&Request::CaptureReg {
             target,
             spec,
             capacity: args.capacity,
-            one_shot: args.one_shot,
+            disarm: args.stop_on_match,
         }) {
             Ok(Response::CaptureInstalled {
                 id,
                 scratch,
                 target: _,
                 original: _,
-            }) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format!(
-                    "armed non-stalling capture id {id} at {:#x}: capturing {} as {} (capacity {}) (one_shot={}).\nscratch buffer: {:#x} (readable via 'read').\nRead back with 'read_captures' (id {id}); uninstall with 'uninstall_capture_reg' (id {id}).",
-                    target,
-                    reg.name(),
-                    value_type.name(),
-                    args.capacity,
-                    args.one_shot,
-                    scratch,
-                )),
-            ])),
+            }) => {
+                let gate_desc = match &gate {
+                    None => "unconditional".to_string(),
+                    Some(g) => format!(
+                        "gate {} {}",
+                        g.reg.name(),
+                        match g.cmp {
+                            GateCmp::Range => format!("in [{}, {}]", g.min, g.max),
+                            GateCmp::Whole => "whole".to_string(),
+                            c => format!("{} {}", c.name(), g.value),
+                        }
+                    ),
+                };
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "armed non-stalling capture id {id} at {:#x}: capturing {} as {} (capacity {}) ({}; stop_on_match={}).\nscratch buffer: {:#x} (readable via 'read').\nRead back with 'read_captures' (id {id}); uninstall with 'uninstall_capture_reg' (id {id}).",
+                        target,
+                        reg.name(),
+                        value_type.name(),
+                        args.capacity,
+                        gate_desc,
+                        args.stop_on_match,
+                        scratch,
+                    )),
+                ]))
+            }
             Ok(Response::Error { message }) => Err(err(message)),
             Ok(_) => Err(err("unexpected response from DLL")),
             Err(e) => Err(err(e)),
@@ -1646,26 +1741,32 @@ impl TrainlabMcpServer {
     }
 
     /// Read back the entries recorded by a `capture_reg` capture.
-    #[tool(description = "Read back the register values recorded by a passive 'capture_reg' capture (by id). Returns each captured entry: sequence, decoded value, raw 64-bit value, and the site address that was executing.")]
+    #[tool(description = "Read back the register values recorded by a passive 'capture_reg' capture (by id). Returns each captured entry: sequence, decoded capture value, raw 64-bit value, the gate value at capture time, and the site address that was executing.")]
     fn read_captures(
         &self,
         Parameters(args): Parameters<ReadCapturesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match call_dll(&Request::ReadCaptures { id: args.id }) {
-            Ok(Response::ReadCaptures { entries }) => {
+            Ok(Response::ReadCaptures { entries, disarmed }) => {
                 if entries.is_empty() {
+                    let note = if disarmed {
+                        " (already disarmed — a one_shot/stop_on_match capture fired earlier)"
+                    } else {
+                        ""
+                    };
                     return Ok(CallToolResult::success(vec![
                         rmcp::model::ContentBlock::text(format!(
-                            "capture {} has not recorded any hits yet (the site has not executed since arming).",
+                            "capture {} has not recorded any hits yet (the site has not executed since arming).{note}",
                             args.id
                         )),
                     ]));
                 }
-                let mut lines = vec![format!("capture {} — {} recorded hit(s):", args.id, entries.len())];
+                let disarm_note = if disarmed { " (disarmed)" } else { "" };
+                let mut lines = vec![format!("capture {} — {} recorded hit(s){disarm_note}:", args.id, entries.len())];
                 for e in entries {
                     lines.push(format!(
-                        "  seq={} reg_value={:.4} raw=0x{:016x} rip=0x{:016x}",
-                        e.seq, e.reg_value, e.raw, e.rip
+                        "  seq={} reg_value={:.4} raw=0x{:016x} gate_value={:.4} rip=0x{:016x}",
+                        e.seq, e.reg_value, e.raw, e.gate_value, e.rip
                     ));
                 }
                 Ok(CallToolResult::success(vec![
@@ -2606,6 +2707,7 @@ pub async fn serve(
     host: &str,
     port: u16,
     session: SharedSession,
+    egui_ctx: Option<eframe::egui::Context>,
 ) -> anyhow::Result<(String, tokio_util::sync::CancellationToken)> {
     use rmcp::transport::{
         streamable_http_server::session::local::LocalSessionManager,
@@ -2630,7 +2732,8 @@ pub async fn serve(
     // sessions. The GUI writes `game_pid`; scan-family tools open it here.
     let session_factory = {
         let session = session.clone();
-        move || Ok(TrainlabMcpServer::with_session(session.clone()))
+        let egui_ctx = egui_ctx.clone();
+        move || Ok(TrainlabMcpServer::with_session_and_ctx(session.clone(), egui_ctx.clone()))
     };
     let service: StreamableHttpService<TrainlabMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
@@ -2669,7 +2772,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_roundtrip() -> anyhow::Result<()> {
-        let (url, ct) = serve("127.0.0.1", 0, Default::default()).await?;
+        let (url, ct) = serve("127.0.0.1", 0, Default::default(), None).await?;
         let url: std::sync::Arc<str> = url.into();
         let transport: StreamableHttpClientTransport<reqwest::Client> =
             StreamableHttpClientTransport::from_uri(url);

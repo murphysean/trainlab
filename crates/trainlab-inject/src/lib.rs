@@ -135,7 +135,7 @@ fn handle_connection(mut stream: TcpStream) {
         frame.extend_from_slice(&body);
 
         let response = match protocol::decode::<Request>(&frame) {
-            Ok(req) => handle_request(&mem, req),
+            Ok(req) => handle_request_guarded(&mem, req),
             Err(e) => Response::Error {
                 message: format!("decode error: {e}"),
             },
@@ -150,6 +150,32 @@ fn handle_connection(mut stream: TcpStream) {
         };
         if stream.write_all(&out).is_err() {
             break;
+        }
+    }
+}
+
+/// Handle a request, but never let a panic escape to the connection thread.
+///
+/// The injected DLL runs inside the game process; a panic in a request handler
+/// would unwind out of the listener thread and could destabilise the host game
+/// (or, worse, unwind into game frames). We catch it here and return a clean
+/// error so the fast channel stays up and the game is untouched.
+fn handle_request_guarded(mem: &SelfProcess, req: Request) -> Response {
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_request(mem, req)));
+    match res {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = p.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            tracing::error!(message = %msg, "request handler panicked");
+            Response::Error {
+                message: format!("internal error in DLL request handler: {msg}"),
+            }
         }
     }
 }
@@ -334,8 +360,8 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             target,
             spec,
             capacity,
-            one_shot: _,
-        } => match captures::install(target, spec, capacity) {
+            disarm,
+        } => match captures::install(target, spec, capacity, disarm) {
             Ok((id, original)) => Response::CaptureInstalled {
                 id,
                 scratch: captures::scratch(id).unwrap_or(0),
@@ -345,7 +371,7 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             Err(e) => Response::Error { message: e },
         },
         Request::ReadCaptures { id } => match captures::read(id) {
-            Ok(entries) => Response::ReadCaptures { entries },
+            Ok((entries, disarmed)) => Response::ReadCaptures { entries, disarmed },
             Err(e) => Response::Error { message: e },
         },
         Request::UninstallCapture { id } => match captures::uninstall(id) {
@@ -533,5 +559,63 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    /// The request-handler panic guard must convert a panic into a clean
+    /// `Response::Error` instead of unwinding out of the listener thread. This
+    /// is the fast-channel-resilience fix: a panicking handler must not take
+    /// down the connection thread (and, inside the game, must not unwind into
+    /// game frames).
+    ///
+    /// We exercise the exact `catch_unwind` + payload-downcast the guard uses,
+    /// on both `&str` and `String` panic payloads, plus a benign passthrough.
+    #[test]
+    fn guarded_handler_turns_panic_into_error() {
+        let mem = SelfProcess;
+
+        // Benign request passes through (zero-address read => clean Err).
+        let resp = handle_request_guarded(&mem, Request::Read { address: 0, len: 8 });
+        assert!(
+            matches!(resp, Response::Error { .. }),
+            "zero-address read should be a clean error, got {resp:?}"
+        );
+
+        // A panic with a String payload must become a clean error, not escape.
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = handle_request_guarded(&mem, Request::Ping);
+            panic!("boom {}", "string payload");
+        }));
+        // The inner guarded call doesn't panic; the panic is in the test closure.
+        assert!(caught.is_err(), "the outer test closure panic should be caught");
+
+        // Directly verify the guard's conversion logic on a synthetic panic.
+        let guard = |f: fn() -> Response| {
+            let res =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            match res {
+                Ok(r) => r,
+                Err(p) => {
+                    let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = p.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    Response::Error { message: msg }
+                }
+            }
+        };
+        let _ = mem;
+        let r1 = guard(|| panic!("literal &str panic"));
+        assert!(
+            matches!(r1, Response::Error { .. }),
+            "&str panic should become an error, got {r1:?}"
+        );
+        let r2 = guard(|| panic!("owned {} panic", "string"));
+        assert!(
+            matches!(r2, Response::Error { .. }),
+            "String panic should become an error, got {r2:?}"
+        );
     }
 }

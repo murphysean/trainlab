@@ -153,9 +153,24 @@ pub struct SessionState {
     cheats: Vec<Cheat>,
     /// Monotonic counter for cheat ids.
     next_cheat_id: u64,
+    /// Unified activity log (sourced as "UI: ..." or "MCP: ...").
+    activity_log: Vec<String>,
 }
 
 impl SessionState {
+    /// Log an activity entry tagged by source (e.g., "UI", "MCP").
+    pub fn log_activity(&mut self, source: &str, msg: impl Into<String>) {
+        let entry = format!("{source}: {}", msg.into());
+        self.activity_log.push(entry);
+        if self.activity_log.len() > 500 {
+            self.activity_log.remove(0);
+        }
+    }
+
+    /// Retrieve a snapshot of the current activity log entries.
+    pub fn list_activity_log(&self) -> Vec<String> {
+        self.activity_log.clone()
+    }
     /// Set the game process PID that scan-family tools target.
     pub fn set_game_pid(&mut self, pid: u32) {
         self.game_pid = Some(pid);
