@@ -133,7 +133,7 @@ impl Default for TrainlabMcpServer {
 /// Arguments for [`read`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReadArgs {
-    /// Start address to read from (decimal or `0x` hex).
+    /// Address or expression to read from: raw hex ("0x1000"), dec ("4096"), module ("game.exe+0x10"), marker ("wood_ptr"), or offset math ("wood_ptr+0x18").
     pub address: String,
     /// Number of bytes to read (default derived from `value_type`, or 16 for hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,7 +155,7 @@ pub struct AobArgs {
 pub struct SetMarkerArgs {
     /// Label to identify the marker (persists across turns).
     pub label: String,
-    /// Address to mark (decimal or `0x` hex).
+    /// Address or expression to mark: raw hex, dec, module relative ("game.exe+0x100"), or offset math ("player_ptr+0x48").
     pub address: String,
     /// Optional note describing what this address is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,7 +218,7 @@ pub struct NextArgs {
 /// Arguments for [`pointer_scan`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PointerScanArgs {
-    /// Target address (decimal or `0x` hex) whose referrers to find.
+    /// Target address or expression whose referrers to find: raw hex, dec, module, or marker ("wood_ptr+0x10").
     pub address: String,
     /// Optional size around `address` to treat as the target range (default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,7 +228,7 @@ pub struct PointerScanArgs {
 /// Arguments for [`pointer_chase`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PointerChaseArgs {
-    /// Base address to start chasing from (decimal or `0x` hex).
+    /// Base address or expression to start chasing from: raw hex, module relative ("Unrailed2.exe+0x1b42e9"), or marker.
     pub base: String,
     /// Field offsets applied after each dereference (decimal or `0x` hex).
     pub offsets: Vec<String>,
@@ -237,7 +237,7 @@ pub struct PointerChaseArgs {
 /// Arguments for [`dump`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DumpArgs {
-    /// Start address to dump (decimal or `0x` hex).
+    /// Start address or expression to dump: raw hex, dec, module, marker, or offset math ("player_ptr+0x20").
     pub address: String,
     /// Number of bytes to read.
     pub len: usize,
@@ -264,9 +264,9 @@ pub struct StructField {
 /// Arguments for [`snapshot`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotArgs {
-    /// Start address (decimal or `0x` hex).
+    /// Start address or expression (raw hex, dec, module, or marker).
     pub start: String,
-    /// End address (exclusive, decimal or `0x` hex). Snapshot length is `end - start`. Use this OR `len`.
+    /// End address or expression (exclusive). Snapshot length is `end - start`. Use this OR `len`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end: Option<String>,
     /// Byte length (use this OR `end`).
@@ -282,7 +282,7 @@ pub struct SnapshotArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DumpStructArgs {
-    /// Base address of the struct (decimal or `0x` hex).
+    /// Base address or expression of the struct (raw hex, dec, module, or marker).
     pub address: String,
     /// The typed fields to extract, each with a name, type, and offset.
     pub fields: Vec<StructField>,
@@ -291,7 +291,7 @@ pub struct DumpStructArgs {
 /// Arguments for [`watch_writes`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WatchWritesArgs {
-    /// Address to watch for writes (decimal or `0x` hex).
+    /// Address or expression to watch for writes: raw hex, dec, module, or marker ("wood_ptr+0x10").
     pub address: String,
     /// Number of bytes to watch (1, 2, 4, or 8; default 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,7 +304,7 @@ pub struct WatchWritesArgs {
 /// Arguments for [`break_on_code`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BreakOnCodeArgs {
-    /// Code address to break on (decimal or `0x` hex).
+    /// Code address or expression to break on: raw hex, dec, or module relative ("game.exe+0x50a0").
     pub address: String,
     /// If true, disarm after the first hit (default true).
     #[serde(default = "default_true")]
@@ -318,14 +318,14 @@ fn default_true() -> bool {
 /// Arguments for [`addr_to_module`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AddrToModuleArgs {
-    /// Address to resolve (decimal or `0x` hex).
+    /// Address or expression to resolve: raw hex, dec, or marker.
     pub address: String,
 }
 
 /// Arguments for [`disassemble`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DisassembleArgs {
-    /// Address to disassemble from (decimal or `0x` hex).
+    /// Address or expression to disassemble from: raw hex, dec, module ("game.exe+0x10"), or marker.
     pub address: String,
     /// Number of bytes to disassemble.
     #[serde(default = "default_len")]
@@ -342,7 +342,7 @@ fn default_len() -> usize {
 /// Arguments for [`write`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WriteArgs {
-    /// Address to write to (decimal or `0x` hex).
+    /// Address or expression to write to: raw hex, dec, module ("game.exe+0x10"), marker ("wood_ptr"), or offset math ("player_ptr+0x48").
     pub address: String,
     /// Hex bytes to write (e.g. "00 80 ac 43" or "0080ac43"). Required if `value` is not provided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,7 +359,7 @@ pub struct WriteArgs {
 /// Arguments for [`install_cave`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct InstallCaveArgs {
-    /// Address of the instruction to redirect (decimal or `0x` hex).
+    /// Target code address or expression to redirect: raw hex, dec, or module relative ("game.exe+0x50a0").
     pub target: String,
     /// Hook kind: "trampoline" (default, transparent — replays the stolen
     /// instructions so the game keeps working) or "override" (skips them).
