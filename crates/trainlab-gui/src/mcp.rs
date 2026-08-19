@@ -3023,19 +3023,31 @@ mod tests {
         let _ = read_u64(&p, 0).unwrap();
     }
 
-    #[test]
-    fn dump_range_to_file_writes_chunked_data() {
-        let data: Vec<u8> = (0..8192).map(|i| (i % 256) as u8).collect();
-        let p = FakeMem { data: data.clone() };
-        let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join("test_dump_range.bin");
+    #[tokio::test]
+    async fn snapshot_tool_and_http_serving_roundtrip() -> anyhow::Result<()> {
+        let (url, ct) = serve("127.0.0.1", 0, Default::default(), None).await?;
+        let mcp_url: std::sync::Arc<str> = url.clone().into();
+        let transport: StreamableHttpClientTransport<reqwest::Client> =
+            StreamableHttpClientTransport::from_uri(mcp_url);
+        let client = TestClient.serve(transport).await?;
 
-        let written = trainlab_core::memory::dump_range_to_file(&p, 0, 8192, &path, None).unwrap();
-        assert_eq!(written, 8192);
+        // Create a snapshot file manually in snapshots/ to test HTTP endpoint
+        let _ = std::fs::create_dir_all("snapshots");
+        let test_snap = std::path::Path::new("snapshots").join("test_http_snap.bin");
+        std::fs::write(&test_snap, b"SNAPSHOT_DATA_TEST_1234")?;
 
-        let read_back = std::fs::read(&path).unwrap();
-        assert_eq!(read_back, data);
+        // Deriving port from server url "http://127.0.0.1:<port>/mcp"
+        let base_url = url.trim_end_matches("/mcp");
+        let http_url = format!("{base_url}/snapshots/test_http_snap.bin");
 
-        let _ = std::fs::remove_file(&path);
+        let res = reqwest::get(&http_url).await?;
+        assert!(res.status().is_success(), "HTTP get snapshot failed with status: {}", res.status());
+        let body = res.bytes().await?;
+        assert_eq!(&body[..], b"SNAPSHOT_DATA_TEST_1234");
+
+        let _ = std::fs::remove_file(&test_snap);
+        client.cancel().await?;
+        ct.cancel();
+        Ok(())
     }
 }

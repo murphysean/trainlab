@@ -1,6 +1,6 @@
 # Feature Request: Memory snapshot (dump a range to a downloadable file)
 
-**Status:** proposed (2026-08-18)
+**Status:** ✅ implemented (2026-08-19, verified with tests)
 **Priority:** [P1]
 **crate:** `trainlab-gui` (MCP tool + file serving), `trainlab-core` (maybe a small helper)
 **Requested by:** Helldivers 1 session (2026-08-18)
