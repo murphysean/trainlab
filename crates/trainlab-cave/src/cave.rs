@@ -22,16 +22,24 @@
 use crate::emitter;
 use trainlab_core::disasm;
 
+pub use trainlab_core::cave_hook::JumpStyle;
+
 /// How a code-cave hook redirects the target instruction(s).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookKind {
     /// Transparent hook: run `payload` (default empty), then **replay** the
     /// stolen instructions (relocated to the cave) before jumping back. The
     /// target's original behavior is preserved. Empty payload = pure no-op.
-    Trampoline { payload: Vec<u8> },
+    Trampoline {
+        payload: Vec<u8>,
+        jump: JumpStyle,
+    },
     /// Replace hook: run `payload` then jump straight back, **skipping** the
     /// stolen instruction(s). The original behavior is replaced.
-    Override { payload: Vec<u8> },
+    Override {
+        payload: Vec<u8>,
+        jump: JumpStyle,
+    },
 }
 
 /// A live code cave hook installed into the target process.
@@ -84,11 +92,19 @@ where
     W: Fn(u64, &[u8]) -> Result<usize, String>,
     A: Fn(usize, bool) -> Result<u64, String>,
 {
-    // 1. Instruction-aligned patch length (>= JMP_ABS_LEN), so the jmp fits and
+    let jump_style = match &kind {
+        HookKind::Override { jump, .. } | HookKind::Trampoline { jump, .. } => *jump,
+    };
+    let min_patch_len = match jump_style {
+        JumpStyle::Absolute => emitter::JMP_ABS_LEN,
+        JumpStyle::Relative => 5,
+    };
+
+    // 1. Instruction-aligned patch length (>= min_patch_len), so the jmp fits and
     //    the jump-back lands on a real instruction boundary.
-    let window = emitter::JMP_ABS_LEN + 32;
+    let window = min_patch_len + 32;
     let buf = read(target, window).map_err(|e| format!("read window: {e}"))?;
-    let patch_len = disasm::instruction_aligned_len(&buf, emitter::JMP_ABS_LEN)
+    let patch_len = disasm::instruction_aligned_len(&buf, min_patch_len)
         .ok_or_else(|| "could not find an instruction-aligned patch length".to_string())?;
 
     // 2. Original bytes for undo.
@@ -99,20 +115,20 @@ where
     //    jump-back slack. (Relocation length can grow if the encoder rewrites a
     //    short branch into a longer one, so we pad generously.)
     let payload_len = match &kind {
-        HookKind::Override { payload } | HookKind::Trampoline { payload } => payload.len(),
+        HookKind::Override { payload, .. } | HookKind::Trampoline { payload, .. } => payload.len(),
     };
     let slack = patch_len + 48;
     let cave = allocate(payload_len + slack, true)?;
 
     // 5. Build the cave body.
     match &kind {
-        HookKind::Override { payload } => {
+        HookKind::Override { payload, .. } => {
             write(cave, payload).map_err(|e| format!("write payload: {e}"))?;
             let jmp_back = emitter::jmp_abs(return_to);
             write(cave + payload.len() as u64, &jmp_back)
                 .map_err(|e| format!("write jump-back: {e}"))?;
         }
-        HookKind::Trampoline { payload } => {
+        HookKind::Trampoline { payload, .. } => {
             // Relocate stolen instructions to run right after the payload.
             let reloc_ip = cave + payload.len() as u64;
             let relocated = disasm::relocate(&original, target, reloc_ip).ok_or_else(|| {
@@ -135,7 +151,22 @@ where
     }
 
     // 6. Patch the call site with `jmp cave`.
-    let jmp_in = emitter::jmp_abs(cave);
+    let jmp_in = match jump_style {
+        JumpStyle::Absolute => emitter::jmp_abs(cave),
+        JumpStyle::Relative => {
+            let rel = (cave as i128) - ((target + 5) as i128);
+            if rel < i32::MIN as i128 || rel > i32::MAX as i128 {
+                return Err(format!("cave target {cave:#x} out of ±2GB range for relative jump from {target:#x}"));
+            }
+            let mut bytes = vec![0xE9];
+            bytes.extend_from_slice(&(rel as i32).to_le_bytes());
+            // NOP-pad remaining stolen bytes in the patch window if patch_len > 5
+            if patch_len > 5 {
+                bytes.resize(patch_len, 0x90);
+            }
+            bytes
+        }
+    };
     write(target, &jmp_in).map_err(|e| format!("patch target: {e}"))?;
 
     Ok(InstalledCave {
@@ -220,6 +251,7 @@ mod tests {
         let target = 0x4000u64;
         let kind = HookKind::Override {
             payload: payload.to_vec(),
+            jump: JumpStyle::Absolute,
         };
         let hook = install(target, kind, fake_read, fake_write, fake_alloc).unwrap();
         assert_eq!(hook.target, 0x4000);
@@ -250,7 +282,10 @@ mod tests {
         // it first via the write closure.
         let seed = [0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0xC3]; // mov eax,1 ; nop ; ret
         fake_write(target, &seed).unwrap();
-        let kind = HookKind::Trampoline { payload: Vec::new() };
+        let kind = HookKind::Trampoline {
+            payload: Vec::new(),
+            jump: JumpStyle::Absolute,
+        };
         let hook = install(target, kind, fake_read, fake_write, fake_alloc).unwrap();
         // Original captured == the seed.
         assert!(hook.original.len() >= 7);
@@ -260,6 +295,26 @@ mod tests {
         FAKE.with(|m| {
             let first = m.bytes_at(0x100000, 5);
             assert_eq!(&first[0..2], &[0xB8, 0x01], "stolen mov eax,1 relocated");
+        });
+    }
+
+    #[test]
+    fn install_relative_jump_5byte_patch() {
+        let target = 0x100005u64; // Close to fake_alloc 0x100000
+        let seed = [0x48, 0x2B, 0x41, 0x10, 0x48, 0xC1, 0xF8, 0x03, 0xC3]; // 9 bytes (sub; sar; ret)
+        fake_write(target, &seed).unwrap();
+        let kind = HookKind::Trampoline {
+            payload: Vec::new(),
+            jump: JumpStyle::Relative,
+        };
+        let hook = install(target, kind, fake_read, fake_write, fake_alloc).unwrap();
+        // Patch window for relative jump on this 4-byte sub + 4-byte sar + 1-byte ret should be 8 bytes
+        assert_eq!(hook.original.len(), 8);
+        FAKE.with(|m| {
+            let patched = m.bytes_at(target, 8);
+            assert_eq!(patched[0], 0xE9); // relative jump opcode
+            // Remaining 3 bytes in the 8-byte patch window must be NOP padded (0x90)
+            assert_eq!(&patched[5..8], &[0x90, 0x90, 0x90]);
         });
     }
 

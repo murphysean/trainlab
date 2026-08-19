@@ -257,6 +257,25 @@ pub struct StructField {
 }
 
 /// Arguments for [`dump_struct`].
+/// Arguments for [`snapshot`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotArgs {
+    /// Start address (decimal or `0x` hex).
+    pub start: String,
+    /// End address (exclusive, decimal or `0x` hex). Snapshot length is `end - start`. Use this OR `len`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    /// Byte length (use this OR `end`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub len: Option<u64>,
+    /// Optional filename hint (e.g. `snap_0x0d020000_15m.bin`). Default dir: `snapshots/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Optional override cap for snapshot size in bytes (default 256 MB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_len: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DumpStructArgs {
     /// Base address of the struct (decimal or `0x` hex).
@@ -338,6 +357,13 @@ pub struct InstallCaveArgs {
     /// trampoline).
     #[serde(default)]
     pub payload: String,
+    /// Jump style: "absolute" (default, 14-byte long jump) or "relative" (5-byte short jump for tight patch sites).
+    #[serde(default = "default_jump_style")]
+    pub jump: String,
+}
+
+fn default_jump_style() -> String {
+    "absolute".to_string()
 }
 
 fn default_hook_kind() -> String {
@@ -380,6 +406,9 @@ pub struct CaptureRegArgs {
     /// `cmp="whole"` retains only clean whole numbers (floats). If absent, the
     /// capture records on every execution.
     pub gate: Option<CaptureGateArgs>,
+    /// Jump style: "absolute" (default, 14-byte long jump) or "relative" (5-byte short jump for tight patch sites).
+    #[serde(default)]
+    pub jump: Option<String>,
 }
 
 /// JSON-serializable gate spec for `capture_reg`.
@@ -726,8 +755,8 @@ impl TrainlabMcpServer {
                 let target = parse_addr(target)?;
                 let payload = parse_hex_bytes(args.payload.as_deref().unwrap_or(""))?;
                 let hook = match args.hook.as_deref().unwrap_or("trampoline") {
-                    "trampoline" => CaveHook::Trampoline { payload },
-                    "override" => CaveHook::Override { payload },
+                    "trampoline" => CaveHook::Trampoline { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                    "override" => CaveHook::Override { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
                     other => return Err(err(format!("unknown hook '{other}'"))),
                 };
                 CheatKind::Toggle {
@@ -1012,8 +1041,8 @@ impl TrainlabMcpServer {
                     let target = resolve_cheat_address(&resolved, pc)?;
                     let payload = parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?;
                     let hook = match pc.hook.as_deref().unwrap_or("trampoline") {
-                        "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline { payload },
-                        "override" => trainlab_core::cave_hook::CaveHook::Override { payload },
+                        "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                        "override" => trainlab_core::cave_hook::CaveHook::Override { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
                         other => return Err(err(format!("unknown hook '{other}'"))),
                     };
                     crate::session::CheatKind::Toggle {
@@ -1073,10 +1102,10 @@ impl TrainlabMcpServer {
                     }
                     crate::session::CheatKind::Toggle { target, hook, .. } => {
                         let (hk, pl) = match hook {
-                            trainlab_core::cave_hook::CaveHook::Trampoline { payload } => {
+                            trainlab_core::cave_hook::CaveHook::Trampoline { payload, .. } => {
                                 ("trampoline".to_string(), Some(hex_encode(payload)))
                             }
-                            trainlab_core::cave_hook::CaveHook::Override { payload } => {
+                            trainlab_core::cave_hook::CaveHook::Override { payload, .. } => {
                                 ("override".to_string(), Some(hex_encode(payload)))
                             }
                         };
@@ -1430,6 +1459,38 @@ impl TrainlabMcpServer {
         ]))
     }
 
+    /// Read the active value scan status and candidate matches without mutating the scan state.
+    #[tool(description = "Inspect the current active scan session without modifying it. Reports total match count, value type, alignment, and lists up to 50 current candidate matches (address = value).")]
+    fn scan_status(&self) -> Result<CallToolResult, ErrorData> {
+        let s = self
+            .session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
+        let scan = s
+            .scan()
+            .ok_or_else(|| err("no active scan session in progress"))?;
+        let count = scan.len();
+        let value_type = scan.value_type();
+        let alignment = scan.alignment();
+        let matches = scan.matches().to_vec();
+        drop(s);
+
+        let lines: Vec<String> = matches
+            .iter()
+            .take(50)
+            .map(|(a, v)| format!("{a:#018x} = {v}"))
+            .collect();
+        let mut text = format!("active scan: {count} match(es) (type: {value_type:?}, align: {alignment})\n");
+        text.push_str(&lines.join("\n"));
+        if count > 50 {
+            text.push_str(&format!("\n... and {} more", count - 50));
+        }
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(text),
+        ]))
+    }
+
     /// Find addresses that point to (reference) a target address.
     #[tool(description = "Reverse-reference scan: find writable addresses whose pointer value points into the range around a target address. Use to find what points to a value (owning object), then chase a stable chain.")]
     fn pointer_scan(
@@ -1526,6 +1587,81 @@ impl TrainlabMcpServer {
             ])),
             Err(e) => Err(err(format!("dump failed: {e}"))),
         }
+    }
+
+    /// Dump a memory range to a snapshot binary file on disk and return a downloadable URL.
+    #[tool(description = "Dump a large memory range (e.g. 15MB Lua heap) to a snapshot file on disk and return its local file path, size, and downloadable HTTP URL. Pass either 'end' or 'len'.")]
+    fn snapshot(
+        &self,
+        Parameters(args): Parameters<SnapshotArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let start = parse_addr(&args.start)?;
+        let len = match (args.end.as_deref(), args.len) {
+            (Some(end_str), None) => {
+                let end = parse_addr(end_str)?;
+                if end <= start {
+                    return Err(err("end address must be greater than start address"));
+                }
+                end - start
+            }
+            (None, Some(l)) => {
+                if l == 0 {
+                    return Err(err("length must be greater than 0"));
+                }
+                l
+            }
+            (Some(_), Some(_)) => {
+                return Err(err("specify either 'end' or 'len', but not both"));
+            }
+            (None, None) => {
+                return Err(err("must specify either 'end' or 'len'"));
+            }
+        };
+
+        let file_name = args.name.unwrap_or_else(|| {
+            format!("snap_0x{start:08x}_{len}.bin")
+        });
+
+        // Ensure snapshot file is saved in snapshots/ subdirectory
+        let snap_dir = std::path::Path::new("snapshots");
+        let file_path = snap_dir.join(&file_name);
+
+        let proc = game_process(&self.session)?;
+        let bytes_written = trainlab_core::memory::dump_range_to_file(
+            proc.as_ref(),
+            start,
+            len,
+            &file_path,
+            args.max_len,
+        )
+        .map_err(|e| err(format!("snapshot dump failed: {e}")))?;
+
+        // Build the download URL based on configured MCP host and port
+        let (host, port) = {
+            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            (s.dll_host().to_string(), s.dll_port())
+        };
+        // Use loopback or host address for the snapshot URL
+        let url_host = if host == "0.0.0.0" { "127.0.0.1".to_string() } else { host };
+        let url = format!("http://{url_host}:{port}/snapshots/{file_name}");
+
+        if let Ok(mut s) = self.session.lock() {
+            s.log_activity(
+                "MCP",
+                format!("created memory snapshot '{file_name}' ({bytes_written} bytes)"),
+            );
+        }
+        self.request_repaint();
+
+        let resp_json = serde_json::json!({
+            "path": file_path.to_string_lossy(),
+            "size": bytes_written,
+            "url": url,
+        });
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(resp_json.to_string()),
+        ]))
     }
 
     /// Read a struct at an address as a list of typed fields (name, type,
@@ -1696,7 +1832,11 @@ impl TrainlabMcpServer {
                 Some(Gate { reg: greg, cmp, value_type: gate_vt, value, min, max })
             }
         };
-        let spec = CaptureRegSpec::new(reg, value_type).with_optional_gate(gate);
+        let jump_style = match args.jump.as_deref().unwrap_or("absolute").to_lowercase().as_str() {
+            "relative" | "short" => trainlab_core::cave_hook::JumpStyle::Relative,
+            _ => trainlab_core::cave_hook::JumpStyle::Absolute,
+        };
+        let spec = CaptureRegSpec::new(reg, value_type).with_optional_gate(gate).with_jump(jump_style);
         match call_dll(&Request::CaptureReg {
             target,
             spec,
@@ -1932,17 +2072,22 @@ impl TrainlabMcpServer {
     /// This *stages* the install and returns a pending op id + preview; it does
     /// **not** patch anything yet. Confirm with `confirm_op`, or discard with
     /// `reject_op`.
-    #[tool(description = "Stage a code cave install: allocate executable memory, run a shellcode payload, redirect an instruction to it via a jmp. Returns a pending op id; apply it with 'confirm_op' or discard with 'reject_op'. Nothing is patched until confirmed.")]
+    #[tool(description = "Stage a code cave hook install. Kinds: 1) 'trampoline' (DEFAULT): runs your custom payload, automatically disassembles and replays stolen instructions in the cave, then jumps back — original game logic is preserved (empty payload = transparent no-op). 2) 'override': runs payload and jumps back, skipping stolen instructions. Example payload: '48 c7 83 90 01 00 00 00 00 90 00' (mov dword ptr [rbx+0x190], 9000). Apply with 'confirm_op'.")]
     fn install_cave(
         &self,
         Parameters(args): Parameters<InstallCaveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        use trainlab_core::cave_hook::CaveHook;
+        use trainlab_core::cave_hook::{CaveHook, JumpStyle};
         let target = parse_addr(&args.target)?;
         let payload = parse_hex_bytes(&args.payload)?;
+        let jump = match args.jump.to_lowercase().as_str() {
+            "absolute" => JumpStyle::Absolute,
+            "relative" | "short" => JumpStyle::Relative,
+            other => return Err(err(format!("unknown jump style '{other}' (expected 'absolute' or 'relative')"))),
+        };
         let hook = match args.hook.as_str() {
-            "trampoline" => CaveHook::Trampoline { payload: payload.clone() },
-            "override" => CaveHook::Override { payload: payload.clone() },
+            "trampoline" => CaveHook::Trampoline { payload: payload.clone(), jump },
+            "override" => CaveHook::Override { payload: payload.clone(), jump },
             other => return Err(err(format!("unknown hook kind '{other}' (expected 'trampoline' or 'override')"))),
         };
         let kind_desc = match &hook {
@@ -2741,7 +2886,10 @@ pub async fn serve(
             std::sync::Arc::new(LocalSessionManager::default()),
             config,
         );
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let _ = std::fs::create_dir_all("snapshots");
+    let router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let addr = listener.local_addr()?;
     tracing::info!(%addr, "trainlab MCP server listening on /mcp");
@@ -2873,5 +3021,21 @@ mod tests {
         assert_eq!(read_cstr(&p, 8, 16).unwrap(), "hi");
         // A ptr read of the u32 bytes yields an arbitrary value; just check it's a number.
         let _ = read_u64(&p, 0).unwrap();
+    }
+
+    #[test]
+    fn dump_range_to_file_writes_chunked_data() {
+        let data: Vec<u8> = (0..8192).map(|i| (i % 256) as u8).collect();
+        let p = FakeMem { data: data.clone() };
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_dump_range.bin");
+
+        let written = trainlab_core::memory::dump_range_to_file(&p, 0, 8192, &path, None).unwrap();
+        assert_eq!(written, 8192);
+
+        let read_back = std::fs::read(&path).unwrap();
+        assert_eq!(read_back, data);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

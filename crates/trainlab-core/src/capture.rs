@@ -272,14 +272,21 @@ pub struct CaptureRegSpec {
     /// Optional gate. If present, the capture register is only recorded when
     /// the gate register passes; if absent, the capture records unconditionally.
     pub gate: Option<Gate>,
+    /// Patch jump style: Absolute (default, 14-byte) or Relative (5-byte short jump).
+    #[serde(default)]
+    pub jump: crate::cave_hook::JumpStyle,
 }
 
 impl CaptureRegSpec {
     pub fn new(reg: Register, value_type: ValueType) -> Self {
-        Self { reg, value_type, gate: None }
+        Self { reg, value_type, gate: None, jump: crate::cave_hook::JumpStyle::Absolute }
     }
     pub fn with_gate(mut self, gate: Gate) -> Self {
         self.gate = Some(gate);
+        self
+    }
+    pub fn with_jump(mut self, jump: crate::cave_hook::JumpStyle) -> Self {
+        self.jump = jump;
         self
     }
     pub fn with_optional_gate(mut self, gate: Option<Gate>) -> Self {

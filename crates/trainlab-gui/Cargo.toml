@@ -18,8 +18,10 @@ rmcp = { workspace = true }
 axum = { workspace = true }
 tokio-util = "0.7.19"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 serde_yaml = { workspace = true }
 schemars = { version = "1.0", features = ["derive"] }
+tower-http = { version = "0.6", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

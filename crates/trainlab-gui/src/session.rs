@@ -492,7 +492,10 @@ mod tests {
         let id2 = s.stage_op(
             0x200,
             PendingKind::InstallCave {
-                hook: CaveHook::Trampoline { payload: vec![] },
+                hook: CaveHook::Trampoline {
+                    payload: vec![],
+                    jump: trainlab_core::cave_hook::JumpStyle::Absolute,
+                },
             },
             "install cave".into(),
         );
@@ -564,7 +567,10 @@ mod tests {
         let id2 = s.add_cheat(
             "god mode",
             CheatKind::Toggle {
-                hook: CaveHook::Trampoline { payload: vec![] },
+                hook: CaveHook::Trampoline {
+                    payload: vec![],
+                    jump: trainlab_core::cave_hook::JumpStyle::Absolute,
+                },
                 target: 0x200,
                 enabled: false,
             },

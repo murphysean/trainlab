@@ -174,7 +174,7 @@ impl Scan {
         for (addr, prev) in &self.matches {
             match read_value(proc, *addr, self.value_type) {
                 Ok(cur) => {
-                    if op_matches(op, *prev, cur) {
+                    if op_matches(op, *prev, cur, self.value_type) {
                         kept.push((*addr, cur));
                     }
                 }
@@ -215,14 +215,34 @@ fn buf_to_f64(buf: &[u8], value_type: ValueType) -> f64 {
 
 /// Decide whether a value satisfies `op`. `prev` is the last observed value
 /// (used only by the change ops); `cur` is the freshly-read value.
-fn op_matches(op: ScanOp, prev: f64, cur: f64) -> bool {
+fn op_matches(op: ScanOp, prev: f64, cur: f64, value_type: ValueType) -> bool {
     match op {
-        ScanOp::Exact { value } => cur == value,
-        ScanOp::Range { min, max } => cur >= min && cur <= max,
-        ScanOp::Changed => cur != prev,
-        ScanOp::Unchanged => cur == prev,
-        ScanOp::Increased => cur > prev,
-        ScanOp::Decreased => cur < prev,
+        ScanOp::Exact { value } => match value_type {
+            ValueType::F32 => (cur as f32 - value as f32).abs() < 1e-4,
+            ValueType::F64 => (cur - value).abs() < 1e-7,
+            _ => cur == value,
+        },
+        ScanOp::Range { min, max } => match value_type {
+            ValueType::F32 => (cur as f32) >= (min as f32) && (cur as f32) <= (max as f32),
+            _ => cur >= min && cur <= max,
+        },
+        ScanOp::Changed => match value_type {
+            ValueType::F32 => (cur as f32) != (prev as f32),
+            _ => cur != prev,
+        },
+        ScanOp::Unchanged => match value_type {
+            ValueType::F32 => (cur as f32 - prev as f32).abs() < 1e-4,
+            ValueType::F64 => (cur - prev).abs() < 1e-7,
+            _ => cur == prev,
+        },
+        ScanOp::Increased => match value_type {
+            ValueType::F32 => (cur as f32) > (prev as f32),
+            _ => cur > prev,
+        },
+        ScanOp::Decreased => match value_type {
+            ValueType::F32 => (cur as f32) < (prev as f32),
+            _ => cur < prev,
+        },
     }
 }
 
@@ -240,17 +260,24 @@ pub(crate) fn scan_buffer(
     op: ScanOp,
 ) -> Vec<(u64, f64)> {
     let mut out = Vec::new();
-    let nvals = buf.len() / size;
-    let align = if alignment > 1 { alignment } else { size };
-    for i in 0..nvals {
-        let addr = base + (i * size) as u64;
-        if align > 1 && addr % align as u64 != 0 {
+    if buf.len() < size {
+        return out;
+    }
+    let step = if alignment > 0 { alignment } else { 1 };
+    let end_offset = buf.len() - size;
+
+    let mut offset = 0;
+    while offset <= end_offset {
+        let addr = base + offset as u64;
+        if alignment > 1 && addr % alignment as u64 != 0 {
+            offset += step;
             continue;
         }
-        let v = buf_to_f64(&buf[i * size..(i + 1) * size], value_type);
-        if op_matches(op, v, v) {
+        let v = buf_to_f64(&buf[offset..offset + size], value_type);
+        if op_matches(op, v, v, value_type) {
             out.push((addr, v));
         }
+        offset += step;
     }
     out
 }

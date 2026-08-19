@@ -17,6 +17,7 @@
 //! This is the "control room" for your training sessions.
 
 use eframe::egui;
+use trainlab_core::memory::ProcessMemory;
 use trainlab_core::protocol::{Request, Response};
 
 use crate::session::{Cheat, CheatKind, SharedSession, SessionState};
@@ -76,8 +77,29 @@ struct TrainlabApp {
     cheat_values: std::collections::HashMap<u64, String>,
     show_cheats: bool,
 
+    // Value Search state
+    scan_val: String,
+    scan_val_max: String,
+    scan_val_type: trainlab_core::scan::ValueType,
+    scan_op_mode: ScanOpMode,
     // Active Tab state
     active_tab: ActiveTab,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanOpMode {
+    Exact,
+    Range,
+    Changed,
+    Unchanged,
+    Increased,
+    Decreased,
+}
+
+impl Default for ScanOpMode {
+    fn default() -> Self {
+        ScanOpMode::Exact
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +141,10 @@ impl TrainlabApp {
             regions: Vec::new(),
             cheat_values: std::collections::HashMap::new(),
             show_cheats: true,
+            scan_val: "".into(),
+            scan_val_max: "".into(),
+            scan_val_type: trainlab_core::scan::ValueType::I32,
+            scan_op_mode: ScanOpMode::Exact,
             active_tab: ActiveTab::Cheats,
         }
     }
@@ -407,6 +433,243 @@ impl TrainlabApp {
             });
         }
     }
+
+    /// Render the interactive Value Search panel: supports first scan & refine ops
+    /// (Exact, Range, Changed, Unchanged, Increased, Decreased) across value types (i32, u32, f32, i64, u64, f64, ptr).
+    fn show_value_search_panel(&mut self, ui: &mut egui::Ui) {
+        use trainlab_core::scan::{ScanOp, ValueType};
+
+        ui.heading("🔍 Value Search & Refinement");
+        ui.label("Search game memory for values (health, gold, ammo) and refine candidates live.");
+
+        // Snapshot current scan state from shared session
+        let (active_scan_info, match_count, matches_sample) = {
+            let s = self.session.lock().unwrap();
+            if let Some(scan) = s.scan() {
+                let sample: Vec<(u64, f64)> = scan.matches().iter().take(50).cloned().collect();
+                (Some(scan.value_type()), scan.len(), sample)
+            } else {
+                (None, 0, Vec::new())
+            }
+        };
+
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("Value Type:");
+                egui::ComboBox::from_id_source("scan_val_type")
+                    .selected_text(format!("{:?}", self.scan_val_type))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.scan_val_type, ValueType::I32, "i32");
+                        ui.selectable_value(&mut self.scan_val_type, ValueType::U32, "u32");
+                        ui.selectable_value(&mut self.scan_val_type, ValueType::F32, "f32");
+                        ui.selectable_value(&mut self.scan_val_type, ValueType::I64, "i64");
+                        ui.selectable_value(&mut self.scan_val_type, ValueType::U64, "u64");
+                        ui.selectable_value(&mut self.scan_val_type, ValueType::F64, "f64");
+                        ui.selectable_value(&mut self.scan_val_type, ValueType::Ptr, "ptr");
+                    });
+
+                ui.separator();
+                ui.label("Filter Mode:");
+                egui::ComboBox::from_id_source("scan_op_mode")
+                    .selected_text(match self.scan_op_mode {
+                        ScanOpMode::Exact => "Exact Value",
+                        ScanOpMode::Range => "Value Range [Min..Max]",
+                        ScanOpMode::Changed => "Changed Value (≠ last)",
+                        ScanOpMode::Unchanged => "Unchanged Value (= last)",
+                        ScanOpMode::Increased => "Increased Value (> last)",
+                        ScanOpMode::Decreased => "Decreased Value (< last)",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.scan_op_mode, ScanOpMode::Exact, "Exact Value");
+                        ui.selectable_value(&mut self.scan_op_mode, ScanOpMode::Range, "Value Range [Min..Max]");
+                        ui.selectable_value(&mut self.scan_op_mode, ScanOpMode::Changed, "Changed Value (≠ last)");
+                        ui.selectable_value(&mut self.scan_op_mode, ScanOpMode::Unchanged, "Unchanged Value (= last)");
+                        ui.selectable_value(&mut self.scan_op_mode, ScanOpMode::Increased, "Increased Value (> last)");
+                        ui.selectable_value(&mut self.scan_op_mode, ScanOpMode::Decreased, "Decreased Value (< last)");
+                    });
+            });
+
+            match self.scan_op_mode {
+                ScanOpMode::Exact => {
+                    ui.horizontal(|ui| {
+                        ui.label("Value:");
+                        ui.text_edit_singleline(&mut self.scan_val);
+                    });
+                }
+                ScanOpMode::Range => {
+                    ui.horizontal(|ui| {
+                        ui.label("Min Value:");
+                        ui.text_edit_singleline(&mut self.scan_val);
+                        ui.label("Max Value:");
+                        ui.text_edit_singleline(&mut self.scan_val_max);
+                    });
+                }
+                _ => {}
+            }
+
+            ui.add_space(5.0);
+
+            ui.horizontal(|ui| {
+                // First Scan Button
+                if ui.button("⚡ First Scan").clicked() {
+                    let pid = {
+                        let s = self.session.lock().unwrap();
+                        s.game_pid()
+                    };
+                    if let Some(pid) = pid {
+                        #[cfg(windows)]
+                        let proc_res = trainlab_core::memory::WindowsProcess::open(pid);
+                        #[cfg(not(windows))]
+                        let proc_res: Result<trainlab_core::memory::LinuxProcess, String> = Ok(trainlab_core::memory::LinuxProcess::new(pid as i32));
+
+                        match proc_res {
+                            Ok(proc) => {
+                                let regions = proc.regions().unwrap_or_default();
+                                let op_res = match self.scan_op_mode {
+                                    ScanOpMode::Exact => self.scan_val.trim().parse::<f64>().map(|v| ScanOp::Exact { value: v }).map_err(|e| e.to_string()),
+                                    ScanOpMode::Range => {
+                                        let min = self.scan_val.trim().parse::<f64>();
+                                        let max = self.scan_val_max.trim().parse::<f64>();
+                                        match (min, max) {
+                                            (Ok(min), Ok(max)) => Ok(ScanOp::Range { min, max }),
+                                            _ => Err("invalid min/max".to_string()),
+                                        }
+                                    }
+                                    _ => Err("First scan requires an Exact or Range value".to_string()),
+                                };
+
+                                match op_res {
+                                    Ok(op) => {
+                                        let mut scan = trainlab_core::scan::Scan::new(self.scan_val_type);
+                                        match scan.first_scan(&proc, &regions, op) {
+                                            Ok(cnt) => {
+                                                if let Ok(mut s) = self.session.lock() {
+                                                    s.set_scan(scan);
+                                                }
+                                                self.log(format!("First scan found {cnt} candidate matches ({:?})", self.scan_val_type));
+                                            }
+                                            Err(e) => self.log(format!("First scan failed: {e}")),
+                                        }
+                                    }
+                                    Err(msg) => self.log(format!("Scan error: {msg}")),
+                                }
+                            }
+                            Err(e) => self.log(format!("Failed to open game process: {e}")),
+                        }
+                    } else {
+                        self.log("No attached game PID; attach to a process first!");
+                    }
+                }
+
+                // Next Scan / Refine Button
+                if ui.button("🔍 Next Scan (Refine)").clicked() {
+                    let pid = {
+                        let s = self.session.lock().unwrap();
+                        s.game_pid()
+                    };
+                    if let Some(pid) = pid {
+                        #[cfg(windows)]
+                        let proc_res = trainlab_core::memory::WindowsProcess::open(pid);
+                        #[cfg(not(windows))]
+                        let proc_res: Result<trainlab_core::memory::LinuxProcess, String> = Ok(trainlab_core::memory::LinuxProcess::new(pid as i32));
+
+                        match proc_res {
+                            Ok(proc) => {
+                                let op_res = match self.scan_op_mode {
+                                    ScanOpMode::Exact => self.scan_val.trim().parse::<f64>().map(|v| ScanOp::Exact { value: v }).map_err(|e| e.to_string()),
+                                    ScanOpMode::Range => {
+                                        let min = self.scan_val.trim().parse::<f64>();
+                                        let max = self.scan_val_max.trim().parse::<f64>();
+                                        match (min, max) {
+                                            (Ok(min), Ok(max)) => Ok(ScanOp::Range { min, max }),
+                                            _ => Err("invalid min/max".to_string()),
+                                        }
+                                    }
+                                    ScanOpMode::Changed => Ok(ScanOp::Changed),
+                                    ScanOpMode::Unchanged => Ok(ScanOp::Unchanged),
+                                    ScanOpMode::Increased => Ok(ScanOp::Increased),
+                                    ScanOpMode::Decreased => Ok(ScanOp::Decreased),
+                                };
+
+                                match op_res {
+                                    Ok(op) => {
+                                        let mut scan_to_refine = {
+                                            let s = self.session.lock().unwrap();
+                                            s.scan().cloned()
+                                        };
+                                        if let Some(mut scan) = scan_to_refine {
+                                            match scan.refine(&proc, op) {
+                                                Ok(cnt) => {
+                                                    if let Ok(mut s) = self.session.lock() {
+                                                        s.set_scan(scan);
+                                                    }
+                                                    self.log(format!("Refinement kept {cnt} matches"));
+                                                }
+                                                Err(e) => self.log(format!("Refinement failed: {e}")),
+                                            }
+                                        } else {
+                                            self.log("No active scan set; perform a First Scan first!");
+                                        }
+                                    }
+                                    Err(msg) => self.log(format!("Refine error: {msg}")),
+                                }
+                            }
+                            Err(e) => self.log(format!("Failed to open game process: {e}")),
+                        }
+                    } else {
+                        self.log("No attached game PID; attach to a process first!");
+                    }
+                }
+
+                // Reset Scan Button
+                if ui.button("🗑 Reset Scan").clicked() {
+                    if let Ok(mut s) = self.session.lock() {
+                        s.clear_scan();
+                    }
+                    self.log("Value search reset");
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+
+        // Display Active Scan Results
+        ui.group(|ui| {
+            if let Some(vt) = active_scan_info {
+                ui.heading(format!("Scan Match Results ({match_count} total matches, type: {vt:?})"));
+                if matches_sample.is_empty() {
+                    ui.label("No active matches.");
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            for (addr, val) in &matches_sample {
+                                ui.horizontal(|ui| {
+                                    ui.monospace(format!("{addr:#018x}"));
+                                    ui.label(format!("= {val}"));
+                                    if ui.button("+ Add as Cheat").clicked() {
+                                        let label = format!("Val @ {addr:#x}");
+                                        if let Ok(mut s) = self.session.lock() {
+                                            let cheat_id = s.add_cheat(
+                                                &label,
+                                                crate::session::CheatKind::Value {
+                                                    address: *addr,
+                                                    value_type: vt,
+                                                },
+                                                Some("Added from search UI".into()),
+                                            );
+                                            s.log_activity("UI", format!("added cheat '{label}' (id {cheat_id})"));
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                }
+            } else {
+                ui.label("No active value search session. Select type, set filter, and hit 'First Scan'.");
+            }
+        });
+    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -577,14 +840,17 @@ impl eframe::App for TrainlabApp {
                                 let mut sel = self
                                     .game_candidates
                                     .iter()
-                                    .position(|p| p.name == self.game_name)
+                                    .position(|p| p.name.eq_ignore_ascii_case(&self.game_name))
                                     .unwrap_or(0);
+                                let selected_text = names.get(sel).cloned().unwrap_or_else(|| "-- select process --".into());
                                 egui::ComboBox::from_id_source("game_candidates")
-                                    .selected_text(names.get(sel).cloned().unwrap_or_default())
+                                    .selected_text(selected_text)
                                     .show_ui(ui, |ui| {
                                         for (i, n) in names.iter().enumerate() {
                                             if ui.selectable_value(&mut sel, i, n).clicked() {
-                                                self.game_name = self.game_candidates[i].name.clone();
+                                                if let Some(cand) = self.game_candidates.get(i) {
+                                                    self.game_name = cand.name.clone();
+                                                }
                                             }
                                         }
                                     });
@@ -670,6 +936,9 @@ impl eframe::App for TrainlabApp {
                             self.show_session_panel(ui);
                         }
                         ActiveTab::DiscoverScan => {
+                            self.show_value_search_panel(ui);
+                            ui.separator();
+
                             ui.heading("AOB Scan");
                             ui.horizontal(|ui| {
                                 if ui.button("Scan").clicked() {

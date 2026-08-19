@@ -106,7 +106,10 @@ where
     );
 
     // Install a transparent trampoline with this payload in an executable cave.
-    let kind = HookKind::Trampoline { payload };
+    let kind = HookKind::Trampoline {
+        payload,
+        jump: spec.jump,
+    };
     let hook = cave::install(target, kind, read, write, allocate)?;
 
     Ok(InstalledCapture {

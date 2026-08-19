@@ -247,15 +247,15 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 mem.write(addr, data).map_err(|e| e.to_string())
             };
             let alloc = |size: usize, exec: bool| -> Result<u64, String> {
-                allocate(size, exec)
+                allocate_near(target, size, exec)
             };
             // Convert the wire hook kind into the installer's kind.
             let kind = match hook {
-                trainlab_core::cave_hook::CaveHook::Trampoline { payload } => {
-                    trainlab_cave::cave::HookKind::Trampoline { payload }
+                trainlab_core::cave_hook::CaveHook::Trampoline { payload, jump } => {
+                    trainlab_cave::cave::HookKind::Trampoline { payload, jump }
                 }
-                trainlab_core::cave_hook::CaveHook::Override { payload } => {
-                    trainlab_cave::cave::HookKind::Override { payload }
+                trainlab_core::cave_hook::CaveHook::Override { payload, jump } => {
+                    trainlab_cave::cave::HookKind::Override { payload, jump }
                 }
             };
             match trainlab_cave::cave::install(target, kind, read, write, alloc) {
@@ -466,6 +466,56 @@ fn free(address: u64) -> bool {
     // A real implementation would keep a size map.
     let _ = address;
     true
+}
+
+#[cfg(windows)]
+fn allocate_near(target: u64, size: usize, executable: bool) -> Result<u64, String> {
+    use windows_sys::Win32::System::Memory::{
+        VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
+    };
+    let prot = if executable {
+        PAGE_EXECUTE_READWRITE
+    } else {
+        PAGE_READWRITE
+    };
+    // Try VirtualAlloc near target within ±2GB (in 64KB increments)
+    const STEP: u64 = 0x10000; // 64KB alignment
+    const TWO_GB: u64 = 0x7FFF0000; // ~2GB minus margin
+
+    let min_addr = target.saturating_sub(TWO_GB);
+    let max_addr = target.saturating_add(TWO_GB);
+
+    // Search outwards from target
+    let mut offset = STEP;
+    while offset < TWO_GB {
+        // Try below target
+        if target >= offset {
+            let addr = (target - offset) & !(STEP - 1);
+            if addr >= min_addr && addr > 0x10000 {
+                let ptr = unsafe { VirtualAlloc(addr as *const _, size, MEM_COMMIT | MEM_RESERVE, prot) };
+                if !ptr.is_null() {
+                    return Ok(ptr as u64);
+                }
+            }
+        }
+        // Try above target
+        let addr = (target + offset) & !(STEP - 1);
+        if addr <= max_addr {
+            let ptr = unsafe { VirtualAlloc(addr as *const _, size, MEM_COMMIT | MEM_RESERVE, prot) };
+            if !ptr.is_null() {
+                return Ok(ptr as u64);
+            }
+        }
+        offset += STEP;
+    }
+
+    // Fall back to unconstrained allocation
+    allocate(size, executable)
+}
+
+#[cfg(not(windows))]
+fn allocate_near(_target: u64, size: usize, executable: bool) -> Result<u64, String> {
+    allocate(size, executable)
 }
 
 #[cfg(windows)]

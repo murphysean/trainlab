@@ -106,6 +106,60 @@ impl fmt::Display for MemoryError {
 
 impl std::error::Error for MemoryError {}
 
+/// Default maximum snapshot size limit (256 MB) to prevent accidental OOM/disk exhaust.
+pub const DEFAULT_MAX_SNAPSHOT_LEN: u64 = 256 * 1024 * 1024;
+
+/// Dump a memory range `[start, start + len)` to `path` in chunks.
+///
+/// Reads in 4 KB chunks to avoid allocating a large buffer in memory.
+/// Rejects requests exceeding `max_len` (defaults to 256 MB if `None`).
+pub fn dump_range_to_file<P: ProcessMemory + ?Sized>(
+    proc: &P,
+    start: u64,
+    len: u64,
+    path: &std::path::Path,
+    max_len: Option<u64>,
+) -> Result<u64, MemoryError> {
+    use std::io::Write;
+
+    let cap = max_len.unwrap_or(DEFAULT_MAX_SNAPSHOT_LEN);
+    if len > cap {
+        return Err(MemoryError::Os(format!(
+            "requested snapshot size {len} bytes exceeds maximum allowed limit {cap} bytes"
+        )));
+    }
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let file = std::fs::File::create(path)
+        .map_err(|e| MemoryError::Os(format!("failed to create output snapshot file: {e}")))?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    const CHUNK_SIZE: usize = 4096;
+    let mut remaining = len as usize;
+    let mut curr_addr = start;
+    let mut total_written = 0u64;
+
+    while remaining > 0 {
+        let chunk_len = remaining.min(CHUNK_SIZE);
+        let bytes = proc.read(curr_addr, chunk_len)?;
+        writer
+            .write_all(&bytes)
+            .map_err(|e| MemoryError::Os(format!("write error: {e}")))?;
+        total_written += bytes.len() as u64;
+        curr_addr += bytes.len() as u64;
+        remaining -= bytes.len();
+    }
+
+    writer
+        .flush()
+        .map_err(|e| MemoryError::Os(format!("flush error: {e}")))?;
+
+    Ok(total_written)
+}
+
 #[cfg(unix)]
 pub mod unix {
     //! Linux implementation using `process_vm_readv` / `process_vm_writev`.
@@ -305,13 +359,18 @@ pub mod windows {
                 )
             };
             if ok == 0 {
+                // If full read failed (e.g. guard page at boundary), try reading whatever is available
+                if read > 0 {
+                    buf.truncate(read);
+                    return Ok(buf);
+                }
                 return Err(MemoryError::Os(format!(
                     "ReadProcessMemory failed: {}",
                     last_error()
                 )));
             }
             if read != len {
-                return Err(MemoryError::PartialRead { address, len, got: read });
+                buf.truncate(read);
             }
             Ok(buf)
         }
