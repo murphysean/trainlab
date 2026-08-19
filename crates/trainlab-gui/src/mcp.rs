@@ -753,7 +753,7 @@ impl TrainlabMcpServer {
                     .address
                     .as_deref()
                     .ok_or_else(|| err("value cheat requires 'address'"))?;
-                let address = parse_addr(address)?;
+                let address = parse_addr(&self.session, address)?;
                 let vt = args
                     .value_type
                     .as_deref()
@@ -778,7 +778,7 @@ impl TrainlabMcpServer {
                     .target
                     .as_deref()
                     .ok_or_else(|| err("toggle cheat requires 'target'"))?;
-                let target = parse_addr(target)?;
+                let target = parse_addr(&self.session, target)?;
                 let payload = parse_hex_bytes(args.payload.as_deref().unwrap_or(""))?;
                 let hook = match args.hook.as_deref().unwrap_or("trampoline") {
                     "trampoline" => CaveHook::Trampoline { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
@@ -1204,9 +1204,9 @@ impl TrainlabMcpServer {
     }
 
     /// Read memory from the game process (raw bytes or typed value).
-    #[tool(description = "Read memory from the game process. Supports raw hex bytes (default) OR typed values (value_type='ptr'|'i32'|'u32'|'f32'|'i64'|'u64'|'f64'|'cstr').")]
+    #[tool(description = "Read memory from the game process. Supports raw hex bytes (default) OR typed values (value_type='ptr'|'i32'|'u32'|'f32'|'i64'|'u64'|'f64'|'cstr'). Supports expressions (e.g. 'game.exe+0x123', 'wood_ptr+0x10').")]
     fn read(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         let proc = game_process(&self.session)?;
         let vt_str = args.value_type.as_deref().unwrap_or("hex").trim().to_lowercase();
 
@@ -1563,7 +1563,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<PointerScanArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         let size = args.size.unwrap_or(8).max(1);
         let lo = address;
         let hi = address + size - 1;
@@ -1594,10 +1594,10 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<PointerChaseArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let base = parse_addr(&args.base)?;
+        let base = parse_addr(&self.session, &args.base)?;
         let mut offsets = Vec::new();
         for o in &args.offsets {
-            offsets.push(parse_addr(o)?);
+            offsets.push(parse_addr(&self.session, o)?);
         }
         // Chase the chain externally (each hop via ReadProcessMemory, which
         // fails gracefully if the chain is stale / the process moved).
@@ -1626,7 +1626,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<SetMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         let mut s = self
             .session
             .lock()
@@ -1645,7 +1645,7 @@ impl TrainlabMcpServer {
     /// Dump a chunk of memory formatted for struct/class reversal.
     #[tool(description = "Read a chunk of memory around an address and format it as hex + ASCII (and typed fields where obvious) so the agent can reverse a struct/class layout. The LLM does the teasing-out.")]
     fn dump(&self, Parameters(args): Parameters<DumpArgs>) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         let proc = game_process(&self.session)?;
         match proc.read(address, args.len) {
             Ok(data) => Ok(CallToolResult::success(vec![
@@ -1661,10 +1661,10 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<SnapshotArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let start = parse_addr(&args.start)?;
+        let start = parse_addr(&self.session, &args.start)?;
         let len = match (args.end.as_deref(), args.len) {
             (Some(end_str), None) => {
-                let end = parse_addr(end_str)?;
+                let end = parse_addr(&self.session, end_str)?;
                 if end <= start {
                     return Err(err("end address must be greater than start address"));
                 }
@@ -1836,7 +1836,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<DumpStructArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         if args.fields.is_empty() {
             return Err(err("dump_struct requires at least one field"));
         }
@@ -1907,7 +1907,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<AddrToModuleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         let proc = game_process(&self.session)?;
         // Enumerate modules (Windows toolhelp) and regions.
         #[cfg(windows)]
@@ -1941,7 +1941,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<DisassembleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         let proc = game_process(&self.session)?;
         match proc.read(address, args.len) {
             Ok(data) => {
@@ -1968,7 +1968,7 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<CaptureRegArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         use trainlab_core::capture::{CaptureRegSpec, Gate, GateCmp, Register, ValueType};
-        let target = parse_addr(&args.target)?;
+        let target = parse_addr(&self.session, &args.target)?;
         let reg = Register::parse(&args.reg)
             .ok_or_else(|| err(format!("unknown register '{}' (try rax/rcx/rbx/... or xmm0..xmm7)", args.reg)))?;
         let value_type = ValueType::parse(&args.value_type)
@@ -2112,7 +2112,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<WatchWritesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         let len = args.len.unwrap_or(4);
         match call_dll(&Request::WatchWrites {
             address,
@@ -2136,7 +2136,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<BreakOnCodeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         match call_dll(&Request::BreakOnCode {
             address,
             one_shot: args.one_shot,
@@ -2201,7 +2201,7 @@ impl TrainlabMcpServer {
     /// with `confirm_op` or discard with `reject_op`.
     #[tool(description = "Stage a write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Returns a pending op id; apply with 'confirm_op' or discard with 'reject_op'. Nothing is written until confirmed.")]
     fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&args.address)?;
+        let address = parse_addr(&self.session, &args.address)?;
         let (data, desc) = match (args.data.as_deref(), args.value.as_deref()) {
             (Some(hex_str), None) => {
                 let bytes = parse_hex_bytes(hex_str)?;
@@ -2278,7 +2278,7 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<InstallCaveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         use trainlab_core::cave_hook::{CaveHook, JumpStyle};
-        let target = parse_addr(&args.target)?;
+        let target = parse_addr(&self.session, &args.target)?;
         let payload = parse_hex_bytes(&args.payload)?;
         let jump = match args.jump.to_lowercase().as_str() {
             "absolute" => JumpStyle::Absolute,
@@ -2639,15 +2639,52 @@ impl TrainlabMcpServer {
         }
     }
 }
-fn parse_addr(s: &str) -> Result<u64, ErrorData> {
-    let s = s.trim();
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16).map_err(|e| err(format!("bad address: {e}")))
-    } else {
-        s.parse::<u64>()
-            .or_else(|_| u64::from_str_radix(s, 16))
-            .map_err(|e| err(format!("bad address: {e}")))
+fn parse_addr(session: &SharedSession, s: &str) -> Result<u64, ErrorData> {
+    parse_addr_expr(session, s)
+}
+
+/// Parse an address string which can be a raw address (hex/dec), a marker label
+/// (e.g. "wood_ptr"), or a module/marker expression with offsets (e.g. "game.exe+0x1b42e9"
+/// or "player_ptr+0x48").
+fn parse_addr_expr(session: &SharedSession, input: &str) -> Result<u64, ErrorData> {
+    let input = input.trim();
+
+    // 1. Check for `+` or `-` offset expression: <base> + <offset>
+    if let Some((base_part, off_part)) = input.split_once('+') {
+        let base = parse_addr_expr(session, base_part)?;
+        let off = parse_addr_str(off_part.trim()).map_err(|e| err(e))?;
+        return Ok(base.wrapping_add(off));
     }
+    if let Some((base_part, off_part)) = input.split_once('-') {
+        let base = parse_addr_expr(session, base_part)?;
+        let off = parse_addr_str(off_part.trim()).map_err(|e| err(e))?;
+        return Ok(base.wrapping_sub(off));
+    }
+
+    // 2. Try raw address string (0x hex or decimal)
+    if let Some(hex) = input.strip_prefix("0x").or_else(|| input.strip_prefix("0X")) {
+        if let Ok(a) = u64::from_str_radix(hex, 16) {
+            return Ok(a);
+        }
+    } else if let Ok(a) = input.parse::<u64>().or_else(|_| u64::from_str_radix(input, 16)) {
+        return Ok(a);
+    }
+
+    // 3. Try looking up in session markers
+    if let Ok(s) = session.lock() {
+        if let Some(m) = s.get_marker(input) {
+            return Ok(m.address);
+        }
+    }
+
+    // 4. Try looking up as a loaded module base (e.g. "Unrailed2.exe" or "game.dll")
+    if let Ok(base) = resolve_module_base(session, input) {
+        return Ok(base);
+    }
+
+    Err(err(format!(
+        "could not resolve address expression '{input}' (not a raw hex/dec address, saved marker, or loaded module)"
+    )))
 }
 
 /// Parse a whitespace-tolerant hex string (e.g. "00 80 ac 43" or "0080ac43")
@@ -3351,6 +3388,25 @@ mod tests {
             parse_value_bytes("18446744073709551615", trainlab_core::scan::ValueType::U64).unwrap(),
             u64::MAX.to_le_bytes().to_vec()
         );
+    }
+
+    #[test]
+    fn parse_addr_expr_resolves_markers_and_offsets() {
+        let s = SharedSession::default();
+        {
+            let mut session = s.lock().unwrap();
+            session.set_marker("wood_ptr", 0x0e890000, None).unwrap();
+        }
+
+        // Raw hex
+        assert_eq!(parse_addr_expr(&s, "0x1000").unwrap(), 0x1000);
+        // Raw dec
+        assert_eq!(parse_addr_expr(&s, "4096").unwrap(), 4096);
+        // Saved marker
+        assert_eq!(parse_addr_expr(&s, "wood_ptr").unwrap(), 0x0e890000);
+        // Marker + offset math
+        assert_eq!(parse_addr_expr(&s, "wood_ptr + 0x48").unwrap(), 0x0e890048);
+        assert_eq!(parse_addr_expr(&s, "wood_ptr - 0x10").unwrap(), 0x0e88fff0);
     }
 
     #[test]
