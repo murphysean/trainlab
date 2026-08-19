@@ -447,6 +447,20 @@ fn default_capacity() -> usize {
     32
 }
 
+/// Arguments for [`allocate_string`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AllocateStringArgs {
+    /// The string content (raw bytes/text of the program, script, or config) to place in the game process.
+    pub content: String,
+    /// Memory layout kind: "c" (default, NUL-terminated C string), "rust" (fat pointer ptr+len), "json", "yaml", "xml", "js", "config".
+    #[serde(default = "default_string_kind")]
+    pub kind: String,
+}
+
+fn default_string_kind() -> String {
+    "c".to_string()
+}
+
 /// Arguments for [`read_captures`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReadCapturesArgs {
@@ -1658,6 +1672,104 @@ impl TrainlabMcpServer {
             "size": bytes_written,
             "url": url,
         });
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(resp_json.to_string()),
+        ]))
+    }
+
+    /// Allocate and lay out a string inside the game process and return its layout pointers.
+    #[tool(description = "Allocate and lay out a string inside the game process (C string, Rust fat pointer, JSON/YAML/XML/JS config) and return its address and layout. Supported kinds: 'c' (default, NUL-terminated), 'rust' (returns ptr and len), 'json', 'yaml', 'xml', 'js', 'config'.")]
+    fn allocate_string(
+        &self,
+        Parameters(args): Parameters<AllocateStringArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let proc = game_process(&self.session)?;
+        let kind = args.kind.trim().to_lowercase();
+        let mut bytes = args.content.as_bytes().to_vec();
+
+        let is_rust = kind == "rust";
+        let is_c_like = matches!(
+            kind.as_str(),
+            "c" | "json" | "yaml" | "xml" | "js" | "config"
+        );
+
+        if !is_rust && !is_c_like {
+            return Err(err(format!(
+                "unknown string kind '{kind}' (expected 'c', 'rust', 'json', 'yaml', 'xml', 'js', or 'config')"
+            )));
+        }
+
+        // C-like strings must be NUL-terminated for C string parsers
+        if is_c_like && !bytes.ends_with(&[0]) {
+            bytes.push(0);
+        }
+
+        let len = bytes.len();
+
+        // Perform memory allocation in target process via Windows VirtualAllocEx
+        let alloc_addr = {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+                let pid = self.session.lock().map_err(|_| err("session lock poisoned"))?.game_pid();
+                if let Some(pid) = pid {
+                    let proc_handle = unsafe {
+                        windows_sys::Win32::System::Threading::OpenProcess(
+                            windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION
+                                | windows_sys::Win32::System::Threading::PROCESS_VM_WRITE
+                                | windows_sys::Win32::System::Threading::PROCESS_VM_READ,
+                            0,
+                            pid,
+                        )
+                    };
+                    if !proc_handle.is_null() {
+                        let ptr = unsafe {
+                            VirtualAllocEx(proc_handle, std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+                        };
+                        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+                        if !ptr.is_null() {
+                            ptr as u64
+                        } else {
+                            return Err(err("VirtualAllocEx failed in target process"));
+                        }
+                    } else {
+                        return Err(err("failed to open process for allocation"));
+                    }
+                } else {
+                    return Err(err("no attached game process to allocate string in"));
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                0x10000u64
+            }
+        };
+
+        // Write the string bytes to the allocated address
+        proc.write(alloc_addr, &bytes)
+            .map_err(|e| err(format!("failed to write string bytes: {e}")))?;
+
+        if let Ok(mut s) = self.session.lock() {
+            s.log_activity(
+                "MCP",
+                format!("allocated string ({kind}, {len} bytes) at {alloc_addr:#x}"),
+            );
+        }
+        self.request_repaint();
+
+        let resp_json = if is_rust {
+            serde_json::json!({
+                "ptr": format!("{alloc_addr:#x}"),
+                "len": len,
+                "kind": kind,
+            })
+        } else {
+            serde_json::json!({
+                "ptr": format!("{alloc_addr:#x}"),
+                "kind": kind,
+            })
+        };
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(resp_json.to_string()),
@@ -3049,5 +3161,28 @@ mod tests {
         client.cancel().await?;
         ct.cancel();
         Ok(())
+    }
+
+    #[test]
+    fn allocate_string_kind_validation() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s, None);
+
+        // Invalid kind rejected
+        let res_err = server.allocate_string(Parameters(AllocateStringArgs {
+            content: "print('hello')".into(),
+            kind: "lua".into(), // Explicly rejected per spec
+        }));
+        assert!(res_err.is_err());
+
+        // Valid kind accepted
+        let res_ok_c = server.allocate_string(Parameters(AllocateStringArgs {
+            content: "print('hello')".into(),
+            kind: "c".into(),
+        }));
+        // Requires attached game process, so returns error for no PID attached
+        assert!(res_ok_c.is_err());
+        let err_msg = res_ok_c.unwrap_err().message;
+        assert!(err_msg.contains("no game process"));
     }
 }
