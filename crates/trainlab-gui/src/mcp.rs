@@ -344,6 +344,19 @@ pub struct WriteArgs {
     pub data: String,
 }
 
+/// Arguments for [`write_value`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WriteValueArgs {
+    /// Address to write to (decimal or `0x` hex).
+    pub address: String,
+    /// Value type: i32, u32, f32, i64, u64, f64, or ptr.
+    pub value_type: String,
+    /// The value to write, parsed per `value_type` (e.g. "0xe890000" for a ptr,
+    /// "99990" for an i32, "3.14" for an f64). The tool encodes it to the
+    /// correct little-endian bytes — you never hand-encode hex.
+    pub value: String,
+}
+
 /// Arguments for [`install_cave`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct InstallCaveArgs {
@@ -2179,6 +2192,52 @@ impl TrainlabMcpServer {
         ]))
     }
 
+    /// Stage a typed value write for human confirmation (D8).
+    ///
+    /// Like [`write`], but takes a **value + type** instead of raw hex bytes, so
+    /// the agent never hand-encodes little-endian bytes (which is error-prone —
+    /// e.g. transposing digits when writing a pointer). The tool parses the value
+    /// per `value_type` and encodes it to the correct little-endian bytes itself.
+    /// Stages the write; apply with `confirm_op` or discard with `reject_op`.
+    #[tool(description = "Stage a typed value write to game memory at an address. Takes a value + value_type (i32/u32/f32/i64/u64/f64/ptr) and encodes it to the correct little-endian bytes itself — you never hand-encode hex. Returns a pending op id; apply with 'confirm_op' or discard with 'reject_op'. Nothing is written until confirmed.")]
+    fn write_value(
+        &self,
+        Parameters(args): Parameters<WriteValueArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let address = parse_addr(&args.address)?;
+        let value_type = parse_value_type(&args.value_type)?;
+        let data = parse_value_bytes(&args.value, value_type)?;
+        if data.is_empty() {
+            return Err(err("write_value data cannot be empty"));
+        }
+        // Stage it; nothing is written until confirmed.
+        let mut s = self
+            .session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
+        let id = s.stage_op(
+            address,
+            PendingKind::Write { data: data.clone() },
+            format!(
+                "write_value {} ({}) at {:#x}: {}",
+                args.value,
+                args.value_type,
+                address,
+                data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            ),
+        );
+        drop(s);
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(format!(
+                "staged write_value (pending id {id}): {} ({}) at {:#x} -> bytes {}. Call 'confirm_op' to apply or 'reject_op' to discard.",
+                args.value,
+                args.value_type,
+                address,
+                data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            )),
+        ]))
+    }
+
     /// Stage a code-cave hook install for human confirmation (D8).
     ///
     /// This *stages* the install and returns a pending op id + preview; it does
@@ -2741,8 +2800,7 @@ fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<
             .map_err(|_| err(format!("invalid f64 '{s}'")))?
             .to_le_bytes()
             .to_vec()),
-        ValueType::Ptr => Ok(s
-            .parse::<u64>()
+        ValueType::Ptr => Ok(parse_addr_str(s)
             .map_err(|_| err(format!("invalid ptr '{s}'")))?
             .to_le_bytes()
             .to_vec()),
@@ -3184,5 +3242,35 @@ mod tests {
         assert!(res_ok_c.is_err());
         let err_msg = res_ok_c.unwrap_err().message;
         assert!(err_msg.contains("no game process"));
+    }
+
+    #[test]
+    fn write_value_encodes_pointer_little_endian() {
+        // Regression: the agent used to hand-encode a pointer into hex bytes and
+        // transposed digits (0xe890000 -> 00 00 90 0e ... instead of 00 00 89 0e ...),
+        // which made the cave read garbage and crashed the game. `write_value`
+        // must encode the pointer itself, correctly.
+        let data = parse_value_bytes("0xe890000", trainlab_core::scan::ValueType::Ptr).unwrap();
+        // 0x0e890000 little-endian = 00 00 89 0e 00 00 00 00
+        assert_eq!(data, vec![0x00, 0x00, 0x89, 0x0e, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn write_value_encodes_typed_values() {
+        // i32
+        assert_eq!(
+            parse_value_bytes("99990", trainlab_core::scan::ValueType::I32).unwrap(),
+            99990i32.to_le_bytes().to_vec()
+        );
+        // f64
+        assert_eq!(
+            parse_value_bytes("3.14", trainlab_core::scan::ValueType::F64).unwrap(),
+            3.14f64.to_le_bytes().to_vec()
+        );
+        // u64
+        assert_eq!(
+            parse_value_bytes("18446744073709551615", trainlab_core::scan::ValueType::U64).unwrap(),
+            u64::MAX.to_le_bytes().to_vec()
+        );
     }
 }
