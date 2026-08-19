@@ -120,9 +120,11 @@ profile's fields into this sequence — not new core primitives.
 ## 7. Files
 
 - `docs/FEATURE_lua_command_cheat.md` — this proposal.
-- **`docs/FEATURE_exec_lua_generic.md`** — the low-level `exec_lua` primitive this
-  cheat kind builds on (pointer-based command buffer + self-clearing gate + real
-  result slot). **Implement `exec_lua` first**; then layer `lua_command` on top.
+- **`docs/FEATURE_allocate_string_cave_contract.md`** — the low-level primitives
+  this cheat kind builds on: `allocate_string` (generic C-string transport) + a
+  standardized cave contract (fire_flag / cmd_ptr / result_slot) driven by an
+  agentic recipe. **Implement `allocate_string` + the cave contract first**; then
+  layer `lua_command` on top.
 - Working copy of a profile with the `lua_command` stub: see Helldivers
   `helldivers.yaml` (in the game dir).
 - Reference payload: Helldivers `lua_cave.payload.hex` + `lua_cave.asm`.
