@@ -135,8 +135,12 @@ impl Default for TrainlabMcpServer {
 pub struct ReadArgs {
     /// Start address to read from (decimal or `0x` hex).
     pub address: String,
-    /// Number of bytes to read.
-    pub len: usize,
+    /// Number of bytes to read (default derived from `value_type`, or 16 for hex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub len: Option<usize>,
+    /// Value type to decode and format: "i32", "u32", "f32", "i64", "u64", "f64", "ptr", "cstr", or "hex" (default "hex").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
 }
 
 /// Arguments for [`aob_scan`].
@@ -1199,13 +1203,17 @@ impl TrainlabMcpServer {
         ]))
     }
 
-    /// Read memory from the game process.
-    #[tool(description = "Read bytes from game memory at a given address, read externally.")]
+    /// Read memory from the game process (raw bytes or typed value).
+    #[tool(description = "Read memory from the game process. Supports raw hex bytes (default) OR typed values (value_type='ptr'|'i32'|'u32'|'f32'|'i64'|'u64'|'f64'|'cstr').")]
     fn read(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&args.address)?;
         let proc = game_process(&self.session)?;
-        match proc.read(address, args.len) {
-            Ok(data) => {
+        let vt_str = args.value_type.as_deref().unwrap_or("hex").trim().to_lowercase();
+
+        match vt_str.as_str() {
+            "hex" | "bytes" => {
+                let len = args.len.unwrap_or(16);
+                let data = proc.read(address, len).map_err(|e| err(format!("read failed: {e}")))?;
                 let hex = data
                     .iter()
                     .map(|b| format!("{b:02x}"))
@@ -1215,7 +1223,43 @@ impl TrainlabMcpServer {
                     rmcp::model::ContentBlock::text(hex),
                 ]))
             }
-            Err(e) => Err(err(format!("read failed: {e}"))),
+            "ptr" | "pointer" => {
+                let val = read_u64(proc.as_ref(), address).map_err(|e| err(format!("read ptr failed: {e}")))?;
+                let ptr_val = parse_addr_str(&val).unwrap_or(0);
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!("{ptr_val:#018x} ({val})")),
+                ]))
+            }
+            "i32" => {
+                let val = read_i32(proc.as_ref(), address).map_err(|e| err(format!("read i32 failed: {e}")))?;
+                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
+            }
+            "u32" => {
+                let val = read_u32(proc.as_ref(), address).map_err(|e| err(format!("read u32 failed: {e}")))?;
+                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
+            }
+            "f32" | "float" => {
+                let val = read_f32_val(proc.as_ref(), address).map_err(|e| err(format!("read f32 failed: {e}")))?;
+                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
+            }
+            "i64" => {
+                let val = read_i64(proc.as_ref(), address).map_err(|e| err(format!("read i64 failed: {e}")))?;
+                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
+            }
+            "u64" => {
+                let val = read_u64(proc.as_ref(), address).map_err(|e| err(format!("read u64 failed: {e}")))?;
+                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
+            }
+            "f64" | "double" => {
+                let val = read_f64_val(proc.as_ref(), address).map_err(|e| err(format!("read f64 failed: {e}")))?;
+                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
+            }
+            "cstr" | "string" => {
+                let max_len = args.len.unwrap_or(256);
+                let val = read_cstr(proc.as_ref(), address, max_len).map_err(|e| err(format!("read cstr failed: {e}")))?;
+                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
+            }
+            other => Err(err(format!("unknown read value_type '{other}' (expected hex, ptr, i32, u32, f32, i64, u64, f64, cstr)"))),
         }
     }
 
@@ -3307,5 +3351,29 @@ mod tests {
             parse_value_bytes("18446744073709551615", trainlab_core::scan::ValueType::U64).unwrap(),
             u64::MAX.to_le_bytes().to_vec()
         );
+    }
+
+    #[test]
+    fn read_tool_handles_hex_and_typed_values() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s, None);
+
+        // Unknown value_type rejected
+        let res_err = server.read(Parameters(ReadArgs {
+            address: "0x1000".into(),
+            len: None,
+            value_type: Some("invalid_type".into()),
+        }));
+        assert!(res_err.is_err());
+
+        // Requires attached game process for live reads, so returns error for no PID attached
+        let res_ok = server.read(Parameters(ReadArgs {
+            address: "0x1000".into(),
+            len: Some(4),
+            value_type: Some("i32".into()),
+        }));
+        assert!(res_ok.is_err());
+        let err_msg = res_ok.unwrap_err().message;
+        assert!(err_msg.contains("no game process"));
     }
 }
