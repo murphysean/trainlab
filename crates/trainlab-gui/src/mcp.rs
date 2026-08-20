@@ -38,7 +38,7 @@ fn last_error() -> String {
 ///
 /// Returns a boxed `ProcessMemory` handle, or an error if the PID isn't set or
 /// the process can't be opened.
-fn game_process(
+pub(crate) fn game_process(
     session: &SharedSession,
 ) -> Result<Box<dyn trainlab_core::memory::ProcessMemory>, ErrorData> {
     let pid = {

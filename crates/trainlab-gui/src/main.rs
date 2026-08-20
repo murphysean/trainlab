@@ -683,20 +683,36 @@ impl TrainlabApp {
                     if parsed_pat.is_empty() {
                         return Err(format!("cmd {idx}: empty AOB pattern '{pattern}'"));
                     }
-                    let res = self.request(&Request::ScanAob { pattern: parsed_pat, start: None, end: None });
-                    match res {
-                        Some(Response::ScanAob { matches }) => {
-                            if let Some(&first_match) = matches.first() {
-                                let final_addr = (first_match as i64 + offset.unwrap_or(0)) as u64;
-                                if let Ok(mut s) = self.session.lock() {
-                                    let _ = s.set_marker(marker, final_addr, Some(&format!("AOB match for pattern '{pattern}'")));
-                                }
-                                self.log(format!("cmd {idx}: AOB scan found match at {final_addr:#x} -> saved marker '${marker}'"));
-                            } else {
-                                return Err(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches; sequence aborted"));
+                    let proc = mcp::game_process(&self.session)
+                        .map_err(|e| format!("cmd {idx}: AOB scan process access error: {e}"))?;
+                    let regions = proc.regions()
+                        .map_err(|e| format!("cmd {idx}: AOB scan list regions error: {e}"))?;
+                    
+                    let mut first_match: Option<u64> = None;
+                    for r in regions {
+                        if !r.readable {
+                            continue;
+                        }
+                        let len = (r.end - r.start) as usize;
+                        if len < parsed_pat.len() {
+                            continue;
+                        }
+                        if let Ok(buf) = proc.read(r.start, len) {
+                            if let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_pat).first() {
+                                first_match = Some(r.start + *off as u64);
+                                break;
                             }
                         }
-                        _ => return Err(format!("cmd {idx}: AOB scan request failed")),
+                    }
+
+                    if let Some(match_addr) = first_match {
+                        let final_addr = (match_addr as i64 + offset.unwrap_or(0)) as u64;
+                        if let Ok(mut s) = self.session.lock() {
+                            let _ = s.set_marker(marker, final_addr, Some(&format!("AOB match for pattern '{pattern}'")));
+                        }
+                        self.log(format!("cmd {idx}: external AOB scan found match at {final_addr:#x} -> saved marker '${marker}'"));
+                    } else {
+                        return Err(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches; sequence aborted"));
                     }
                 }
                 profile::ProfileCommand::PointerChase { marker, base, offsets } => {
