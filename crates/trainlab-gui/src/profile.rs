@@ -146,6 +146,9 @@ pub enum ProfileCommand {
         /// Shellcode payload hex string.
         #[serde(default)]
         payload: String,
+        /// Optional marker label to store the cave address under.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        marker: Option<String>,
     },
     /// Allocate a string inside target memory.
     AllocateString {
@@ -154,6 +157,29 @@ pub enum ProfileCommand {
         /// Layout kind ("c", "rust", "json", "yaml", "xml", "js", "config").
         #[serde(default = "default_string_kind")]
         kind: String,
+        /// Optional marker label to store the allocated string pointer under.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        marker: Option<String>,
+    },
+    /// Perform an AOB pattern scan and optionally store the first match in a marker.
+    AobScan {
+        /// Name of the marker to store the first match address in.
+        marker: String,
+        /// Hex pattern string with wildcards (e.g. "48 8b 05 ?? ?? ?? ??").
+        pattern: String,
+        /// Optional offset added to the match address.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<i64>,
+    },
+    /// Perform a pointer chase and store the final target address in a marker.
+    PointerChase {
+        /// Name of the marker to store the resolved pointer address in.
+        marker: String,
+        /// Base address expression (e.g. "game.exe+0x1b42e9" or "$my_marker").
+        base: String,
+        /// Pointer offsets (e.g. ["0x10", "0x28"]).
+        #[serde(default)]
+        offsets: Vec<String>,
     },
 }
 

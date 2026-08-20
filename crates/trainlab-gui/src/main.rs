@@ -495,7 +495,7 @@ impl TrainlabApp {
                         Err(e) => self.log(format!("cmd {idx}: bad address '{addr_str}': {e:?}")),
                     }
                 }
-                profile::ProfileCommand::InstallCave { target_ref, target, hook, payload } => {
+                profile::ProfileCommand::InstallCave { target_ref, target, hook, payload, marker } => {
                     let tgt_str = target_ref.as_deref().or(target.as_deref()).unwrap_or("");
                     let parsed_tgt = mcp::parse_addr_expr(&self.session, tgt_str);
                     match parsed_tgt {
@@ -506,16 +506,144 @@ impl TrainlabApp {
                                     _ => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
                                 };
                                 let res = self.request(&Request::InstallCave { target: target_addr, hook: cave_hook });
-                                self.log(format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> {:?}", res.is_some()));
+                                match res {
+                                    Some(Response::CaveInstalled { cave, .. }) => {
+                                        if let Some(m) = marker {
+                                            if let Ok(mut s) = self.session.lock() {
+                                                let _ = s.set_marker(m, cave, Some(&format!("Cave for target {target_addr:#x}")));
+                                            }
+                                        }
+                                        self.log(format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> cave={cave:#x}"));
+                                    }
+                                    _ => self.log(format!("cmd {idx}: cave install at {tgt_str} failed")),
+                                }
                             }
                         }
                         Err(e) => self.log(format!("cmd {idx}: bad target '{tgt_str}': {e:?}")),
                     }
                 }
-                profile::ProfileCommand::AllocateString { content, kind } => {
-                    self.log(format!("cmd {idx}: allocate string payload '{content}' ({kind})"));
+                profile::ProfileCommand::AllocateString { content, kind, marker } => {
+                    match self.allocate_string_in_game(content, kind) {
+                        Ok((ptr, len)) => {
+                            if let Some(m) = marker {
+                                if let Ok(mut s) = self.session.lock() {
+                                    let _ = s.set_marker(m, ptr, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
+                                }
+                            }
+                            self.log(format!("cmd {idx}: allocate string ({kind}) -> ptr={ptr:#x} (len {len})"));
+                        }
+                        Err(e) => self.log(format!("cmd {idx}: string allocation failed: {e}")),
+                    }
+                }
+                profile::ProfileCommand::AobScan { marker, pattern, offset } => {
+                    let parsed_pat = trainlab_core::aob::parse(pattern);
+                    if parsed_pat.is_empty() {
+                        self.log(format!("cmd {idx}: empty AOB pattern '{pattern}'"));
+                    } else {
+                        let res = self.request(&Request::ScanAob { pattern: parsed_pat, start: None, end: None });
+                        match res {
+                            Some(Response::ScanAob { matches }) => {
+                                if let Some(&first_match) = matches.first() {
+                                    let final_addr = (first_match as i64 + offset.unwrap_or(0)) as u64;
+                                    if let Ok(mut s) = self.session.lock() {
+                                        let _ = s.set_marker(marker, final_addr, Some(&format!("AOB match for pattern '{pattern}'")));
+                                    }
+                                    self.log(format!("cmd {idx}: AOB scan found match at {final_addr:#x} -> saved marker '${marker}'"));
+                                } else {
+                                    self.log(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches"));
+                                }
+                            }
+                            _ => self.log(format!("cmd {idx}: AOB scan request failed")),
+                        }
+                    }
+                }
+                profile::ProfileCommand::PointerChase { marker, base, offsets } => {
+                    let base_addr = mcp::parse_addr_expr(&self.session, base);
+                    match base_addr {
+                        Ok(mut curr_addr) => {
+                            let parsed_offs: Vec<u64> = offsets.iter().filter_map(|o| {
+                                let clean = o.trim_start_matches('+').trim();
+                                u64::from_str_radix(clean.strip_prefix("0x").unwrap_or(clean), 16).ok()
+                            }).collect();
+                            
+                            let mut failed = false;
+                            for off in &parsed_offs {
+                                let read_res = self.request(&Request::Read { address: curr_addr, len: 8 });
+                                match read_res {
+                                    Some(Response::Read { data }) if data.len() == 8 => {
+                                        let ptr = u64::from_le_bytes(data.try_into().unwrap());
+                                        curr_addr = ptr.wrapping_add(*off);
+                                    }
+                                    _ => {
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !failed {
+                                if let Ok(mut s) = self.session.lock() {
+                                    let _ = s.set_marker(marker, curr_addr, Some(&format!("Pointer chase base '{base}' offsets {:?}", offsets)));
+                                }
+                                self.log(format!("cmd {idx}: pointer chase -> target {curr_addr:#x} saved marker '${marker}'"));
+                            } else {
+                                self.log(format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}"));
+                            }
+                        }
+                        Err(e) => self.log(format!("cmd {idx}: bad base '{base}': {e:?}")),
+                    }
                 }
             }
+        }
+    }
+
+    /// Allocate string memory in target game process and write bytes.
+    fn allocate_string_in_game(&self, content: &str, kind: &str) -> Result<(u64, usize), String> {
+        let mut bytes = content.as_bytes().to_vec();
+        let kind_lower = kind.trim().to_lowercase();
+        let is_c_like = matches!(kind_lower.as_str(), "c" | "json" | "yaml" | "xml" | "js" | "config");
+        if is_c_like && !bytes.ends_with(&[0]) {
+            bytes.push(0);
+        }
+        let len = bytes.len();
+        let pid = {
+            let s = self.session.lock().map_err(|_| "session lock poisoned".to_string())?;
+            s.game_pid().ok_or_else(|| "no attached game process".to_string())?
+        };
+
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+            let proc_handle = unsafe {
+                windows_sys::Win32::System::Threading::OpenProcess(
+                    windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION
+                        | windows_sys::Win32::System::Threading::PROCESS_VM_WRITE
+                        | windows_sys::Win32::System::Threading::PROCESS_VM_READ,
+                    0,
+                    pid,
+                )
+            };
+            if proc_handle.is_null() {
+                return Err("failed to open process for allocation".into());
+            }
+            let ptr = unsafe {
+                VirtualAllocEx(proc_handle, std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+            };
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+            if ptr.is_null() {
+                return Err("VirtualAllocEx failed".into());
+            }
+            let alloc_addr = ptr as u64;
+
+            // Write bytes
+            let proc = trainlab_core::memory::WindowsProcess::open(pid).map_err(|e| e.to_string())?;
+            proc.write(alloc_addr, &bytes).map_err(|e| e.to_string())?;
+            Ok((alloc_addr, len))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = pid;
+            let _ = bytes;
+            Ok((0x10000u64, len))
         }
     }
 
