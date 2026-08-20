@@ -1304,6 +1304,9 @@ impl eframe::App for TrainlabApp {
                             ui.text_edit_singleline(&mut self.dll_path);
                         });
 
+                        ui.add_space(3.0);
+                        ui.checkbox(&mut self.auto_init, "Auto-run profile initialization commands on connect");
+
                         ui.add_space(5.0);
                         if ui.button("🚀 Find & Inject DLL").clicked() {
                             self.inject_and_connect();
