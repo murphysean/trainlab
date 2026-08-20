@@ -108,9 +108,61 @@ pub struct ProfileCheat {
     /// For value cheats: a known/initial value to populate (e.g. "400").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// For button cheats: a sequence of commands to execute when pressed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<ProfileCommand>>,
     /// Optional human note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// A single step in a button cheat's command sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProfileCommand {
+    /// Write a value to memory.
+    Write {
+        /// Target address or reference (e.g. "wood_addr" or "0x1000").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+        /// Value string (e.g. "99990" or "0xe890000").
+        value: String,
+        /// Optional value_type (e.g. "i32", "f32", "ptr").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_type: Option<String>,
+    },
+    /// Install or toggle a code cave hook.
+    InstallCave {
+        /// Target code address or reference.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// Hook kind ("trampoline" or "override").
+        #[serde(default = "default_hook_kind")]
+        hook: String,
+        /// Shellcode payload hex string.
+        #[serde(default)]
+        payload: String,
+    },
+    /// Allocate a string inside target memory.
+    AllocateString {
+        /// String text content.
+        content: String,
+        /// Layout kind ("c", "rust", "json", "yaml", "xml", "js", "config").
+        #[serde(default = "default_string_kind")]
+        kind: String,
+    },
+}
+
+fn default_hook_kind() -> String {
+    "trampoline".to_string()
+}
+
+fn default_string_kind() -> String {
+    "c".to_string()
 }
 
 impl GameProfile {
@@ -219,6 +271,7 @@ mod tests {
                 mechanism: Some("cave".into()),
                 rate_hz: None,
                 value: Some("400".into()),
+                commands: None,
                 note: Some("wood stock".into()),
             }],
         };

@@ -832,6 +832,9 @@ impl TrainlabMcpServer {
                     CheatKind::Toggle { target, enabled, .. } => {
                         format!("toggle @ {target:#x} ({})", if *enabled { "on" } else { "off" })
                     }
+                    CheatKind::Button { commands } => {
+                        format!("button ({} cmd(s))", commands.len())
+                    }
                 };
                 format!("[{}] {} — {kind}", c.id, c.label)
             })
@@ -880,8 +883,8 @@ impl TrainlabMcpServer {
                 .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
             match &c.kind {
                 CheatKind::Value { address, value_type } => (*address, *value_type),
-                CheatKind::Toggle { .. } => {
-                    return Err(err(format!("cheat {} is a toggle, not a value", args.id)))
+                _ => {
+                    return Err(err(format!("cheat {} is not a value cheat", args.id)))
                 }
             }
         };
@@ -928,8 +931,8 @@ impl TrainlabMcpServer {
                 CheatKind::Toggle { target, hook, enabled } => {
                     (*target, hook.clone(), *enabled)
                 }
-                CheatKind::Value { .. } => {
-                    return Err(err(format!("cheat {} is a value, not a toggle", args.id)))
+                _ => {
+                    return Err(err(format!("cheat {} is not a toggle cheat", args.id)))
                 }
             }
         };
@@ -1077,6 +1080,10 @@ impl TrainlabMcpServer {
                         enabled: false,
                     }
                 }
+                "button" => {
+                    let cmds = pc.commands.clone().unwrap_or_default();
+                    crate::session::CheatKind::Button { commands: cmds }
+                }
                 other => return Err(err(format!("unknown cheat kind '{other}'"))),
             };
             s.add_cheat(&pc.label, kind, pc.note.as_deref());
@@ -1137,6 +1144,9 @@ impl TrainlabMcpServer {
                         };
                         ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl)
                     }
+                    CheatKind::Button { commands } => {
+                        ("button".to_string(), None, None, None, None, None)
+                    }
                 };
                 ProfileCheat {
                     id: c.id.to_string(),
@@ -1150,6 +1160,7 @@ impl TrainlabMcpServer {
                     mechanism: None,
                     rate_hz: None,
                     value: None,
+                    commands: None,
                     note: c.note.clone(),
                 }
             })
@@ -2646,7 +2657,7 @@ fn parse_addr(session: &SharedSession, s: &str) -> Result<u64, ErrorData> {
 /// Parse an address string which can be a raw address (hex/dec), a marker label
 /// (e.g. "wood_ptr"), or a module/marker expression with offsets (e.g. "game.exe+0x1b42e9"
 /// or "player_ptr+0x48").
-fn parse_addr_expr(session: &SharedSession, input: &str) -> Result<u64, ErrorData> {
+pub(crate) fn parse_addr_expr(session: &SharedSession, input: &str) -> Result<u64, ErrorData> {
     let input = input.trim();
 
     // 1. Check for `+` or `-` offset expression: <base> + <offset>
@@ -2832,7 +2843,7 @@ fn hex_encode(data: &[u8]) -> String {
 }
 
 /// Parse a decimal/float string into little-endian bytes for a value type.
-fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<u8>, ErrorData> {
+pub(crate) fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<u8>, ErrorData> {
     use trainlab_core::scan::ValueType;
     let s = s.trim();
     match vt {
@@ -2873,7 +2884,7 @@ fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<
     }
 }
 
-fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, ErrorData> {
+pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, ErrorData> {
     let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     if cleaned.len() % 2 != 0 {
         return Err(err("hex string must have an even number of digits"));
@@ -2896,7 +2907,7 @@ fn err(message: impl Into<String>) -> ErrorData {
 }
 
 /// Parse a value-type string into a [`ValueType`].
-fn parse_value_type(s: &str) -> Result<trainlab_core::scan::ValueType, ErrorData> {
+pub(crate) fn parse_value_type(s: &str) -> Result<trainlab_core::scan::ValueType, ErrorData> {
     use trainlab_core::scan::ValueType;
     match s.trim().to_lowercase().as_str() {
         "i32" => Ok(ValueType::I32),
@@ -3195,6 +3206,7 @@ mod tests {
             mechanism: None,
             rate_hz: None,
             value: None,
+            commands: None,
             note: None,
         };
         assert_eq!(resolve_cheat_address(&resolved, &pc).unwrap(), 0x1000);

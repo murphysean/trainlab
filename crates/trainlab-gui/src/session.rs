@@ -58,6 +58,11 @@ pub enum CheatKind {
         /// Whether the toggle is currently active.
         enabled: bool,
     },
+    /// An action button that runs a sequence of commands when clicked.
+    Button {
+        /// Sequence of commands to execute.
+        commands: Vec<crate::profile::ProfileCommand>,
+    },
 }
 
 /// A single undoable mutation: the original bytes at an address.

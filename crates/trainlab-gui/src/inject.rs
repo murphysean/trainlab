@@ -117,7 +117,7 @@ fn looks_like_game(name: &str) -> bool {
         "wine", "wineserver", "winedevice", "services.exe", "rundll32", "dllhost",
         "sihost", "taskhostw", "fontdrvhost", "spoolsv", "searchindexer", "audiodg",
         "steam", "steamwebhelper", "steamservice", "steamclient", "gameoverlayui",
-        "trainlab", "trainlab-gui", "trainlab_inject", "urbek",
+        "trainlab", "trainlab-gui", "trainlab_inject",
     ];
     if NON_GAMES.iter().any(|s| n.contains(s)) {
         return false;

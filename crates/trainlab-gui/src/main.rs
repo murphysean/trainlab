@@ -123,10 +123,9 @@ impl Default for TrainlabApp {
 
 impl TrainlabApp {
     fn new(session: SharedSession) -> Self {
-        // The game executable to inject into. Overridable via TRAINLAB_GAME so
-        // the trainer can target any game without recompiling (e.g. Unrailed2).
-        let game_name = std::env::var("TRAINLAB_GAME").unwrap_or_else(|_| "Urbek.exe".into());
-        Self {
+        // The game executable to inject into. Overridable via TRAINLAB_GAME env var.
+        let game_name = std::env::var("TRAINLAB_GAME").unwrap_or_default();
+        let mut app = Self {
             session,
             host: "127.0.0.1".into(),
             port: "31337".into(),
@@ -146,7 +145,9 @@ impl TrainlabApp {
             scan_val_type: trainlab_core::scan::ValueType::I32,
             scan_op_mode: ScanOpMode::Exact,
             active_tab: ActiveTab::Cheats,
-        }
+        };
+        app.auto_match_profile();
+        app
     }
 
     /// Create the app with a fresh shared session (used by tests / defaults).
@@ -429,8 +430,81 @@ impl TrainlabApp {
                         }
                         ui.label(format!("@ {target:#x}"));
                     }
+                    CheatKind::Button { commands } => {
+                        if ui.button(format!("▶ {}", cheat.label)).clicked() {
+                            self.log(format!("button '{}' clicked: running {} command(s)...", cheat.label, commands.len()));
+                            self.run_cheat_commands(commands);
+                        }
+                        if let Some(n) = &cheat.note {
+                            ui.label(format!("({n})"));
+                        }
+                    }
                 }
             });
+        }
+    }
+
+    /// Auto-discover running game processes and match against YAML cheat profiles.
+    fn auto_match_profile(&mut self) {
+        self.game_candidates = inject::find_game_candidates();
+        let profiles = profile::discover_profiles();
+        if profiles.is_empty() {
+            return;
+        }
+
+        for cand in &self.game_candidates {
+            if let Some((file, p)) = profile::find_profile_for_game(&profiles, &cand.name) {
+                self.game_name = cand.name.clone();
+                self.log(format!(
+                    "auto-matched process '{}' to profile '{}' ({})",
+                    cand.name, file, p.name
+                ));
+                break;
+            }
+        }
+    }
+
+    /// Execute a sequence of profile commands (for Button cheats).
+    fn run_cheat_commands(&mut self, cmds: &[profile::ProfileCommand]) {
+        for (idx, cmd) in cmds.iter().enumerate() {
+            match cmd {
+                profile::ProfileCommand::Write { address_ref, address, value, value_type } => {
+                    let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
+                    let parsed_addr = mcp::parse_addr_expr(&self.session, addr_str);
+                    match parsed_addr {
+                        Ok(addr) => {
+                            let vt_str = value_type.as_deref().unwrap_or("i32");
+                            if let Ok(vt) = mcp::parse_value_type(vt_str) {
+                                if let Ok(bytes) = mcp::parse_value_bytes(value, vt) {
+                                    let res = self.request(&Request::Write { address: addr, data: bytes });
+                                    self.log(format!("cmd {idx}: write '{value}' ({vt_str}) to {addr_str} ({addr:#x}) -> {:?}", res.is_some()));
+                                }
+                            }
+                        }
+                        Err(e) => self.log(format!("cmd {idx}: bad address '{addr_str}': {e:?}")),
+                    }
+                }
+                profile::ProfileCommand::InstallCave { target_ref, target, hook, payload } => {
+                    let tgt_str = target_ref.as_deref().or(target.as_deref()).unwrap_or("");
+                    let parsed_tgt = mcp::parse_addr_expr(&self.session, tgt_str);
+                    match parsed_tgt {
+                        Ok(target_addr) => {
+                            if let Ok(payload_bytes) = mcp::parse_hex_bytes(payload) {
+                                let cave_hook = match hook.as_str() {
+                                    "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                                    _ => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                                };
+                                let res = self.request(&Request::InstallCave { target: target_addr, hook: cave_hook });
+                                self.log(format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> {:?}", res.is_some()));
+                            }
+                        }
+                        Err(e) => self.log(format!("cmd {idx}: bad target '{tgt_str}': {e:?}")),
+                    }
+                }
+                profile::ProfileCommand::AllocateString { content, kind } => {
+                    self.log(format!("cmd {idx}: allocate string payload '{content}' ({kind})"));
+                }
+            }
         }
     }
 
@@ -826,6 +900,7 @@ impl eframe::App for TrainlabApp {
                             ui.text_edit_singleline(&mut self.game_name);
                             if ui.button("Scan running processes").clicked() {
                                 self.refresh_game_candidates();
+                                self.auto_match_profile();
                             }
                         });
 
