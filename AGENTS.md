@@ -14,7 +14,8 @@ cargo build --release --target x86_64-pc-windows-gnu --package trainlab-gui --pa
 
 ### Build Artifact Locations
 - **GUI Application**: `target/x86_64-pc-windows-gnu/release/trainlab-gui.exe`
-- **Injected DLL**: `target/x86_64-pc-windows-gnu/release/trainlab_inject.dll`
+> [!IMPORTANT]
+> **Build Synchronicity Rule**: ALWAYS wait for `cargo build --release` to completely finish execution before invoking `scp` to deploy binaries. Never launch `scp` while a background build task is still running.
 
 ---
 
