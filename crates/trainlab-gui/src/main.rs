@@ -203,7 +203,9 @@ impl TrainlabApp {
                     if let Some(init_cmds) = &p.init_commands {
                         if !init_cmds.is_empty() {
                             self.log(format!("executing {} profile init_command(s)...", init_cmds.len()));
-                            self.run_cheat_commands(init_cmds);
+                            if let Err(e) = self.run_cheat_commands(init_cmds) {
+                                self.log(format!("profile init_commands failed: {e}"));
+                            }
                         }
                     }
                 }
@@ -526,7 +528,9 @@ impl TrainlabApp {
                     CheatKind::Button { commands } => {
                         if ui.button(format!("▶ {}", cheat.label)).clicked() {
                             self.log(format!("button '{}' clicked: running {} command(s)...", cheat.label, commands.len()));
-                            self.run_cheat_commands(commands);
+                            if let Err(e) = self.run_cheat_commands(commands) {
+                                self.log(format!("button '{}' failed: {e}", cheat.label));
+                            }
                         }
                         if let Some(n) = &cheat.note {
                             ui.label(format!("({n})"));
@@ -557,66 +561,66 @@ impl TrainlabApp {
         }
     }
 
-    /// Execute a sequence of profile commands (for Button cheats).
-    fn run_cheat_commands(&mut self, cmds: &[profile::ProfileCommand]) {
+    /// Execute a sequence of profile commands.
+    /// Returns Ok(()) if all commands succeed, or Err(msg) on the first failure (aborting sequence).
+    fn run_cheat_commands(&mut self, cmds: &[profile::ProfileCommand]) -> Result<(), String> {
         for (idx, cmd) in cmds.iter().enumerate() {
             match cmd {
                 profile::ProfileCommand::Write { address_ref, address, value, value_type } => {
                     let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
-                    let parsed_addr = mcp::parse_addr_expr(&self.session, addr_str);
-                    match parsed_addr {
-                        Ok(addr) if addr != 0 => {
-                            let vt_str = value_type.as_deref().unwrap_or_else(|| {
-                                if value.trim().starts_with("0x") || value.trim().starts_with("0X") || value.trim().starts_with('$') {
-                                    "ptr"
-                                } else {
-                                    "i32"
-                                }
-                            });
-                            // First try resolving value as an address expression (marker / module / pointer math)
-                            let eval_val_str = match mcp::parse_addr_expr(&self.session, value) {
-                                Ok(val_addr) => format!("{val_addr:#x}"),
-                                Err(_) => value.clone(),
-                            };
-                            if let Ok(vt) = mcp::parse_value_type(vt_str) {
-                                if let Ok(bytes) = mcp::parse_value_bytes(&eval_val_str, vt) {
-                                    let res = self.request(&Request::Write { address: addr, data: bytes });
-                                    self.log(format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({addr:#x}) -> {:?}", res.is_some()));
-                                } else {
-                                    self.log(format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}' ({vt_str})"));
-                                }
-                            }
-                        }
-                        Ok(_) => self.log(format!("cmd {idx}: write target '{addr_str}' resolved to 0x0; write skipped")),
-                        Err(e) => self.log(format!("cmd {idx}: bad address '{addr_str}': {e:?}")),
+                    let parsed_addr = mcp::parse_addr_expr(&self.session, addr_str)
+                        .map_err(|e| format!("cmd {idx}: bad address '{addr_str}': {e:?}"))?;
+                    if parsed_addr == 0 {
+                        return Err(format!("cmd {idx}: write target '{addr_str}' resolved to 0x0; sequence aborted"));
                     }
+
+                    let vt_str = value_type.as_deref().unwrap_or_else(|| {
+                        if value.trim().starts_with("0x") || value.trim().starts_with("0X") || value.trim().starts_with('$') {
+                            "ptr"
+                        } else {
+                            "i32"
+                        }
+                    });
+                    let eval_val_str = match mcp::parse_addr_expr(&self.session, value) {
+                        Ok(val_addr) => format!("{val_addr:#x}"),
+                        Err(_) => value.clone(),
+                    };
+                    let vt = mcp::parse_value_type(vt_str)
+                        .map_err(|e| format!("cmd {idx}: invalid value type '{vt_str}': {e:?}"))?;
+                    let bytes = mcp::parse_value_bytes(&eval_val_str, vt)
+                        .map_err(|e| format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}'"))?;
+                    
+                    let res = self.request(&Request::Write { address: parsed_addr, data: bytes });
+                    if res.is_none() {
+                        return Err(format!("cmd {idx}: write to {addr_str} ({parsed_addr:#x}) failed"));
+                    }
+                    self.log(format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({parsed_addr:#x}) -> ok"));
                 }
                 profile::ProfileCommand::InstallCave { target_ref, target, hook, payload, marker } => {
                     let tgt_str = target_ref.as_deref().or(target.as_deref()).unwrap_or("");
-                    let parsed_tgt = mcp::parse_addr_expr(&self.session, tgt_str);
-                    match parsed_tgt {
-                        Ok(target_addr) if target_addr != 0 => {
-                            if let Ok(payload_bytes) = mcp::parse_hex_bytes(payload) {
-                                let cave_hook = match hook.as_str() {
-                                    "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
-                                    _ => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
-                                };
-                                let res = self.request(&Request::InstallCave { target: target_addr, hook: cave_hook });
-                                match res {
-                                    Some(Response::CaveInstalled { cave, .. }) => {
-                                        if let Some(m) = marker {
-                                            if let Ok(mut s) = self.session.lock() {
-                                                let _ = s.set_marker(m, cave, Some(&format!("Cave for target {target_addr:#x}")));
-                                            }
-                                        }
-                                        self.log(format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> cave={cave:#x}"));
-                                    }
-                                    _ => self.log(format!("cmd {idx}: cave install at {tgt_str} failed")),
+                    let target_addr = mcp::parse_addr_expr(&self.session, tgt_str)
+                        .map_err(|e| format!("cmd {idx}: bad target '{tgt_str}': {e:?}"))?;
+                    if target_addr == 0 {
+                        return Err(format!("cmd {idx}: cave target '{tgt_str}' resolved to 0x0; sequence aborted"));
+                    }
+
+                    let payload_bytes = mcp::parse_hex_bytes(payload)
+                        .map_err(|e| format!("cmd {idx}: invalid cave payload hex: {e:?}"))?;
+                    let cave_hook = match hook.as_str() {
+                        "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                        _ => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                    };
+                    let res = self.request(&Request::InstallCave { target: target_addr, hook: cave_hook });
+                    match res {
+                        Some(Response::CaveInstalled { cave, .. }) => {
+                            if let Some(m) = marker {
+                                if let Ok(mut s) = self.session.lock() {
+                                    let _ = s.set_marker(m, cave, Some(&format!("Cave for target {target_addr:#x}")));
                                 }
                             }
+                            self.log(format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> cave={cave:#x}"));
                         }
-                        Ok(_) => self.log(format!("cmd {idx}: target address '{tgt_str}' resolved to 0x0; cave skipped")),
-                        Err(e) => self.log(format!("cmd {idx}: bad target '{tgt_str}': {e:?}")),
+                        _ => return Err(format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed")),
                     }
                 }
                 profile::ProfileCommand::AllocateString { content, kind, marker } => {
@@ -629,68 +633,56 @@ impl TrainlabApp {
                             }
                             self.log(format!("cmd {idx}: allocate string ({kind}) -> ptr={ptr:#x} (len {len})"));
                         }
-                        Err(e) => self.log(format!("cmd {idx}: string allocation failed: {e}")),
+                        Err(e) => return Err(format!("cmd {idx}: string allocation failed: {e}")),
                     }
                 }
                 profile::ProfileCommand::AobScan { marker, pattern, offset } => {
                     let parsed_pat = trainlab_core::aob::parse(pattern);
                     if parsed_pat.is_empty() {
-                        self.log(format!("cmd {idx}: empty AOB pattern '{pattern}'"));
-                    } else {
-                        let res = self.request(&Request::ScanAob { pattern: parsed_pat, start: None, end: None });
-                        match res {
-                            Some(Response::ScanAob { matches }) => {
-                                if let Some(&first_match) = matches.first() {
-                                    let final_addr = (first_match as i64 + offset.unwrap_or(0)) as u64;
-                                    if let Ok(mut s) = self.session.lock() {
-                                        let _ = s.set_marker(marker, final_addr, Some(&format!("AOB match for pattern '{pattern}'")));
-                                    }
-                                    self.log(format!("cmd {idx}: AOB scan found match at {final_addr:#x} -> saved marker '${marker}'"));
-                                } else {
-                                    self.log(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches"));
+                        return Err(format!("cmd {idx}: empty AOB pattern '{pattern}'"));
+                    }
+                    let res = self.request(&Request::ScanAob { pattern: parsed_pat, start: None, end: None });
+                    match res {
+                        Some(Response::ScanAob { matches }) => {
+                            if let Some(&first_match) = matches.first() {
+                                let final_addr = (first_match as i64 + offset.unwrap_or(0)) as u64;
+                                if let Ok(mut s) = self.session.lock() {
+                                    let _ = s.set_marker(marker, final_addr, Some(&format!("AOB match for pattern '{pattern}'")));
                                 }
+                                self.log(format!("cmd {idx}: AOB scan found match at {final_addr:#x} -> saved marker '${marker}'"));
+                            } else {
+                                return Err(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches; sequence aborted"));
                             }
-                            _ => self.log(format!("cmd {idx}: AOB scan request failed")),
                         }
+                        _ => return Err(format!("cmd {idx}: AOB scan request failed")),
                     }
                 }
                 profile::ProfileCommand::PointerChase { marker, base, offsets } => {
-                    let base_addr = mcp::parse_addr_expr(&self.session, base);
-                    match base_addr {
-                        Ok(mut curr_addr) => {
-                            let parsed_offs: Vec<u64> = offsets.iter().filter_map(|o| {
-                                let clean = o.trim_start_matches('+').trim();
-                                u64::from_str_radix(clean.strip_prefix("0x").unwrap_or(clean), 16).ok()
-                            }).collect();
-                            
-                            let mut failed = false;
-                            for off in &parsed_offs {
-                                let read_res = self.request(&Request::Read { address: curr_addr, len: 8 });
-                                match read_res {
-                                    Some(Response::Read { data }) if data.len() == 8 => {
-                                        let ptr = u64::from_le_bytes(data.try_into().unwrap());
-                                        curr_addr = ptr.wrapping_add(*off);
-                                    }
-                                    _ => {
-                                        failed = true;
-                                        break;
-                                    }
-                                }
+                    let mut curr_addr = mcp::parse_addr_expr(&self.session, base)
+                        .map_err(|e| format!("cmd {idx}: bad base '{base}': {e:?}"))?;
+                    let parsed_offs: Vec<u64> = offsets.iter().filter_map(|o| {
+                        let clean = o.trim_start_matches('+').trim();
+                        u64::from_str_radix(clean.strip_prefix("0x").unwrap_or(clean), 16).ok()
+                    }).collect();
+                    
+                    for off in &parsed_offs {
+                        let read_res = self.request(&Request::Read { address: curr_addr, len: 8 });
+                        match read_res {
+                            Some(Response::Read { data }) if data.len() == 8 => {
+                                let ptr = u64::from_le_bytes(data.try_into().unwrap());
+                                curr_addr = ptr.wrapping_add(*off);
                             }
-                            if !failed {
-                                if let Ok(mut s) = self.session.lock() {
-                                    let _ = s.set_marker(marker, curr_addr, Some(&format!("Pointer chase base '{base}' offsets {:?}", offsets)));
-                                }
-                                self.log(format!("cmd {idx}: pointer chase -> target {curr_addr:#x} saved marker '${marker}'"));
-                            } else {
-                                self.log(format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}"));
-                            }
+                            _ => return Err(format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}")),
                         }
-                        Err(e) => self.log(format!("cmd {idx}: bad base '{base}': {e:?}")),
                     }
+                    if let Ok(mut s) = self.session.lock() {
+                        let _ = s.set_marker(marker, curr_addr, Some(&format!("Pointer chase base '{base}' offsets {:?}", offsets)));
+                    }
+                    self.log(format!("cmd {idx}: pointer chase -> target {curr_addr:#x} saved marker '${marker}'"));
                 }
             }
         }
+        Ok(())
     }
 
     /// Allocate string memory in target game process and write bytes.
