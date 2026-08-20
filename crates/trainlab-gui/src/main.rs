@@ -570,7 +570,7 @@ impl TrainlabApp {
                                 }
                             });
                             // First try resolving value as an address expression (marker / module / pointer math)
-                            let eval_val_str = match mcp::parse_addr_expr(&self.session, value.trim_start_matches('$')) {
+                            let eval_val_str = match mcp::parse_addr_expr(&self.session, value) {
                                 Ok(val_addr) => format!("{val_addr:#x}"),
                                 Err(_) => value.clone(),
                             };
@@ -578,6 +578,8 @@ impl TrainlabApp {
                                 if let Ok(bytes) = mcp::parse_value_bytes(&eval_val_str, vt) {
                                     let res = self.request(&Request::Write { address: addr, data: bytes });
                                     self.log(format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({addr:#x}) -> {:?}", res.is_some()));
+                                } else {
+                                    self.log(format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}' ({vt_str})"));
                                 }
                             }
                         }
