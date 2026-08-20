@@ -220,8 +220,10 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                     continue;
                 }
                 let len = (hi - lo) as usize;
-                if let Ok(buf) = mem.read(lo, len) {
-                    for off in trainlab_core::aob::find_all(&buf, &pattern) {
+                if len >= pattern.len() {
+                    // In-process slice scan (avoids copying giant memory buffers)
+                    let buf = unsafe { std::slice::from_raw_parts(lo as *const u8, len) };
+                    for off in trainlab_core::aob::find_all(buf, &pattern) {
                         matches.push(lo + off as u64);
                     }
                 }
