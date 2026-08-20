@@ -1,6 +1,6 @@
-# Agent Workflow: Windows Release Build & Steam Deck Deployment
+# Agent Workflow: Windows Release Build & Steam Deck / Machine Deployment
 
-This guide documents the procedures for compiling `trainlab` Windows release binaries (`trainlab-gui.exe` and `trainlab_inject.dll`) and deploying them to a target Steam Deck over SSH/SCP.
+This guide documents the procedures for compiling `trainlab` Windows release binaries (`trainlab-gui.exe` and `trainlab_inject.dll`) and deploying them to target Steam OS devices (Steam Deck & Steam Machine) over SSH/SCP.
 
 ---
 
@@ -18,35 +18,46 @@ cargo build --release --target x86_64-pc-windows-gnu --package trainlab-gui --pa
 
 ---
 
-## 2. Deploying to Steam Deck via SCP
+## 2. Deploying to Steam Deck & Steam Machine via SCP
 
-### Steam Deck Connection Info
-- **Default SSH User**: `deck`
-- **Default IP**: `192.168.254.27` (or `deck@steamdeck.local` depending on mDNS resolution)
+### Target Connection Info
+- **Default User**: `deck`
+- **Steam Deck IP**: `192.168.254.27` (or `deck@steamdeck.local`)
+- **Steam Machine IP**: `192.168.254.143`
 - **Target Folder**: `~/Documents/Trainers/Trainlab/`
 
 ### Copying Binaries
 
-Use `scp` to transfer both built release artifacts over to the target directory:
+Use `scp` to transfer both built release artifacts to the target devices:
 
+#### Deploy to Steam Deck:
 ```bash
 scp target/x86_64-pc-windows-gnu/release/trainlab-gui.exe \
     target/x86_64-pc-windows-gnu/release/trainlab_inject.dll \
     deck@192.168.254.27:~/Documents/Trainers/Trainlab/
 ```
 
+#### Deploy to Steam Machine:
+```bash
+scp target/x86_64-pc-windows-gnu/release/trainlab-gui.exe \
+    target/x86_64-pc-windows-gnu/release/trainlab_inject.dll \
+    deck@192.168.254.143:~/Documents/Trainers/Trainlab/
+```
+
 ---
 
 ## 3. Remote Maintenance & Backup Cleanup
 
-If temporary backup directories accumulate under the deployment directory on the Steam Deck, clean them up with:
+Clean up backup directories on target devices:
 
 ```bash
 ssh deck@192.168.254.27 "rm -rf ~/Documents/Trainers/Trainlab/backup-*"
+ssh deck@192.168.254.143 "rm -rf ~/Documents/Trainers/Trainlab/backup-*"
 ```
 
 Verify deployment:
 
 ```bash
 ssh deck@192.168.254.27 "ls -la ~/Documents/Trainers/Trainlab"
+ssh deck@192.168.254.143 "ls -la ~/Documents/Trainers/Trainlab"
 ```
