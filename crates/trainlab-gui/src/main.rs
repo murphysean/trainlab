@@ -84,6 +84,8 @@ struct TrainlabApp {
     scan_op_mode: ScanOpMode,
     // Active Tab state
     active_tab: ActiveTab,
+    // Auto-run profile init_commands on attach
+    auto_init: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +147,7 @@ impl TrainlabApp {
             scan_val_type: trainlab_core::scan::ValueType::I32,
             scan_op_mode: ScanOpMode::Exact,
             active_tab: ActiveTab::Cheats,
+            auto_init: true,
         };
         app.auto_match_profile();
         app
@@ -200,19 +203,23 @@ impl TrainlabApp {
                 let profiles = profile::discover_profiles();
                 if let Some((file, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
                     let mut init_ok = true;
-                    if let Some(init_cmds) = &p.init_commands {
-                        if !init_cmds.is_empty() {
-                            self.log(format!("executing {} profile init_command(s)...", init_cmds.len()));
-                            if let Err(e) = self.run_cheat_commands(init_cmds) {
-                                self.log(format!("profile init_commands failed: {e}"));
-                                init_ok = false;
+                    if self.auto_init {
+                        if let Some(init_cmds) = &p.init_commands {
+                            if !init_cmds.is_empty() {
+                                self.log(format!("auto-init: executing {} profile init_command(s)...", init_cmds.len()));
+                                if let Err(e) = self.run_cheat_commands(init_cmds) {
+                                    self.log(format!("profile init_commands failed: {e}"));
+                                    init_ok = false;
+                                }
                             }
                         }
+                    } else {
+                        self.log("connected (auto-init is OFF; click '⚡ Re-run Initialization' when ready)");
+                        init_ok = false;
                     }
                     if init_ok {
-                        // Populate cheats ONLY after successful inject & init
                         let run_setup = p.init_commands.is_none();
-                        if let Ok(mut server) = mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, run_setup) {
+                        if let Ok(_) = mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, run_setup) {
                             self.log(format!("populated cheats from profile '{file}'"));
                         }
                     }
@@ -431,6 +438,8 @@ impl TrainlabApp {
             if ui.checkbox(&mut self.show_cheats, "show").changed() {
                 // toggle panel visibility
             }
+            ui.separator();
+            ui.checkbox(&mut self.auto_init, "Auto-run init on attach");
         });
         if !self.show_cheats {
             return;
@@ -708,6 +717,59 @@ impl TrainlabApp {
                         let _ = s.set_marker(marker, curr_addr, Some(&format!("Pointer chase base '{base}' offsets {:?}", offsets)));
                     }
                     self.log(format!("cmd {idx}: pointer chase -> target {curr_addr:#x} saved marker '${marker}'"));
+                }
+                profile::ProfileCommand::Assert { address_ref, address, expected, value_type } => {
+                    let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
+                    let target_addr = mcp::parse_addr_expr(&self.session, addr_str)
+                        .map_err(|e| format!("cmd {idx}: assert bad target '{addr_str}': {e:?}"))?;
+                    if target_addr == 0 {
+                        return Err(format!("cmd {idx}: assert failed — target address '{addr_str}' is 0x0"));
+                    }
+
+                    let vt_str = value_type.as_deref().unwrap_or("i32");
+                    let vt = mcp::parse_value_type(vt_str)
+                        .map_err(|e| format!("cmd {idx}: assert bad value_type '{vt_str}': {e:?}"))?;
+                    let read_len = vt.size();
+                    let read_res = self.request(&Request::Read { address: target_addr, len: read_len });
+
+                    match read_res {
+                        Some(Response::Read { data }) if data.len() == read_len => {
+                            // Support non-null check '!0x0' or '!0'
+                            let exp_clean = expected.trim();
+                            if exp_clean == "!0" || exp_clean == "!0x0" || exp_clean == "!0X0" || exp_clean == "!null" {
+                                let val_u64 = match data.len() {
+                                    1 => data[0] as u64,
+                                    2 => u16::from_le_bytes(data[..2].try_into().unwrap()) as u64,
+                                    4 => u32::from_le_bytes(data[..4].try_into().unwrap()) as u64,
+                                    8 => u64::from_le_bytes(data[..8].try_into().unwrap()),
+                                    _ => 0,
+                                };
+                                if val_u64 == 0 {
+                                    return Err(format!("cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) is 0x0 (expected non-null)"));
+                                }
+                                self.log(format!("cmd {idx}: assert non-null @ {addr_str} ({target_addr:#x}) passed ({val_u64:#x})"));
+                            } else {
+                                // Match evaluated target value expression or exact bytes
+                                let eval_exp = match mcp::parse_addr_expr(&self.session, exp_clean) {
+                                    Ok(a) => format!("{a:#x}"),
+                                    Err(_) => exp_clean.to_string(),
+                                };
+                                let exp_bytes = mcp::parse_value_bytes(&eval_exp, vt)
+                                    .map_err(|e| format!("cmd {idx}: assert invalid expected value '{exp_clean}': {e:?}"))?;
+                                if data != exp_bytes {
+                                    let got_str = format_value(&data, vt);
+                                    return Err(format!("cmd {idx}: assert failed @ {addr_str} ({target_addr:#x}) — expected {eval_exp}, got {got_str}"));
+                                }
+                                self.log(format!("cmd {idx}: assert @ {addr_str} ({target_addr:#x}) == {eval_exp} passed"));
+                            }
+                        }
+                        _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
+                    }
+                }
+                profile::ProfileCommand::Wait { ms } => {
+                    self.log(format!("cmd {idx}: waiting {ms}ms..."));
+                    std::thread::sleep(std::time::Duration::from_millis(*ms));
+                    self.log(format!("cmd {idx}: wait {ms}ms complete"));
                 }
             }
         }

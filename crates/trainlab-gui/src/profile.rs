@@ -184,6 +184,24 @@ pub enum ProfileCommand {
         #[serde(default)]
         offsets: Vec<String>,
     },
+    /// Assert that memory at an address matches an expected value/expression (aborts sequence if failed).
+    Assert {
+        /// Address or marker reference to inspect.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+        /// Expected value string (e.g. "0x01", "9999", or non-null check "!0x0").
+        expected: String,
+        /// Optional value type ("i32", "f32", "ptr", "u32").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_type: Option<String>,
+    },
+    /// Sleep/delay execution for a specified duration in milliseconds.
+    Wait {
+        /// Delay duration in milliseconds (e.g. 5000 for 5 seconds).
+        ms: u64,
+    },
 }
 
 fn default_hook_kind() -> String {
