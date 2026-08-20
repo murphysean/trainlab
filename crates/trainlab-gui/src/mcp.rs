@@ -2694,9 +2694,10 @@ pub(crate) fn parse_addr_expr(session: &SharedSession, input: &str) -> Result<u6
         return Ok(a);
     }
 
-    // 3. Try looking up in session markers
+    // 3. Try looking up in session markers (support optional '$' prefix like "$mycoolstring" or "mycoolstring")
+    let marker_name = input.strip_prefix('$').unwrap_or(input);
     if let Ok(s) = session.lock() {
-        if let Some(m) = s.get_marker(input) {
+        if let Some(m) = s.get_marker(marker_name).or_else(|| s.get_marker(input)) {
             return Ok(m.address);
         }
     }
@@ -3429,11 +3430,13 @@ mod tests {
         assert_eq!(parse_addr_expr(&s, "0x1000").unwrap(), 0x1000);
         // Raw dec
         assert_eq!(parse_addr_expr(&s, "4096").unwrap(), 4096);
-        // Saved marker
+        // Saved marker (with and without $)
         assert_eq!(parse_addr_expr(&s, "wood_ptr").unwrap(), 0x0e890000);
-        // Marker + offset math
+        assert_eq!(parse_addr_expr(&s, "$wood_ptr").unwrap(), 0x0e890000);
+        // Marker + offset math (with and without $)
         assert_eq!(parse_addr_expr(&s, "wood_ptr + 0x48").unwrap(), 0x0e890048);
-        assert_eq!(parse_addr_expr(&s, "wood_ptr - 0x10").unwrap(), 0x0e88fff0);
+        assert_eq!(parse_addr_expr(&s, "$wood_ptr + 0x48").unwrap(), 0x0e890048);
+        assert_eq!(parse_addr_expr(&s, "$wood_ptr - 0x10").unwrap(), 0x0e88fff0);
     }
 
     #[test]
