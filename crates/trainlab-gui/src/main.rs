@@ -565,7 +565,7 @@ impl TrainlabApp {
                     let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
                     let parsed_addr = mcp::parse_addr_expr(&self.session, addr_str);
                     match parsed_addr {
-                        Ok(addr) => {
+                        Ok(addr) if addr != 0 => {
                             let vt_str = value_type.as_deref().unwrap_or_else(|| {
                                 if value.trim().starts_with("0x") || value.trim().starts_with("0X") || value.trim().starts_with('$') {
                                     "ptr"
@@ -587,6 +587,7 @@ impl TrainlabApp {
                                 }
                             }
                         }
+                        Ok(_) => self.log(format!("cmd {idx}: write target '{addr_str}' resolved to 0x0; write skipped")),
                         Err(e) => self.log(format!("cmd {idx}: bad address '{addr_str}': {e:?}")),
                     }
                 }
@@ -594,7 +595,7 @@ impl TrainlabApp {
                     let tgt_str = target_ref.as_deref().or(target.as_deref()).unwrap_or("");
                     let parsed_tgt = mcp::parse_addr_expr(&self.session, tgt_str);
                     match parsed_tgt {
-                        Ok(target_addr) => {
+                        Ok(target_addr) if target_addr != 0 => {
                             if let Ok(payload_bytes) = mcp::parse_hex_bytes(payload) {
                                 let cave_hook = match hook.as_str() {
                                     "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
@@ -614,6 +615,7 @@ impl TrainlabApp {
                                 }
                             }
                         }
+                        Ok(_) => self.log(format!("cmd {idx}: target address '{tgt_str}' resolved to 0x0; cave skipped")),
                         Err(e) => self.log(format!("cmd {idx}: bad target '{tgt_str}': {e:?}")),
                     }
                 }
