@@ -3164,7 +3164,8 @@ pub async fn serve(
     let _ = std::fs::create_dir_all("snapshots");
     let router = axum::Router::new()
         .nest_service("/mcp", service)
-        .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"));
+        .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))
+        .route("/log", axum::routing::get(serve_session_log));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let addr = listener.local_addr()?;
     tracing::info!(%addr, "trainlab MCP server listening on /mcp");
@@ -3179,6 +3180,21 @@ pub async fn serve(
     });
 
     Ok((format!("http://{addr}/mcp"), ct))
+}
+
+/// HTTP handler serving `trainlab_session.log` as a downloadable text file at `http://<host>:<port>/log`.
+async fn serve_session_log() -> impl axum::response::IntoResponse {
+    use axum::response::IntoResponse;
+    match tokio::fs::read_to_string("trainlab_session.log").await {
+        Ok(contents) => (
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            contents,
+        ).into_response(),
+        Err(_) => (
+            axum::http::StatusCode::NOT_FOUND,
+            "session log not found (no activity logged yet)",
+        ).into_response(),
+    }
 }
 
 #[cfg(test)]

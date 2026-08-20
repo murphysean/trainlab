@@ -166,9 +166,24 @@ pub struct SessionState {
 impl SessionState {
     /// Log an activity entry tagged by source (e.g., "UI", "MCP").
     pub fn log_activity(&mut self, source: &str, msg: impl Into<String>) {
-        let entry = format!("{source}: {}", msg.into());
-        self.activity_log.push(entry);
-        if self.activity_log.len() > 500 {
+        let msg_str = msg.into();
+        let formatted = format!("[{source}] {msg_str}");
+
+        // 1. Print to stdout so Steam / Wine logs capture all activity
+        println!("{formatted}");
+
+        // 2. Append to trainlab_session.log on disk (available via HTTP download)
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("trainlab_session.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "{formatted}")
+            });
+
+        self.activity_log.push(formatted);
+        if self.activity_log.len() > 1000 {
             self.activity_log.remove(0);
         }
     }
