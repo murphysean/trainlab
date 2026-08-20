@@ -2874,32 +2874,40 @@ fn hex_encode(data: &[u8]) -> String {
 pub(crate) fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<u8>, ErrorData> {
     use trainlab_core::scan::ValueType;
     let s = s.trim();
+    fn parse_int<T: std::str::FromStr>(s: &str, parse_hex: impl FnOnce(&str) -> Result<T, std::num::ParseIntError>) -> Result<T, ()> {
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            parse_hex(hex).map_err(|_| ())
+        } else {
+            s.parse::<T>().or_else(|_| parse_hex(s)).map_err(|_| ())
+        }
+    }
+
     match vt {
-        ValueType::I32 => Ok(s
-            .parse::<i32>()
-            .map_err(|_| err(format!("invalid i32 '{s}'")))?
-            .to_le_bytes()
-            .to_vec()),
-        ValueType::U32 => Ok(s
-            .parse::<u32>()
-            .map_err(|_| err(format!("invalid u32 '{s}'")))?
-            .to_le_bytes()
-            .to_vec()),
+        ValueType::I32 => {
+            let val = parse_int::<i32>(s, |h| i32::from_str_radix(h, 16))
+                .map_err(|_| err(format!("invalid i32 '{s}'")))?;
+            Ok(val.to_le_bytes().to_vec())
+        }
+        ValueType::U32 => {
+            let val = parse_int::<u32>(s, |h| u32::from_str_radix(h, 16))
+                .map_err(|_| err(format!("invalid u32 '{s}'")))?;
+            Ok(val.to_le_bytes().to_vec())
+        }
         ValueType::F32 => Ok(s
             .parse::<f32>()
             .map_err(|_| err(format!("invalid f32 '{s}'")))?
             .to_le_bytes()
             .to_vec()),
-        ValueType::I64 => Ok(s
-            .parse::<i64>()
-            .map_err(|_| err(format!("invalid i64 '{s}'")))?
-            .to_le_bytes()
-            .to_vec()),
-        ValueType::U64 => Ok(s
-            .parse::<u64>()
-            .map_err(|_| err(format!("invalid u64 '{s}'")))?
-            .to_le_bytes()
-            .to_vec()),
+        ValueType::I64 => {
+            let val = parse_int::<i64>(s, |h| i64::from_str_radix(h, 16))
+                .map_err(|_| err(format!("invalid i64 '{s}'")))?;
+            Ok(val.to_le_bytes().to_vec())
+        }
+        ValueType::U64 => {
+            let val = parse_int::<u64>(s, |h| u64::from_str_radix(h, 16))
+                .map_err(|_| err(format!("invalid u64 '{s}'")))?;
+            Ok(val.to_le_bytes().to_vec())
+        }
         ValueType::F64 => Ok(s
             .parse::<f64>()
             .map_err(|_| err(format!("invalid f64 '{s}'")))?
