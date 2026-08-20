@@ -547,6 +547,9 @@ pub struct AddCheatArgs {
     /// For toggle cheats: the shellcode payload (hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// For toggle cheats: jump style ("absolute" or "relative").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump: Option<String>,
     /// Optional human note / description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -1080,9 +1083,13 @@ impl TrainlabMcpServer {
                 "toggle" => {
                     let target = resolve_cheat_address(&resolved, pc)?;
                     let payload = parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?;
+                    let jump_style = match pc.jump.as_deref().unwrap_or("absolute") {
+                        "relative" => trainlab_core::cave_hook::JumpStyle::Relative,
+                        _ => trainlab_core::cave_hook::JumpStyle::Absolute,
+                    };
                     let hook = match pc.hook.as_deref().unwrap_or("trampoline") {
-                        "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
-                        "override" => trainlab_core::cave_hook::CaveHook::Override { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                        "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline { payload, jump: jump_style },
+                        "override" => trainlab_core::cave_hook::CaveHook::Override { payload, jump: jump_style },
                         other => return Err(err(format!("unknown hook '{other}'"))),
                     };
                     crate::session::CheatKind::Toggle {
@@ -1168,6 +1175,7 @@ impl TrainlabMcpServer {
                     target_ref,
                     hook,
                     payload,
+                    jump: None,
                     mechanism: None,
                     rate_hz: None,
                     value: None,
@@ -3223,6 +3231,7 @@ mod tests {
             target_ref: None,
             hook: None,
             payload: None,
+            jump: None,
             mechanism: None,
             rate_hz: None,
             value: None,

@@ -634,7 +634,7 @@ impl TrainlabApp {
                     }
                     self.log(format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({parsed_addr:#x}) -> ok"));
                 }
-                profile::ProfileCommand::InstallCave { target_ref, target, hook, payload, marker } => {
+                profile::ProfileCommand::InstallCave { target_ref, target, hook, jump, payload, marker } => {
                     let tgt_str = target_ref.as_deref().or(target.as_deref()).unwrap_or("");
                     let target_addr = mcp::parse_addr_expr(&self.session, tgt_str)
                         .map_err(|e| format!("cmd {idx}: bad target '{tgt_str}': {e:?}"))?;
@@ -644,9 +644,13 @@ impl TrainlabApp {
 
                     let payload_bytes = mcp::parse_hex_bytes(payload)
                         .map_err(|e| format!("cmd {idx}: invalid cave payload hex: {e:?}"))?;
+                    let jump_style = match jump.as_deref().unwrap_or("absolute") {
+                        "relative" => trainlab_core::cave_hook::JumpStyle::Relative,
+                        _ => trainlab_core::cave_hook::JumpStyle::Absolute,
+                    };
                     let cave_hook = match hook.as_str() {
-                        "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
-                        _ => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                        "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: jump_style },
+                        _ => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: jump_style },
                     };
                     let res = self.request(&Request::InstallCave { target: target_addr, hook: cave_hook });
                     match res {

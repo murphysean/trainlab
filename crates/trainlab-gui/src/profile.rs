@@ -102,6 +102,9 @@ pub struct ProfileCheat {
     /// For toggle cheats: shellcode payload (hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// For toggle cheats: jump style ("absolute" or "relative").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump: Option<String>,
     /// Pinning mechanism: "cave" (in-loop) or "timer" (re-write at rate_hz).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mechanism: Option<String>,
@@ -146,6 +149,9 @@ pub enum ProfileCommand {
         /// Hook kind ("trampoline" or "override").
         #[serde(default = "default_hook_kind")]
         hook: String,
+        /// Jump style ("absolute" for 14-byte long jump, "relative" for 5-byte short jump).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        jump: Option<String>,
         /// Shellcode payload hex string.
         #[serde(default)]
         payload: String,
@@ -316,6 +322,7 @@ mod tests {
                 target_ref: None,
                 hook: None,
                 payload: None,
+                jump: None,
                 mechanism: Some("cave".into()),
                 rate_hz: None,
                 value: Some("400".into()),
