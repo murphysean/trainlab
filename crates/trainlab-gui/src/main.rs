@@ -277,7 +277,7 @@ impl TrainlabApp {
                     _ => self.log(format!("confirmed write @ {:#x} failed", op.address)),
                 }
             }
-            PendingKind::InstallCave { hook } => {
+            PendingKind::InstallCave { hook, .. } => {
                 let r = self.request(&Request::InstallCave { target: op.address, hook });
                 match r {
                     Some(Response::CaveInstalled { cave, .. }) => {
@@ -473,11 +473,22 @@ impl TrainlabApp {
                     let parsed_addr = mcp::parse_addr_expr(&self.session, addr_str);
                     match parsed_addr {
                         Ok(addr) => {
-                            let vt_str = value_type.as_deref().unwrap_or("i32");
+                            let vt_str = value_type.as_deref().unwrap_or_else(|| {
+                                if value.trim().starts_with("0x") || value.trim().starts_with("0X") || value.trim().starts_with('$') {
+                                    "ptr"
+                                } else {
+                                    "i32"
+                                }
+                            });
+                            // First try resolving value as an address expression (marker / module / pointer math)
+                            let eval_val_str = match mcp::parse_addr_expr(&self.session, value.trim_start_matches('$')) {
+                                Ok(val_addr) => format!("{val_addr:#x}"),
+                                Err(_) => value.clone(),
+                            };
                             if let Ok(vt) = mcp::parse_value_type(vt_str) {
-                                if let Ok(bytes) = mcp::parse_value_bytes(value, vt) {
+                                if let Ok(bytes) = mcp::parse_value_bytes(&eval_val_str, vt) {
                                     let res = self.request(&Request::Write { address: addr, data: bytes });
-                                    self.log(format!("cmd {idx}: write '{value}' ({vt_str}) to {addr_str} ({addr:#x}) -> {:?}", res.is_some()));
+                                    self.log(format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({addr:#x}) -> {:?}", res.is_some()));
                                 }
                             }
                         }

@@ -372,6 +372,9 @@ pub struct InstallCaveArgs {
     /// Jump style: "absolute" (default, 14-byte long jump) or "relative" (5-byte short jump for tight patch sites).
     #[serde(default = "default_jump_style")]
     pub jump: String,
+    /// Optional marker label to automatically save the allocated cave address under once confirmed (e.g. "my_cave").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
 }
 
 fn default_jump_style() -> String {
@@ -467,6 +470,9 @@ pub struct AllocateStringArgs {
     /// Memory layout kind: "c" (default, NUL-terminated C string), "rust" (fat pointer ptr+len), "json", "yaml", "xml", "js", "config".
     #[serde(default = "default_string_kind")]
     pub kind: String,
+    /// Optional marker label to save the allocated string's pointer under (e.g. "str_payload").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
 }
 
 fn default_string_kind() -> String {
@@ -953,7 +959,7 @@ impl TrainlabMcpServer {
         let pid = if args.enabled {
             s.stage_op(
                 target,
-                PendingKind::InstallCave { hook },
+                PendingKind::InstallCave { hook, marker: None },
                 format!("enable toggle cheat {} at {:#x}", args.id, target),
             )
         } else {
@@ -1818,6 +1824,9 @@ impl TrainlabMcpServer {
                 "MCP",
                 format!("allocated string ({kind}, {len} bytes) at {alloc_addr:#x}"),
             );
+            if let Some(m) = &args.marker {
+                let _ = s.set_marker(m, alloc_addr, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
+            }
         }
         self.request_repaint();
 
@@ -2312,11 +2321,12 @@ impl TrainlabMcpServer {
             .map_err(|_| err("session lock poisoned"))?;
         let id = s.stage_op(
             target,
-            PendingKind::InstallCave { hook },
+            PendingKind::InstallCave { hook, marker: args.marker.clone() },
             format!(
-                "install {kind_desc} cave at {:#x}, payload={} byte(s)",
+                "install {kind_desc} cave at {:#x}, payload={} byte(s){}",
                 target,
-                payload.len()
+                payload.len(),
+                if let Some(m) = &args.marker { format!(" (marker: '{m}')") } else { String::new() }
             ),
         );
         drop(s);
@@ -2438,7 +2448,7 @@ impl TrainlabMcpServer {
                     Err(e) => Err(e),
                 }
             }
-            PendingKind::InstallCave { hook } => {
+            PendingKind::InstallCave { hook, marker } => {
                 match call_dll(&Request::InstallCave {
                     target: address,
                     hook: hook.clone(),
@@ -2453,6 +2463,9 @@ impl TrainlabMcpServer {
                             original.clone(),
                             format!("install_cave at {:#x}", target),
                         );
+                        if let Some(m) = marker {
+                            let _ = s.set_marker(&m, cave, Some(&format!("Code cave allocated for target {target:#x}")));
+                        }
                         drop(s);
                         Ok(format!(
                             "confirmed cave: cave={:#x} target={:#x} ({}) original saved ({} byte(s)) (undo id {id})",
@@ -3308,6 +3321,7 @@ mod tests {
         let res_err = server.allocate_string(Parameters(AllocateStringArgs {
             content: "print('hello')".into(),
             kind: "lua".into(), // Explicly rejected per spec
+            marker: None,
         }));
         assert!(res_err.is_err());
 
@@ -3315,6 +3329,7 @@ mod tests {
         let res_ok_c = server.allocate_string(Parameters(AllocateStringArgs {
             content: "print('hello')".into(),
             kind: "c".into(),
+            marker: None,
         }));
         // Requires attached game process, so returns error for no PID attached
         assert!(res_ok_c.is_err());

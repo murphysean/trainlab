@@ -107,6 +107,7 @@ pub enum PendingKind {
     /// Install a code-cave hook at `address`.
     InstallCave {
         hook: trainlab_core::cave_hook::CaveHook,
+        marker: Option<String>,
     },
     /// Revert a previously-applied mutation by writing `original_bytes` back.
     Undo { original_bytes: Vec<u8> },
@@ -501,6 +502,7 @@ mod tests {
                     payload: vec![],
                     jump: trainlab_core::cave_hook::JumpStyle::Absolute,
                 },
+                marker: None,
             },
             "install cave".into(),
         );
