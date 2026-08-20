@@ -240,14 +240,93 @@ impl TrainlabApp {
 
         if !markers.is_empty() {
             ui.separator();
-            ui.label("Markers:");
-            for (label, addr, note) in &markers {
-                ui.horizontal(|ui| {
-                    ui.label(format!("• {label} @ {addr:#x}"));
-                    if let Some(n) = note {
-                        ui.label(format!("({n})"));
+            ui.heading("📌 Saved Markers (Live Memory Inspector)");
+            ui.label("Read and modify memory values live at any saved marker address:");
+
+            let mut write_op: Option<(u64, String, trainlab_core::scan::ValueType)> = None;
+
+            egui::Grid::new("markers_grid")
+                .striped(true)
+                .num_columns(6)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Marker").strong());
+                    ui.label(egui::RichText::new("Address").strong());
+                    ui.label(egui::RichText::new("Live Value (i32)").strong());
+                    ui.label(egui::RichText::new("Live Value (f32)").strong());
+                    ui.label(egui::RichText::new("Live Value (ptr)").strong());
+                    ui.label(egui::RichText::new("Write New Value").strong());
+                    ui.end_row();
+
+                    for (label, addr, note) in &markers {
+                        ui.label(format!("${label}"));
+                        ui.label(format!("{addr:#x}"));
+
+                        // Read 8 bytes at marker address to display live interpretations
+                        let read_res = self.request(&Request::Read { address: *addr, len: 8 });
+                        match read_res {
+                            Some(Response::Read { data }) => {
+                                let i32_val = if data.len() >= 4 {
+                                    format!("{}", i32::from_le_bytes(data[..4].try_into().unwrap()))
+                                } else { "-".into() };
+
+                                let f32_val = if data.len() >= 4 {
+                                    format!("{:.2}", f32::from_le_bytes(data[..4].try_into().unwrap()))
+                                } else { "-".into() };
+
+                                let ptr_val = if data.len() >= 8 {
+                                    format!("{:#x}", u64::from_le_bytes(data[..8].try_into().unwrap()))
+                                } else { "-".into() };
+
+                                ui.label(i32_val);
+                                ui.label(f32_val);
+                                ui.label(ptr_val);
+                            }
+                            _ => {
+                                ui.label("N/A");
+                                ui.label("N/A");
+                                ui.label("N/A");
+                            }
+                        }
+
+                        // Editable input for writing to marker
+                        let marker_edit_key = format!("marker_val_{label}");
+                        let mut edit_val = self.cheat_values.get(&((*addr) as u64)).cloned().unwrap_or_default();
+                        
+                        ui.horizontal(|ui| {
+                            let text_edit = ui.add(egui::TextEdit::singleline(&mut edit_val).hint_text("new value").desired_width(90.0));
+                            if text_edit.changed() {
+                                self.cheat_values.insert((*addr) as u64, edit_val.clone());
+                            }
+                            if ui.button("Write i32").clicked() {
+                                write_op = Some((*addr, edit_val.clone(), trainlab_core::scan::ValueType::I32));
+                            }
+                            if ui.button("Write ptr").clicked() {
+                                write_op = Some((*addr, edit_val.clone(), trainlab_core::scan::ValueType::Ptr));
+                            }
+                        });
+                        ui.end_row();
                     }
                 });
+
+            // Perform write if user clicked Write i32 / Write ptr button
+            if let Some((addr, val_str, vt)) = write_op {
+                // Support writing another marker address or value expression
+                let eval_val = match mcp::parse_addr_expr(&self.session, val_str.trim_start_matches('$')) {
+                    Ok(a) => format!("{a:#x}"),
+                    Err(_) => val_str.clone(),
+                };
+                if let Ok(bytes) = mcp::parse_value_bytes(&eval_val, vt) {
+                    let res = self.request(&Request::Write { address: addr, data: bytes });
+                    match res {
+                        Some(Response::Write { bytes_written }) => {
+                            self.log(format!("wrote '{eval_val}' to marker @ {addr:#x} ({bytes_written} bytes)"));
+                        }
+                        _ => self.log(format!("write to marker @ {addr:#x} failed")),
+                    }
+                } else {
+                    self.log(format!("invalid value '{val_str}' for write"));
+                }
             }
         }
 
