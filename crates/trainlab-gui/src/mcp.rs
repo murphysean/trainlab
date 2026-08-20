@@ -1178,6 +1178,7 @@ impl TrainlabMcpServer {
             inject_dll: true,
             version: "1.0.0".into(),
             setup: vec![],
+            init_commands: None,
             cheats: profile_cheats.clone(),
         };
         let yaml = profile.to_yaml().map_err(err)?;

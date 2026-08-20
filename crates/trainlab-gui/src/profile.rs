@@ -28,6 +28,9 @@ pub struct GameProfile {
     /// Setup steps that resolve base addresses for the current launch.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
+    /// Optional initialization commands executed automatically when profile attaches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_commands: Option<Vec<ProfileCommand>>,
     /// The cheats that show up in the GUI Cheats panel.
     #[serde(default)]
     pub cheats: Vec<ProfileCheat>,
@@ -285,6 +288,7 @@ mod tests {
                     offsets: vec!["0x10".into(), "0x28".into()],
                 },
             ],
+            init_commands: None,
             cheats: vec![ProfileCheat {
                 id: "wood".into(),
                 label: "Wood".into(),
@@ -319,6 +323,7 @@ mod tests {
             inject_dll: true,
             version: "".into(),
             setup: vec![],
+            init_commands: None,
             cheats: vec![],
         };
         let profiles = vec![("Unrailed2.yaml".to_string(), p)];

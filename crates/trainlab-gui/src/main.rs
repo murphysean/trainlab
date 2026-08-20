@@ -197,6 +197,16 @@ impl TrainlabApp {
         match controller::find_inject_connect(&self.session) {
             Ok(version) => {
                 self.log(format!("connected, inject v{version}"));
+                // Run profile initialization commands if a matching profile defines init_commands
+                let profiles = profile::discover_profiles();
+                if let Some((_, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
+                    if let Some(init_cmds) = &p.init_commands {
+                        if !init_cmds.is_empty() {
+                            self.log(format!("executing {} profile init_command(s)...", init_cmds.len()));
+                            self.run_cheat_commands(init_cmds);
+                        }
+                    }
+                }
             }
             Err(e) => {
                 self.log(format!("attach failed: {e}"));
