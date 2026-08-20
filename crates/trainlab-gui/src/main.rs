@@ -734,8 +734,10 @@ impl TrainlabApp {
 
                     match read_res {
                         Some(Response::Read { data }) if data.len() == read_len => {
-                            // Support non-null check '!0x0' or '!0'
                             let exp_clean = expected.trim();
+                            let got_val_str = format_value(&data, vt);
+
+                            // 1. Non-null check (!0 / !0x0 / !null)
                             if exp_clean == "!0" || exp_clean == "!0x0" || exp_clean == "!0X0" || exp_clean == "!null" {
                                 let val_u64 = match data.len() {
                                     1 => data[0] as u64,
@@ -748,19 +750,61 @@ impl TrainlabApp {
                                     return Err(format!("cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) is 0x0 (expected non-null)"));
                                 }
                                 self.log(format!("cmd {idx}: assert non-null @ {addr_str} ({target_addr:#x}) passed ({val_u64:#x})"));
-                            } else {
-                                // Match evaluated target value expression or exact bytes
-                                let eval_exp = match mcp::parse_addr_expr(&self.session, exp_clean) {
+                            }
+                            // 2. Comparison operators (>, <, >=, <=, !=, ==)
+                            else if let Some(stripped) = exp_clean.strip_prefix(">=") {
+                                let target_num: f64 = stripped.trim().parse().map_err(|_| format!("cmd {idx}: assert bad number '{stripped}'"))?;
+                                let got_num: f64 = got_val_str.parse().unwrap_or(0.0);
+                                if !(got_num >= target_num) {
+                                    return Err(format!("cmd {idx}: assert failed @ {addr_str} — expected >= {target_num}, got {got_num}"));
+                                }
+                                self.log(format!("cmd {idx}: assert @ {addr_str} ({got_num} >= {target_num}) passed"));
+                            }
+                            else if let Some(stripped) = exp_clean.strip_prefix("<=") {
+                                let target_num: f64 = stripped.trim().parse().map_err(|_| format!("cmd {idx}: assert bad number '{stripped}'"))?;
+                                let got_num: f64 = got_val_str.parse().unwrap_or(0.0);
+                                if !(got_num <= target_num) {
+                                    return Err(format!("cmd {idx}: assert failed @ {addr_str} — expected <= {target_num}, got {got_num}"));
+                                }
+                                self.log(format!("cmd {idx}: assert @ {addr_str} ({got_num} <= {target_num}) passed"));
+                            }
+                            else if let Some(stripped) = exp_clean.strip_prefix('>') {
+                                let target_num: f64 = stripped.trim().parse().map_err(|_| format!("cmd {idx}: assert bad number '{stripped}'"))?;
+                                let got_num: f64 = got_val_str.parse().unwrap_or(0.0);
+                                if !(got_num > target_num) {
+                                    return Err(format!("cmd {idx}: assert failed @ {addr_str} — expected > {target_num}, got {got_num}"));
+                                }
+                                self.log(format!("cmd {idx}: assert @ {addr_str} ({got_num} > {target_num}) passed"));
+                            }
+                            else if let Some(stripped) = exp_clean.strip_prefix('<') {
+                                let target_num: f64 = stripped.trim().parse().map_err(|_| format!("cmd {idx}: assert bad number '{stripped}'"))?;
+                                let got_num: f64 = got_val_str.parse().unwrap_or(0.0);
+                                if !(got_num < target_num) {
+                                    return Err(format!("cmd {idx}: assert failed @ {addr_str} — expected < {target_num}, got {got_num}"));
+                                }
+                                self.log(format!("cmd {idx}: assert @ {addr_str} ({got_num} < {target_num}) passed"));
+                            }
+                            else if let Some(stripped) = exp_clean.strip_prefix("!=") {
+                                let exp_val = stripped.trim();
+                                if got_val_str == exp_val {
+                                    return Err(format!("cmd {idx}: assert failed @ {addr_str} — expected != {exp_val}, got {got_val_str}"));
+                                }
+                                self.log(format!("cmd {idx}: assert @ {addr_str} ({got_val_str} != {exp_val}) passed"));
+                            }
+                            // 3. Exact equality comparison (e.g. expected: "100" or expected: "== 100")
+                            else {
+                                let exp_val = exp_clean.strip_prefix("==").unwrap_or(exp_clean).trim();
+                                // Evaluate if expected is another marker or address expression
+                                let eval_exp = match mcp::parse_addr_expr(&self.session, exp_val) {
                                     Ok(a) => format!("{a:#x}"),
-                                    Err(_) => exp_clean.to_string(),
+                                    Err(_) => exp_val.to_string(),
                                 };
                                 let exp_bytes = mcp::parse_value_bytes(&eval_exp, vt)
-                                    .map_err(|e| format!("cmd {idx}: assert invalid expected value '{exp_clean}': {e:?}"))?;
+                                    .map_err(|e| format!("cmd {idx}: assert invalid expected value '{exp_val}': {e:?}"))?;
                                 if data != exp_bytes {
-                                    let got_str = format_value(&data, vt);
-                                    return Err(format!("cmd {idx}: assert failed @ {addr_str} ({target_addr:#x}) — expected {eval_exp}, got {got_str}"));
+                                    return Err(format!("cmd {idx}: assert failed @ {addr_str} ({target_addr:#x}) — expected {exp_val}, read {got_val_str}"));
                                 }
-                                self.log(format!("cmd {idx}: assert @ {addr_str} ({target_addr:#x}) == {eval_exp} passed"));
+                                self.log(format!("cmd {idx}: assert read @ {addr_str} ({target_addr:#x}) == {got_val_str} passed"));
                             }
                         }
                         _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
