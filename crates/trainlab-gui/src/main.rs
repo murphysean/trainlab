@@ -262,8 +262,12 @@ impl TrainlabApp {
                         ui.label(format!("${label}"));
                         ui.label(format!("{addr:#x}"));
 
-                        // Read 8 bytes at marker address to display live interpretations
-                        let read_res = self.request(&Request::Read { address: *addr, len: 8 });
+                        // Read 8 bytes at marker address to display live interpretations (only if valid non-null address)
+                        let read_res = if *addr != 0 {
+                            self.request(&Request::Read { address: *addr, len: 8 })
+                        } else {
+                            None
+                        };
                         match read_res {
                             Some(Response::Read { data }) => {
                                 let i32_val = if data.len() >= 4 {
