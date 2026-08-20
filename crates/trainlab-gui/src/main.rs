@@ -197,15 +197,23 @@ impl TrainlabApp {
         match controller::find_inject_connect(&self.session) {
             Ok(version) => {
                 self.log(format!("connected, inject v{version}"));
-                // Run profile initialization commands if a matching profile defines init_commands
                 let profiles = profile::discover_profiles();
-                if let Some((_, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
+                if let Some((file, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
+                    let mut init_ok = true;
                     if let Some(init_cmds) = &p.init_commands {
                         if !init_cmds.is_empty() {
                             self.log(format!("executing {} profile init_command(s)...", init_cmds.len()));
                             if let Err(e) = self.run_cheat_commands(init_cmds) {
                                 self.log(format!("profile init_commands failed: {e}"));
+                                init_ok = false;
                             }
+                        }
+                    }
+                    if init_ok {
+                        // Populate cheats ONLY after successful inject & init
+                        let run_setup = p.init_commands.is_none();
+                        if let Ok(mut server) = mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, run_setup) {
+                            self.log(format!("populated cheats from profile '{file}'"));
                         }
                     }
                 }
@@ -428,6 +436,27 @@ impl TrainlabApp {
             return;
         }
         ui.horizontal(|ui| {
+            if ui.button("⚡ Re-run Initialization").clicked() {
+                let profiles = profile::discover_profiles();
+                if let Some((file, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
+                    let mut init_ok = true;
+                    if let Some(init_cmds) = &p.init_commands {
+                        if !init_cmds.is_empty() {
+                            self.log(format!("manual re-run: executing {} profile init_command(s)...", init_cmds.len()));
+                            if let Err(e) = self.run_cheat_commands(init_cmds) {
+                                self.log(format!("manual init_commands failed: {e}"));
+                                init_ok = false;
+                            }
+                        }
+                    }
+                    if init_ok {
+                        let run_setup = p.init_commands.is_none();
+                        if let Ok(_) = mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, run_setup) {
+                            self.log(format!("re-populated cheats from profile '{file}'"));
+                        }
+                    }
+                }
+            }
             if ui.button("Clear all").clicked() {
                 if let Ok(mut s) = self.session.lock() {
                     let ids: Vec<u64> = s.list_cheats().iter().map(|c| c.id).collect();

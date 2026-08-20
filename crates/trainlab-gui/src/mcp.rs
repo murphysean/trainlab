@@ -1009,6 +1009,11 @@ impl TrainlabMcpServer {
         ]))
     }
 
+    pub(crate) fn load_profile_by_name(&self, profile_name: &str, run_setup: bool) -> Result<String, String> {
+        let args = LoadProfileArgs { profile: profile_name.into(), run_setup };
+        self.load_profile(Parameters(args)).map_err(|e| e.message.to_string()).map(|_| "profile loaded".to_string())
+    }
+
     /// Load a cheat profile: run its setup steps to resolve base addresses,
     /// then materialize its cheats into the session (populating known values,
     /// but NOT enabling any cheats).
