@@ -124,9 +124,13 @@ where
     match &kind {
         HookKind::Override { payload, .. } => {
             write(cave, payload).map_err(|e| format!("write payload: {e}"))?;
-            let jmp_back = emitter::jmp_abs(return_to);
-            write(cave + payload.len() as u64, &jmp_back)
-                .map_err(|e| format!("write jump-back: {e}"))?;
+            // Only append jump-back if the payload doesn't terminate with a ret (0xC3)
+            let ends_in_ret = payload.last() == Some(&0xC3);
+            if !ends_in_ret {
+                let jmp_back = emitter::jmp_abs(return_to);
+                write(cave + payload.len() as u64, &jmp_back)
+                    .map_err(|e| format!("write jump-back: {e}"))?;
+            }
         }
         HookKind::Trampoline { payload, .. } => {
             // Relocate stolen instructions to run right after the payload.
