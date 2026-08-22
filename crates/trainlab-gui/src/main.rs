@@ -95,6 +95,9 @@ struct TrainlabApp {
     scan_val_max: String,
     scan_val_type: trainlab_core::scan::ValueType,
     scan_op_mode: ScanOpMode,
+    // Run Applications state
+    custom_app_path: String,
+    custom_app_args: String,
     // Active Tab state
     active_tab: ActiveTab,
     // Auto-run profile init_commands on attach
@@ -125,6 +128,7 @@ enum ActiveTab {
     MemoryScan,
     TaggedMarkers,
     PointersInspection,
+    RunApplications,
     ActivityLog,
 }
 
@@ -165,6 +169,8 @@ impl TrainlabApp {
             scan_val_max: "".into(),
             scan_val_type: trainlab_core::scan::ValueType::I32,
             scan_op_mode: ScanOpMode::Exact,
+            custom_app_path: "".into(),
+            custom_app_args: "".into(),
             active_tab: ActiveTab::Cheats,
             auto_init: true,
             window_visible: true,
@@ -187,6 +193,11 @@ impl TrainlabApp {
     /// Refresh the list of likely game processes for the dropdown.
     fn refresh_game_candidates(&mut self) {
         self.game_candidates = inject::find_game_candidates();
+        if let Ok(mut s) = self.session.lock() {
+            for proc in &self.game_candidates {
+                s.record_tracked_app(&proc.name, Some(proc.pid), None);
+            }
+        }
         self.log(format!(
             "found {} game candidate(s)",
             self.game_candidates.len()
@@ -1426,7 +1437,8 @@ impl eframe::App for TrainlabApp {
                         ActiveTab::Cheats => ActiveTab::MemoryScan,
                         ActiveTab::MemoryScan => ActiveTab::TaggedMarkers,
                         ActiveTab::TaggedMarkers => ActiveTab::PointersInspection,
-                        ActiveTab::PointersInspection => ActiveTab::ActivityLog,
+                        ActiveTab::PointersInspection => ActiveTab::RunApplications,
+                        ActiveTab::RunApplications => ActiveTab::ActivityLog,
                         ActiveTab::ActivityLog => ActiveTab::Cheats,
                     };
                 } else if i.key_pressed(egui::Key::PageUp) || i.key_pressed(egui::Key::E) {
@@ -1435,7 +1447,8 @@ impl eframe::App for TrainlabApp {
                         ActiveTab::MemoryScan => ActiveTab::Cheats,
                         ActiveTab::TaggedMarkers => ActiveTab::MemoryScan,
                         ActiveTab::PointersInspection => ActiveTab::TaggedMarkers,
-                        ActiveTab::ActivityLog => ActiveTab::PointersInspection,
+                        ActiveTab::RunApplications => ActiveTab::PointersInspection,
+                        ActiveTab::ActivityLog => ActiveTab::RunApplications,
                     };
                 }
             });
@@ -1633,6 +1646,7 @@ impl eframe::App for TrainlabApp {
                     ui.selectable_value(&mut self.active_tab, ActiveTab::MemoryScan, "🔍 Memory Scanning");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::TaggedMarkers, "📌 Tagged Markers");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::PointersInspection, "🎯 Pointers & Inspection");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::RunApplications, "🚀 Applications");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::ActivityLog, "📋 Activity Log");
                 });
 
@@ -1794,6 +1808,9 @@ impl eframe::App for TrainlabApp {
                                     }
                                 });
                         }
+                        ActiveTab::RunApplications => {
+                            self.show_run_applications_panel(ui);
+                        }
                         ActiveTab::ActivityLog => {
                             ui.heading("📋 Activity & Event Log");
                             ui.label("Full history of human UI actions and MCP agent commands executed in this session:");
@@ -1822,6 +1839,83 @@ impl eframe::App for TrainlabApp {
                 });
             });
         }
+    }
+}
+
+impl TrainlabApp {
+    /// Render the Applications & Binary Launcher panel.
+    fn show_run_applications_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("🚀 Applications & Process Launcher");
+        ui.label("Launch helper processes, anticheat bypasses, or restart target game binaries directly from trainlab.");
+        ui.add_space(10.0);
+
+        ui.group(|ui| {
+            ui.heading("Run Application by Path");
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                ui.label("Binary Path:");
+                ui.text_edit_singleline(&mut self.custom_app_path);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Arguments (opt):");
+                ui.text_edit_singleline(&mut self.custom_app_args);
+            });
+            ui.add_space(5.0);
+            if ui.button("🚀 Launch Application").clicked() {
+                let path = self.custom_app_path.trim().to_string();
+                let args: Vec<String> = self.custom_app_args.split_whitespace().map(|s| s.to_string()).collect();
+                if !path.is_empty() {
+                    let res = if let Ok(mut s) = self.session.lock() {
+                        s.launch_application(&path, &args)
+                    } else {
+                        Err("session lock poisoned".into())
+                    };
+                    match res {
+                        Ok(pid) => {
+                            self.log(format!("launched '{path}' (PID {pid})"));
+                        }
+                        Err(e) => {
+                            self.log(format!("launch failed: {e}"));
+                        }
+                    }
+                }
+            }
+        });
+
+        ui.add_space(15.0);
+
+        let tracked = self.session.lock().map(|s| s.list_tracked_apps()).unwrap_or_default();
+        ui.group(|ui| {
+            ui.heading(format!("Tracked Session Binaries & Processes ({})", tracked.len()));
+            ui.label("Binaries discovered during process scans or launched in this session:");
+            ui.add_space(5.0);
+
+            if tracked.is_empty() {
+                ui.colored_label(egui::Color32::GRAY, "No tracked binaries in session. Click 'Scan running processes' on the attach screen.");
+            } else {
+                egui::ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+                    for app in &tracked {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("• {}", app.name));
+                            if let Some(pid) = app.pid {
+                                ui.colored_label(egui::Color32::LIGHT_GREEN, format!("(PID {pid})"));
+                            }
+                            if let Some(path) = &app.path {
+                                ui.monospace(path);
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let launch_target = app.path.as_deref().unwrap_or(&app.name).to_string();
+                                if ui.button("▶ Re-Launch").clicked() {
+                                    if let Ok(mut s) = self.session.lock() {
+                                        let _ = s.launch_application(&launch_target, &[]);
+                                    }
+                                }
+                            });
+                        });
+                    }
+                });
+            }
+        });
     }
 }
 

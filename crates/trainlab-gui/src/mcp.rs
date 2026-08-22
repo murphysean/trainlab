@@ -315,6 +315,16 @@ fn default_true() -> bool {
     true
 }
 
+/// Arguments for [`launch_app`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LaunchAppArgs {
+    /// Executable path to launch (e.g. "C:\\Games\\game.exe" or "/usr/bin/app").
+    pub path: String,
+    /// Optional command-line arguments to pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+}
+
 /// Arguments for [`addr_to_module`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AddrToModuleArgs {
@@ -1133,6 +1143,22 @@ impl TrainlabMcpServer {
         text.push_str("Cheats are populated but NOT enabled. Use 'list_cheats' to see them.");
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(text),
+        ]))
+    }
+
+    /// Launch an application binary or executable by path.
+    #[tool(description = "Launch an application binary, helper process, or game executable by path with optional arguments.")]
+    fn launch_app(
+        &self,
+        Parameters(args): Parameters<LaunchAppArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let app_args = args.args.unwrap_or_default();
+        let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        let pid = s.launch_application(&args.path, &app_args).map_err(|e| err(e))?;
+        drop(s);
+        self.request_repaint();
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(format!("successfully launched '{}' (PID {pid})", args.path)),
         ]))
     }
 

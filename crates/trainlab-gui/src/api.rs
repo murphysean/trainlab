@@ -53,6 +53,8 @@ pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -
         .route("/scan/refine", post(refine_scan))
         .route("/scan/matches", get(get_scan_matches))
         .route("/window", post(window_command))
+        .route("/apps", get(get_tracked_apps))
+        .route("/apps/launch", post(launch_app_handler))
         .route("/events", get(sse_events_handler))
         .with_state(state)
 }
@@ -141,6 +143,12 @@ pub struct WriteReq {
 #[derive(Deserialize)]
 pub struct WindowReq {
     pub command: String, // "show" or "hide"
+}
+
+#[derive(Deserialize)]
+pub struct LaunchAppReq {
+    pub path: String,
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -415,6 +423,24 @@ async fn window_command(
     }
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "command": cmd })))
+}
+
+async fn get_tracked_apps(State(state): State<ApiState>) -> Json<Vec<crate::session::DiscoveredApp>> {
+    let s = state.session.lock().unwrap();
+    Json(s.list_tracked_apps())
+}
+
+async fn launch_app_handler(
+    State(state): State<ApiState>,
+    Json(req): Json<LaunchAppReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let args = req.args.unwrap_or_default();
+    let pid = {
+        let mut s = state.session.lock().unwrap();
+        s.launch_application(&req.path, &args).map_err(|e| err(e))?
+    };
+    state.request_repaint();
+    Ok(Json(serde_json::json!({ "status": "ok", "path": req.path, "pid": pid })))
 }
 
 use axum::response::sse::{Event, Sse};

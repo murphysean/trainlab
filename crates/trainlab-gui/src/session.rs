@@ -161,12 +161,23 @@ pub struct SessionState {
     cheats: Vec<Cheat>,
     /// Monotonic counter for cheat ids.
     next_cheat_id: u64,
+    /// Tracked applications & binaries discovered during process scans or launched manually.
+    tracked_apps: Vec<DiscoveredApp>,
     /// Pending window command requested remotely via REST API or MCP ("show" or "hide").
     pending_window_cmd: Option<String>,
     /// Unified activity log (sourced as "UI: ..." or "MCP: ...").
     activity_log: Vec<String>,
     /// Decoupled event bus for publishing session mutations.
     event_bus: crate::event::EventBus,
+}
+
+/// A tracked application or binary discovered in process scans or launched via trainlab.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredApp {
+    pub name: String,
+    pub pid: Option<u32>,
+    pub path: Option<String>,
+    pub last_seen: String,
 }
 
 impl SessionState {
@@ -216,6 +227,63 @@ impl SessionState {
     /// Pop any pending window command for execution by the GUI thread loop.
     pub fn take_window_cmd(&mut self) -> Option<String> {
         self.pending_window_cmd.take()
+    }
+
+    /// Record or update a discovered application in the session tracking list.
+    pub fn record_tracked_app(&mut self, name: &str, pid: Option<u32>, path: Option<&str>) {
+        let name_str = name.trim().to_string();
+        let path_str = path.map(|p| p.trim().to_string());
+        let now = chrono::Local::now().format("%H:%M:%S").to_string();
+
+        if let Some(existing) = self.tracked_apps.iter_mut().find(|a| a.name.eq_ignore_ascii_case(&name_str)) {
+            if pid.is_some() { existing.pid = pid; }
+            if path_str.is_some() { existing.path = path_str; }
+            existing.last_seen = now;
+        } else {
+            self.tracked_apps.push(DiscoveredApp {
+                name: name_str,
+                pid,
+                path: path_str,
+                last_seen: now,
+            });
+        }
+    }
+
+    /// Retrieve a list of all tracked applications.
+    pub fn list_tracked_apps(&self) -> Vec<DiscoveredApp> {
+        self.tracked_apps.clone()
+    }
+
+    /// Launch an application binary by path or name with optional arguments.
+    pub fn launch_application(&mut self, app_path: &str, args: &[String]) -> Result<u32, String> {
+        let app_path = app_path.trim();
+        if app_path.is_empty() {
+            return Err("application path cannot be empty".into());
+        }
+
+        self.log_activity("LAUNCH", format!("launching binary '{app_path}' with args {:?}", args));
+
+        let mut cmd = std::process::Command::new(app_path);
+        cmd.args(args);
+        let child = cmd.spawn().map_err(|e| format!("failed to spawn '{app_path}': {e}"))?;
+        let pid = child.id();
+
+        let name = std::path::Path::new(app_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(app_path)
+            .to_string();
+
+        self.record_tracked_app(&name, Some(pid), Some(app_path));
+        self.log_activity("LAUNCH", format!("successfully spawned '{name}' (PID {pid})"));
+
+        self.event_bus.emit(crate::event::SessionEvent::AppLaunched {
+            name: name.clone(),
+            path: app_path.to_string(),
+            pid: Some(pid),
+        });
+
+        Ok(pid)
     }
     /// Set the game process PID that scan-family tools target.
     pub fn set_game_pid(&mut self, pid: u32) {

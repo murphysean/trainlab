@@ -375,6 +375,30 @@
         </div>
       </div>
     </div>
+
+    <!-- Applications & Process Launcher -->
+    <div class="card">
+      <h2>🚀 Applications & Process Launcher</h2>
+      <div class="form-group">
+        <label>Run Application Path</label>
+        <div class="form-row">
+          <input type="text" id="launch-path" placeholder="Binary path (e.g. C:\Games\game.exe)">
+          <input type="text" id="launch-args" placeholder="Args" style="width: 80px;">
+          <button onclick="launchAppByInput()" class="primary">Launch</button>
+        </div>
+      </div>
+
+      <div class="matches-container">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>PID</th><th>Action</th></tr>
+          </thead>
+          <tbody id="apps-body">
+            <tr><td colspan="3" class="empty-state">No tracked processes</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -597,12 +621,43 @@
       alert(`Wrote ${value} to ${address}`);
     }
 
-    async function sendWindowCmd(command) {
-      await fetchJson(`${API}/window`, {
+    async function refreshApps() {
+      try {
+        const apps = await fetchJson(`${API}/apps`);
+        const tbody = document.getElementById('apps-body');
+        if (apps.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="3" class="empty-state">No tracked processes</td></tr>';
+          return;
+        }
+        tbody.innerHTML = apps.map(a => `
+          <tr>
+            <td>${a.name}</td>
+            <td>${a.pid || '-'}</td>
+            <td><button onclick="launchApp('${a.path || a.name}')" style="padding: 0.2rem 0.5rem;">Launch</button></td>
+          </tr>
+        `).join('');
+      } catch (e) {}
+    }
+
+    async function launchApp(path, args = []) {
+      if (!path) return;
+      const res = await fetchJson(`${API}/apps/launch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command })
+        body: JSON.stringify({ path, args })
       });
+      alert(`Launched ${path} (PID ${res.pid})`);
+      refreshApps();
+    }
+
+    async function launchAppByInput() {
+      const path = document.getElementById('launch-path').value;
+      const argsStr = document.getElementById('launch-args').value;
+      const args = argsStr ? argsStr.trim().split(/\s+/) : [];
+      if (!path) return;
+      await launchApp(path, args);
+      document.getElementById('launch-path').value = '';
+      document.getElementById('launch-args').value = '';
     }
 
     function refreshAll() {
@@ -610,6 +665,7 @@
       refreshCheats();
       refreshProfiles();
       refreshMarkers();
+      refreshApps();
     }
 
     // Init
@@ -631,6 +687,8 @@
             refreshStatus();
           } else if (evt.type === 'scan_updated') {
             refreshScanMatches();
+          } else if (evt.type === 'app_launched') {
+            refreshApps();
           }
         } catch (e) {}
       };

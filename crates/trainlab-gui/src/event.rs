@@ -49,6 +49,12 @@ pub enum SessionEvent {
         connected: bool,
         game_name: String,
     },
+    /// An application / binary was launched.
+    AppLaunched {
+        name: String,
+        path: String,
+        pid: Option<u32>,
+    },
 }
 
 /// Event bus holding the broadcast sender.
