@@ -1066,10 +1066,11 @@ impl TrainlabMcpServer {
                         resolved.push((step.name().to_string(), addr));
                     }
                     Err(e) => {
-                        return Err(err(format!(
-                            "setup step '{}' failed: {e}",
-                            step.name()
-                        )))
+                        let err_msg = format!("setup step '{}' failed: {e}", step.name());
+                        if let Ok(mut s) = self.session.lock() {
+                            s.log_activity("PROFILE", &err_msg);
+                        }
+                        return Err(err(err_msg))
                     }
                 }
             }
@@ -1127,6 +1128,13 @@ impl TrainlabMcpServer {
             materialized += 1;
         }
         s.set_connected(true);
+        let completion_msg = format!("successfully loaded profile '{}' ({}): {} setup step(s) resolved, {} cheat(s) materialized", file, profile.game, resolved.len(), materialized);
+        s.log_activity("PROFILE", &completion_msg);
+        s.event_bus().emit(crate::event::SessionEvent::ProfileLoaded {
+            name: file.clone(),
+            game: profile.game.clone(),
+            cheats_count: materialized,
+        });
         drop(s);
         self.request_repaint();
 
