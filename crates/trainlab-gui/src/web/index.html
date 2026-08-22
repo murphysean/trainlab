@@ -256,6 +256,8 @@
       </div>
     </div>
     <div class="controls">
+      <button onclick="sendWindowCmd('show')" style="border-color: var(--success); color: var(--success);">👁 Show GUI</button>
+      <button onclick="sendWindowCmd('hide')" style="border-color: var(--danger); color: var(--danger);">🙈 Hide GUI</button>
       <select id="profile-select">
         <option value="">Load Profile...</option>
       </select>
@@ -593,6 +595,14 @@
         body: JSON.stringify({ address, value, value_type })
       });
       alert(`Wrote ${value} to ${address}`);
+    }
+
+    async function sendWindowCmd(command) {
+      await fetchJson(`${API}/window`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command })
+      });
     }
 
     function refreshAll() {

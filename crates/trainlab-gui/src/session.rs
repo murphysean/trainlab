@@ -161,6 +161,8 @@ pub struct SessionState {
     cheats: Vec<Cheat>,
     /// Monotonic counter for cheat ids.
     next_cheat_id: u64,
+    /// Pending window command requested remotely via REST API or MCP ("show" or "hide").
+    pending_window_cmd: Option<String>,
     /// Unified activity log (sourced as "UI: ..." or "MCP: ...").
     activity_log: Vec<String>,
 }
@@ -193,6 +195,18 @@ impl SessionState {
     /// Retrieve a snapshot of the current activity log entries.
     pub fn list_activity_log(&self) -> Vec<String> {
         self.activity_log.clone()
+    }
+
+    /// Request a window visibility command ("show" or "hide").
+    pub fn request_window_cmd(&mut self, cmd: impl Into<String>) {
+        let cmd_str = cmd.into();
+        self.log_activity("WINDOW", format!("remote requested window command: {cmd_str}"));
+        self.pending_window_cmd = Some(cmd_str);
+    }
+
+    /// Pop any pending window command for execution by the GUI thread loop.
+    pub fn take_window_cmd(&mut self) -> Option<String> {
+        self.pending_window_cmd.take()
     }
     /// Set the game process PID that scan-family tools target.
     pub fn set_game_pid(&mut self, pid: u32) {

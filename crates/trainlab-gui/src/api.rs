@@ -52,6 +52,7 @@ pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -
         .route("/scan/first", post(first_scan))
         .route("/scan/refine", post(refine_scan))
         .route("/scan/matches", get(get_scan_matches))
+        .route("/window", post(window_command))
         .with_state(state)
 }
 
@@ -134,6 +135,11 @@ pub struct WriteReq {
     pub address: String,
     pub value: String,
     pub value_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct WindowReq {
+    pub command: String, // "show" or "hide"
 }
 
 #[derive(Deserialize)]
@@ -392,4 +398,20 @@ async fn get_scan_matches(State(state): State<ApiState>) -> Json<Vec<ScanMatchDt
         Vec::new()
     };
     Json(matches)
+}
+
+async fn window_command(
+    State(state): State<ApiState>,
+    Json(req): Json<WindowReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let cmd = req.command.trim().to_lowercase();
+    if cmd != "show" && cmd != "hide" {
+        return Err(err("invalid window command; expected 'show' or 'hide'"));
+    }
+    {
+        let mut s = state.session.lock().unwrap();
+        s.request_window_cmd(&cmd);
+    }
+    state.request_repaint();
+    Ok(Json(serde_json::json!({ "status": "ok", "command": cmd })))
 }

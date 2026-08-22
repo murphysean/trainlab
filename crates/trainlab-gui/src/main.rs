@@ -1348,6 +1348,24 @@ impl eframe::App for TrainlabApp {
         // only affect the GUI when the trainer window is focused.
         let is_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
 
+        // Process remote window visibility commands from REST API / MCP / Web Dashboard
+        if let Ok(mut s) = self.session.lock() {
+            if let Some(cmd) = s.take_window_cmd() {
+                if cmd == "show" {
+                    s.log_activity("GUI", "executing remote 'show' window command");
+                    self.window_visible = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                } else if cmd == "hide" {
+                    s.log_activity("GUI", "executing remote 'hide' window command");
+                    self.window_visible = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+        }
+
         // Poll Win32 WM_HOTKEY message queue for global hotkeys (works even when window is hidden/unmapped)
         while let Some(hotkey_id) = hotkeys::poll_wm_hotkey() {
             if hotkey_id == 9999 { // ID 9999 is global toggle key '['
