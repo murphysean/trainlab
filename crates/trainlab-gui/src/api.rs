@@ -29,6 +29,12 @@ impl ApiState {
     }
 }
 
+const INDEX_HTML: &str = include_str!("web/index.html");
+
+async fn serve_dashboard() -> axum::response::Html<&'static str> {
+    axum::response::Html(INDEX_HTML)
+}
+
 /// Create the axum Router for `/api` REST endpoints.
 pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -> Router {
     let state = ApiState { session, egui_ctx };
@@ -47,6 +53,12 @@ pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -
         .route("/scan/refine", post(refine_scan))
         .route("/scan/matches", get(get_scan_matches))
         .with_state(state)
+}
+
+pub fn dashboard_router() -> Router {
+    Router::new()
+        .route("/", get(serve_dashboard))
+        .route("/index.html", get(serve_dashboard))
 }
 
 // --- Data Schemas ---

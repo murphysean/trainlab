@@ -3177,7 +3177,9 @@ pub async fn serve(
             config,
         );
     let api_router = crate::api::router(session.clone(), egui_ctx.clone());
+    let dashboard_router = crate::api::dashboard_router();
     let router = axum::Router::new()
+        .merge(dashboard_router)
         .nest("/api", api_router)
         .nest_service("/mcp", service)
         .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))

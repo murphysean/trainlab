@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>trainlab — Remote Control Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-hover: #334155;
+      --border: #334155;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --font-mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+      padding: 1.5rem;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 1rem;
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      color: var(--accent);
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--danger);
+    }
+
+    .status-badge.connected .status-dot {
+      background-color: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    button, select, input {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 0.5rem 0.85rem;
+      border-radius: 0.375rem;
+      font-size: 0.875rem;
+      transition: all 0.15s ease;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    button:hover {
+      background: var(--panel-hover);
+      border-color: var(--accent);
+    }
+
+    button.primary {
+      background: var(--accent);
+      color: #0f172a;
+      border-color: var(--accent);
+    }
+
+    button.primary:hover {
+      background: var(--accent-hover);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 1.5rem;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .card h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--accent);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .cheat-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.75rem;
+      background: rgba(0,0,0,0.2);
+      border-radius: 0.375rem;
+      border: 1px solid var(--border);
+    }
+
+    .cheat-info {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .cheat-label {
+      font-weight: 600;
+    }
+
+    .cheat-meta {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    /* Switch toggle */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+
+    .switch input { opacity: 0; width: 0; height: 0; }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #475569;
+      transition: .2s;
+      border-radius: 24px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px; width: 18px;
+      left: 3px; bottom: 3px;
+      background-color: white;
+      transition: .2s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider { background-color: var(--success); }
+    input:checked + .slider:before { transform: translateX(20px); }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .form-group label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .form-row {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .form-row input, .form-row select {
+      flex: 1;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+      font-family: var(--font-mono);
+    }
+
+    th, td {
+      padding: 0.5rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 1.5rem;
+      color: var(--text-muted);
+      font-size: 0.875rem;
+    }
+
+    .matches-container {
+      max-height: 200px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <h1>trainlab</h1>
+      <div id="status-badge" class="status-badge">
+        <span class="status-dot"></span>
+        <span id="status-text">Connecting...</span>
+      </div>
+    </div>
+    <div class="controls">
+      <select id="profile-select">
+        <option value="">Load Profile...</option>
+      </select>
+      <button onclick="loadSelectedProfile()">Load</button>
+      <button onclick="refreshAll()" class="primary">↻ Refresh</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <!-- Cheats Panel -->
+    <div class="card">
+      <h2>🎮 Active Cheats</h2>
+      <div id="cheats-list" class="empty-state">Loading cheats...</div>
+    </div>
+
+    <!-- Memory Scanner -->
+    <div class="card">
+      <h2>🔍 Memory Scanner</h2>
+      <div class="form-group">
+        <label>First Scan Value / Type</label>
+        <div class="form-row">
+          <input type="text" id="scan-val" placeholder="Value (e.g. 100)">
+          <select id="scan-type">
+            <option value="i32">i32</option>
+            <option value="f32">f32</option>
+            <option value="u32">u32</option>
+            <option value="i64">i64</option>
+            <option value="f64">f64</option>
+          </select>
+          <button onclick="firstScan()" class="primary">Scan</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Refine Scan</label>
+        <div class="form-row">
+          <select id="refine-mode">
+            <option value="exact">Exact Value</option>
+            <option value="increased">Increased</option>
+            <option value="decreased">Decreased</option>
+            <option value="changed">Changed</option>
+            <option value="unchanged">Unchanged</option>
+          </select>
+          <button onclick="refineScan()">Refine</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label id="matches-label">Matches (0)</label>
+        <div class="matches-container">
+          <table>
+            <thead>
+              <tr><th>Address</th><th>Value</th></tr>
+            </thead>
+            <tbody id="matches-body">
+              <tr><td colspan="2" class="empty-state">No active scan</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tagged Markers -->
+    <div class="card">
+      <h2>🏷 Tagged Markers</h2>
+      <div class="form-group">
+        <label>Add Marker</label>
+        <div class="form-row">
+          <input type="text" id="marker-name" placeholder="Name ($health)">
+          <input type="text" id="marker-addr" placeholder="Address (0x7ff100)">
+          <button onclick="addMarker()">Save</button>
+        </div>
+      </div>
+
+      <div class="matches-container">
+        <table>
+          <thead>
+            <tr><th>Name</th><th>Address</th></tr>
+          </thead>
+          <tbody id="markers-body">
+            <tr><td colspan="2" class="empty-state">No markers saved</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Quick Read / Write -->
+    <div class="card">
+      <h2>✍ Read / Write Memory</h2>
+      <div class="form-group">
+        <label>Target Address / Marker</label>
+        <input type="text" id="rw-addr" placeholder="Address or $marker (e.g. 0x140000000)">
+      </div>
+      <div class="form-group">
+        <label>Type / Length</label>
+        <div class="form-row">
+          <select id="rw-type">
+            <option value="i32">i32</option>
+            <option value="f32">f32</option>
+            <option value="u32">u32</option>
+            <option value="i64">i64</option>
+            <option value="f64">f64</option>
+            <option value="ptr">ptr</option>
+            <option value="cstr">cstr</option>
+            <option value="hex">hex</option>
+          </select>
+          <button onclick="readMem()">Read</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Read Result / Write Value</label>
+        <div class="form-row">
+          <input type="text" id="rw-val" placeholder="Value to write...">
+          <button onclick="writeMem()" class="primary">Write</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API = '/api';
+
+    async function fetchJson(url, options = {}) {
+      try {
+        const res = await fetch(url, options);
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || res.statusText);
+        }
+        return await res.json();
+      } catch (e) {
+        console.error(e);
+        alert(e.message);
+        throw e;
+      }
+    }
+
+    async function refreshStatus() {
+      try {
+        const data = await fetchJson(`${API}/status`);
+        const badge = document.getElementById('status-badge');
+        const text = document.getElementById('status-text');
+        if (data.connected) {
+          badge.classList.add('connected');
+          text.textContent = `Connected: ${data.game_name} (PID ${data.game_pid || '?'})`;
+        } else {
+          badge.classList.remove('connected');
+          text.textContent = 'Disconnected';
+        }
+      } catch (e) {}
+    }
+
+    async function refreshCheats() {
+      try {
+        const cheats = await fetchJson(`${API}/cheats`);
+        const list = document.getElementById('cheats-list');
+        if (cheats.length === 0) {
+          list.innerHTML = '<div class="empty-state">No cheats in active session</div>';
+          return;
+        }
+        list.innerHTML = cheats.map(c => {
+          if (c.kind === 'toggle') {
+            return `
+              <div class="cheat-item">
+                <div class="cheat-info">
+                  <span class="cheat-label">${c.label}</span>
+                  <span class="cheat-meta">ID: ${c.id} ${c.hotkey ? '| Key: ' + c.hotkey : ''}</span>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" ${c.enabled ? 'checked' : ''} onchange="toggleCheat(${c.id}, this.checked)">
+                  <span class="slider"></span>
+                </label>
+              </div>
+            `;
+          } else if (c.kind === 'value') {
+            return `
+              <div class="cheat-item">
+                <div class="cheat-info">
+                  <span class="cheat-label">${c.label}</span>
+                  <span class="cheat-meta">ID: ${c.id}</span>
+                </div>
+                <div class="form-row" style="width: 140px;">
+                  <input type="text" id="cheat-val-${c.id}" value="${c.value || ''}" style="padding: 0.25rem 0.5rem;">
+                  <button onclick="applyCheat(${c.id})" style="padding: 0.25rem 0.5rem;">Set</button>
+                </div>
+              </div>
+            `;
+          } else {
+            return `
+              <div class="cheat-item">
+                <div class="cheat-info">
+                  <span class="cheat-label">${c.label}</span>
+                  <span class="cheat-meta">ID: ${c.id}</span>
+                </div>
+                <button onclick="toggleCheat(${c.id}, true)" class="primary">Trigger</button>
+              </div>
+            `;
+          }
+        }).join('');
+      } catch (e) {}
+    }
+
+    async function toggleCheat(id, enabled) {
+      await fetchJson(`${API}/cheats/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cheat_id: id, enabled })
+      });
+      refreshCheats();
+    }
+
+    async function applyCheat(id) {
+      const val = document.getElementById(`cheat-val-${id}`).value;
+      await fetchJson(`${API}/cheats/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cheat_id: id, value: val })
+      });
+      refreshCheats();
+    }
+
+    async function refreshProfiles() {
+      try {
+        const profiles = await fetchJson(`${API}/profiles`);
+        const select = document.getElementById('profile-select');
+        select.innerHTML = '<option value="">Load Profile...</option>' +
+          profiles.map(p => `<option value="${p.game}">${p.name} (${p.game})</option>`).join('');
+      } catch (e) {}
+    }
+
+    async function loadSelectedProfile() {
+      const name = document.getElementById('profile-select').value;
+      if (!name) return;
+      await fetchJson(`${API}/profiles/load`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      refreshCheats();
+    }
+
+    async function refreshMarkers() {
+      try {
+        const markers = await fetchJson(`${API}/markers`);
+        const tbody = document.getElementById('markers-body');
+        if (markers.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="2" class="empty-state">No markers saved</td></tr>';
+          return;
+        }
+        tbody.innerHTML = markers.map(m => `
+          <tr>
+            <td>$${m.name}</td>
+            <td>${m.address_hex}</td>
+          </tr>
+        `).join('');
+      } catch (e) {}
+    }
+
+    async function addMarker() {
+      const name = document.getElementById('marker-name').value;
+      const address = document.getElementById('marker-addr').value;
+      if (!name || !address) return;
+      await fetchJson(`${API}/markers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, address })
+      });
+      document.getElementById('marker-name').value = '';
+      document.getElementById('marker-addr').value = '';
+      refreshMarkers();
+    }
+
+    async function firstScan() {
+      const value = document.getElementById('scan-val').value;
+      const value_type = document.getElementById('scan-type').value;
+      if (!value) return;
+      const res = await fetchJson(`${API}/scan/first`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value, value_type })
+      });
+      document.getElementById('matches-label').textContent = `Matches (${res.matches_count})`;
+      refreshScanMatches();
+    }
+
+    async function refineScan() {
+      const mode = document.getElementById('refine-mode').value;
+      const value = document.getElementById('scan-val').value;
+      const res = await fetchJson(`${API}/scan/refine`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, value })
+      });
+      document.getElementById('matches-label').textContent = `Matches (${res.matches_count})`;
+      refreshScanMatches();
+    }
+
+    async function refreshScanMatches() {
+      try {
+        const matches = await fetchJson(`${API}/scan/matches`);
+        const tbody = document.getElementById('matches-body');
+        if (matches.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="2" class="empty-state">No matches</td></tr>';
+          return;
+        }
+        tbody.innerHTML = matches.map(m => `
+          <tr>
+            <td>${m.address_hex}</td>
+            <td>${m.value}</td>
+          </tr>
+        `).join('');
+      } catch (e) {}
+    }
+
+    async function readMem() {
+      const address = document.getElementById('rw-addr').value;
+      const value_type = document.getElementById('rw-type').value;
+      if (!address) return;
+      const res = await fetchJson(`${API}/read`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address, value_type })
+      });
+      document.getElementById('rw-val').value = res.value || res.hex;
+    }
+
+    async function writeMem() {
+      const address = document.getElementById('rw-addr').value;
+      const value = document.getElementById('rw-val').value;
+      const value_type = document.getElementById('rw-type').value;
+      if (!address || !value) return;
+      await fetchJson(`${API}/write`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address, value, value_type })
+      });
+      alert(`Wrote ${value} to ${address}`);
+    }
+
+    function refreshAll() {
+      refreshStatus();
+      refreshCheats();
+      refreshProfiles();
+      refreshMarkers();
+    }
+
+    // Init
+    refreshAll();
+    setInterval(refreshStatus, 3000);
+  </script>
+</body>
+</html>
