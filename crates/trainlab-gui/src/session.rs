@@ -165,6 +165,8 @@ pub struct SessionState {
     pending_window_cmd: Option<String>,
     /// Unified activity log (sourced as "UI: ..." or "MCP: ...").
     activity_log: Vec<String>,
+    /// Decoupled event bus for publishing session mutations.
+    event_bus: crate::event::EventBus,
 }
 
 impl SessionState {
@@ -186,10 +188,16 @@ impl SessionState {
                 writeln!(f, "{formatted}")
             });
 
-        self.activity_log.push(formatted);
+        self.activity_log.push(formatted.clone());
         if self.activity_log.len() > 1000 {
             self.activity_log.remove(0);
         }
+        self.event_bus.emit(crate::event::SessionEvent::ActivityLogged { entry: formatted });
+    }
+
+    /// Access the event bus for subscribing or emitting events.
+    pub fn event_bus(&self) -> &crate::event::EventBus {
+        &self.event_bus
     }
 
     /// Retrieve a snapshot of the current activity log entries.
@@ -201,6 +209,7 @@ impl SessionState {
     pub fn request_window_cmd(&mut self, cmd: impl Into<String>) {
         let cmd_str = cmd.into();
         self.log_activity("WINDOW", format!("remote requested window command: {cmd_str}"));
+        self.event_bus.emit(crate::event::SessionEvent::WindowVisibility { command: cmd_str.clone() });
         self.pending_window_cmd = Some(cmd_str);
     }
 
@@ -241,6 +250,10 @@ impl SessionState {
     /// Mark whether we're connected to the DLL.
     pub fn set_connected(&mut self, connected: bool) {
         self.connected = connected;
+        self.event_bus.emit(crate::event::SessionEvent::ConnectionChanged {
+            connected,
+            game_name: self.game_name.clone(),
+        });
     }
 
     /// Whether we have a live connection to the DLL.
@@ -301,6 +314,11 @@ impl SessionState {
                 note: note.map(|s| s.to_string()),
             },
         );
+        self.event_bus.emit(crate::event::SessionEvent::MarkerSet {
+            name: label.clone(),
+            address: format!("{address:#x}"),
+            note: note.map(|s| s.to_string()),
+        });
         Ok(())
     }
 
@@ -449,8 +467,15 @@ impl SessionState {
     /// Set a toggle cheat's enabled state (used by the GUI/MCP to flip a cave).
     pub fn set_cheat_toggle(&mut self, id: u64, enabled: bool) -> bool {
         if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
+            let label = c.label.clone();
             if let CheatKind::Toggle { enabled: e, .. } = &mut c.kind {
                 *e = enabled;
+                self.event_bus.emit(crate::event::SessionEvent::CheatUpdated {
+                    id,
+                    label,
+                    enabled: Some(enabled),
+                    value: None,
+                });
                 return true;
             }
         }
@@ -459,7 +484,13 @@ impl SessionState {
 
     /// Set the active value scan.
     pub fn set_scan(&mut self, scan: trainlab_core::scan::Scan) {
+        let count = scan.len();
+        let vt = format!("{:?}", scan.value_type());
         self.scan = Some(scan);
+        self.event_bus.emit(crate::event::SessionEvent::ScanUpdated {
+            count,
+            value_type: vt,
+        });
     }
 
     /// Get a mutable reference to the active scan, if any.

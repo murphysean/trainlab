@@ -53,6 +53,7 @@ pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -
         .route("/scan/refine", post(refine_scan))
         .route("/scan/matches", get(get_scan_matches))
         .route("/window", post(window_command))
+        .route("/events", get(sse_events_handler))
         .with_state(state)
 }
 
@@ -414,4 +415,27 @@ async fn window_command(
     }
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "command": cmd })))
+}
+
+use axum::response::sse::{Event, Sse};
+use futures_util::stream::Stream;
+use std::convert::Infallible;
+
+async fn sse_events_handler(
+    State(state): State<ApiState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut rx = {
+        let s = state.session.lock().unwrap();
+        s.event_bus().subscribe()
+    };
+
+    let stream = async_stream::stream! {
+        while let Ok(evt) = rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&evt) {
+                yield Ok(Event::default().data(json));
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }

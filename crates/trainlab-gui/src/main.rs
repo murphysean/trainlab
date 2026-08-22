@@ -23,6 +23,7 @@ use trainlab_core::protocol::{Request, Response};
 use crate::session::{Cheat, CheatKind, SharedSession, SessionState};
 
 mod api;
+mod event;
 mod controller;
 mod hotkeys;
 mod inject;
@@ -1319,12 +1320,25 @@ fn main() -> eframe::Result<()> {
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(MCP_DEFAULT_PORT);
             let mcp_session = session.clone();
+            let event_ctx = cc.egui_ctx.clone();
+            let event_session = session.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .expect("failed to build MCP tokio runtime");
                 rt.block_on(async {
+                    // Spawn decoupled event listener task that triggers GUI repaints upon any event
+                    let mut rx = {
+                        let s = event_session.lock().unwrap();
+                        s.event_bus().subscribe()
+                    };
+                    tokio::spawn(async move {
+                        while let Ok(_evt) = rx.recv().await {
+                            event_ctx.request_repaint();
+                        }
+                    });
+
                     match mcp::serve(&mcp_host, mcp_port, mcp_session, Some(ctx)).await {
                         Ok((url, ct)) => {
                             tracing::info!(%url, "MCP server ready");

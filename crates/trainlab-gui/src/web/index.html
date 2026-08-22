@@ -614,7 +614,29 @@
 
     // Init
     refreshAll();
-    setInterval(refreshStatus, 3000);
+
+    // Real-time Event Stream (SSE) listener
+    try {
+      const evtSource = new EventSource(`${API}/events`);
+      evtSource.onmessage = function(event) {
+        try {
+          const evt = JSON.parse(event.data);
+          console.log("SSE Event Received:", evt);
+          if (evt.type === 'cheat_updated' || evt.type === 'profile_loaded') {
+            refreshCheats();
+            refreshMarkers();
+          } else if (evt.type === 'marker_set') {
+            refreshMarkers();
+          } else if (evt.type === 'connection_changed') {
+            refreshStatus();
+          } else if (evt.type === 'scan_updated') {
+            refreshScanMatches();
+          }
+        } catch (e) {}
+      };
+    } catch (e) {}
+
+    setInterval(refreshStatus, 5000);
   </script>
 </body>
 </html>

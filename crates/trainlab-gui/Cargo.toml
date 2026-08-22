@@ -22,6 +22,8 @@ serde_json = "1.0"
 serde_yaml = { workspace = true }
 schemars = { version = "1.0", features = ["derive"] }
 tower-http = { version = "0.6", features = ["fs"] }
+async-stream = "0.3"
+futures-util = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
