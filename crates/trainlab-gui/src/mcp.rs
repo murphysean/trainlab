@@ -1057,7 +1057,12 @@ impl TrainlabMcpServer {
         };
         let profile = profile.clone();
 
-        // Run setup steps to resolve base addresses.
+        // Materialize game name into session early
+        if let Ok(mut s) = self.session.lock() {
+            s.set_game_name(profile.game.clone());
+        }
+
+        // Run setup steps or init_commands to resolve base addresses and create markers.
         let mut resolved: Vec<(String, u64)> = Vec::new();
         if args.run_setup {
             for step in &profile.setup {
@@ -1070,8 +1075,24 @@ impl TrainlabMcpServer {
                         if let Ok(mut s) = self.session.lock() {
                             s.log_activity("PROFILE", &err_msg);
                         }
-                        return Err(err(err_msg))
+                        return Err(err(err_msg));
                     }
+                }
+            }
+
+            // Also execute profile init_commands if defined so markers are saved
+            if let Some(init_cmds) = &profile.init_commands {
+                if !init_cmds.is_empty() {
+                    if let Ok(mut s) = self.session.lock() {
+                        s.log_activity("PROFILE", format!("executing {} profile init_command(s)...", init_cmds.len()));
+                    }
+                    execute_profile_commands(&self.session, init_cmds).map_err(|e| {
+                        let err_msg = format!("profile init_commands failed: {e}");
+                        if let Ok(mut s) = self.session.lock() {
+                            s.log_activity("PROFILE", &err_msg);
+                        }
+                        err(err_msg)
+                    })?;
                 }
             }
         }
@@ -2785,6 +2806,278 @@ impl crate::profile::SetupStep {
             | crate::profile::SetupStep::PointerChain { name, .. }
             | crate::profile::SetupStep::Address { name, .. } => name,
         }
+    }
+}
+
+/// Execute a sequence of profile commands (AOB scans, cave installs, string allocations, assertions, pointer chases).
+pub(crate) fn execute_profile_commands(
+    session: &SharedSession,
+    cmds: &[crate::profile::ProfileCommand],
+) -> Result<(), String> {
+    for (idx, cmd) in cmds.iter().enumerate() {
+        match cmd {
+            crate::profile::ProfileCommand::Write { address_ref, address, value, value_type } => {
+                let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
+                let parsed_addr = parse_addr_expr(session, addr_str)
+                    .map_err(|e| format!("cmd {idx}: bad address '{addr_str}': {e:?}"))?;
+                if parsed_addr == 0 {
+                    return Err(format!("cmd {idx}: write target '{addr_str}' resolved to 0x0; sequence aborted"));
+                }
+
+                let vt_str = value_type.as_deref().unwrap_or_else(|| {
+                    if value.trim().starts_with("0x") || value.trim().starts_with("0X") || value.trim().starts_with('$') {
+                        "ptr"
+                    } else {
+                        "i32"
+                    }
+                });
+                let eval_val_str = match parse_addr_expr(session, value) {
+                    Ok(val_addr) => format!("{val_addr:#x}"),
+                    Err(_) => value.clone(),
+                };
+                let vt = parse_value_type(vt_str)
+                    .map_err(|e| format!("cmd {idx}: invalid value type '{vt_str}': {e:?}"))?;
+                let bytes = parse_value_bytes(&eval_val_str, vt)
+                    .map_err(|e| format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}': {e:?}"))?;
+
+                let resp = crate::controller::request(
+                    session,
+                    &trainlab_core::protocol::Request::Write { address: parsed_addr, data: bytes },
+                ).map_err(|e| format!("cmd {idx}: write to {addr_str} ({parsed_addr:#x}) failed: {e}"))?;
+                if let trainlab_core::protocol::Response::Error { message } = resp {
+                    return Err(format!("cmd {idx}: write failed: {message}"));
+                }
+                if let Ok(mut s) = session.lock() {
+                    s.log_activity("PROFILE", format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({parsed_addr:#x}) -> ok"));
+                }
+            }
+            crate::profile::ProfileCommand::InstallCave { target_ref, target, hook, jump, payload, marker } => {
+                let tgt_str = target_ref.as_deref().or(target.as_deref()).unwrap_or("");
+                let target_addr = parse_addr_expr(session, tgt_str)
+                    .map_err(|e| format!("cmd {idx}: bad target '{tgt_str}': {e:?}"))?;
+                if target_addr == 0 {
+                    return Err(format!("cmd {idx}: cave target '{tgt_str}' resolved to 0x0; sequence aborted"));
+                }
+
+                let payload_bytes = parse_hex_bytes(payload)
+                    .map_err(|e| format!("cmd {idx}: invalid cave payload hex: {e:?}"))?;
+                let jump_style = match jump.as_deref().unwrap_or("absolute") {
+                    "relative" => trainlab_core::cave_hook::JumpStyle::Relative,
+                    _ => trainlab_core::cave_hook::JumpStyle::Absolute,
+                };
+                let cave_hook = match hook.as_str() {
+                    "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: jump_style },
+                    _ => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: jump_style },
+                };
+
+                let resp = crate::controller::request(
+                    session,
+                    &trainlab_core::protocol::Request::InstallCave { target: target_addr, hook: cave_hook },
+                ).map_err(|e| format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed: {e}"))?;
+
+                match resp {
+                    trainlab_core::protocol::Response::CaveInstalled { cave, .. } => {
+                        if let Some(m) = marker {
+                            if let Ok(mut s) = session.lock() {
+                                let _ = s.set_marker(m, cave, Some(&format!("Cave for target {target_addr:#x}")));
+                            }
+                        }
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity("PROFILE", format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> cave={cave:#x}"));
+                        }
+                    }
+                    trainlab_core::protocol::Response::Error { message } => return Err(format!("cmd {idx}: cave install failed: {message}")),
+                    _ => return Err(format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed")),
+                }
+            }
+            crate::profile::ProfileCommand::AllocateString { content, kind, marker } => {
+                match allocate_string_in_game(session, content, kind) {
+                    Ok((ptr, len)) => {
+                        if let Some(m) = marker {
+                            if let Ok(mut s) = session.lock() {
+                                let _ = s.set_marker(m, ptr, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
+                            }
+                        }
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity("PROFILE", format!("cmd {idx}: allocate string ({kind}) -> ptr={ptr:#x} (len {len})"));
+                        }
+                    }
+                    Err(e) => return Err(format!("cmd {idx}: string allocation failed: {e}")),
+                }
+            }
+            crate::profile::ProfileCommand::AobScan { marker, pattern, offset } => {
+                let parsed_pat = trainlab_core::aob::parse(pattern);
+                if parsed_pat.is_empty() {
+                    return Err(format!("cmd {idx}: empty AOB pattern '{pattern}'"));
+                }
+                let proc = game_process(session).map_err(|e| format!("cmd {idx}: AOB scan process access error: {e:?}"))?;
+                let regions = proc.regions().map_err(|e| format!("cmd {idx}: AOB scan list regions error: {e}"))?;
+
+                let mut first_match: Option<u64> = None;
+                for r in regions {
+                    if !r.readable {
+                        continue;
+                    }
+                    let len = (r.end - r.start) as usize;
+                    if len < parsed_pat.len() {
+                        continue;
+                    }
+                    if let Ok(buf) = proc.read(r.start, len) {
+                        if let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_pat).first() {
+                            first_match = Some(r.start + *off as u64);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(match_addr) = first_match {
+                    let final_addr = (match_addr as i64 + offset.unwrap_or(0)) as u64;
+                    if let Ok(mut s) = session.lock() {
+                        let _ = s.set_marker(marker, final_addr, Some(&format!("AOB match for pattern '{pattern}'")));
+                    }
+                    if let Ok(mut s) = session.lock() {
+                        s.log_activity("PROFILE", format!("cmd {idx}: external AOB scan found match at {final_addr:#x} -> saved marker '${marker}'"));
+                    }
+                } else {
+                    return Err(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches; sequence aborted"));
+                }
+            }
+            crate::profile::ProfileCommand::PointerChase { marker, base, offsets } => {
+                let mut curr_addr = parse_addr_expr(session, base)
+                    .map_err(|e| format!("cmd {idx}: bad base '{base}': {e:?}"))?;
+                let parsed_offs: Vec<u64> = offsets.iter().filter_map(|o| {
+                    let clean = o.trim_start_matches('+').trim();
+                    u64::from_str_radix(clean.strip_prefix("0x").unwrap_or(clean), 16).ok()
+                }).collect();
+
+                for off in &parsed_offs {
+                    let read_res = crate::controller::request(
+                        session,
+                        &trainlab_core::protocol::Request::Read { address: curr_addr, len: 8 },
+                    ).map_err(|e| format!("cmd {idx}: pointer chase read failed: {e}"))?;
+
+                    match read_res {
+                        trainlab_core::protocol::Response::Read { data } if data.len() == 8 => {
+                            let ptr = u64::from_le_bytes(data.try_into().unwrap());
+                            curr_addr = ptr.wrapping_add(*off);
+                        }
+                        _ => return Err(format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}")),
+                    }
+                }
+                if let Ok(mut s) = session.lock() {
+                    let _ = s.set_marker(marker, curr_addr, Some(&format!("Pointer chase base '{base}' offsets {:?}", offsets)));
+                    s.log_activity("PROFILE", format!("cmd {idx}: pointer chase -> target {curr_addr:#x} saved marker '${marker}'"));
+                }
+            }
+            crate::profile::ProfileCommand::Assert { address_ref, address, expected, value_type } => {
+                let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
+                let target_addr = parse_addr_expr(session, addr_str)
+                    .map_err(|e| format!("cmd {idx}: assert bad target '{addr_str}': {e:?}"))?;
+                if target_addr == 0 {
+                    return Err(format!("cmd {idx}: assert failed — target address '{addr_str}' is 0x0"));
+                }
+
+                let vt_str = value_type.as_deref().unwrap_or("i32");
+                let vt = parse_value_type(vt_str)
+                    .map_err(|e| format!("cmd {idx}: assert bad value_type '{vt_str}': {e:?}"))?;
+                let read_len = vt.size();
+
+                let read_res = crate::controller::request(
+                    session,
+                    &trainlab_core::protocol::Request::Read { address: target_addr, len: read_len },
+                ).map_err(|e| format!("cmd {idx}: assert read memory failed: {e}"))?;
+
+                match read_res {
+                    trainlab_core::protocol::Response::Read { data } if data.len() == read_len => {
+                        let exp_clean = expected.trim();
+                        let got_val_str = crate::format_value(&data, vt);
+
+                        if exp_clean == "!0" || exp_clean == "!0x0" || exp_clean == "!0X0" || exp_clean == "!null" {
+                            let val_u64 = match data.len() {
+                                1 => data[0] as u64,
+                                2 => u16::from_le_bytes(data[..2].try_into().unwrap()) as u64,
+                                4 => u32::from_le_bytes(data[..4].try_into().unwrap()) as u64,
+                                8 => u64::from_le_bytes(data[..8].try_into().unwrap()),
+                                _ => 0,
+                            };
+                            if val_u64 == 0 {
+                                return Err(format!("cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) is 0x0 (expected non-null)"));
+                            }
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("PROFILE", format!("cmd {idx}: assert non-null @ {addr_str} ({target_addr:#x}) passed ({val_u64:#x})"));
+                            }
+                        } else {
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("PROFILE", format!("cmd {idx}: assert read @ {addr_str} ({target_addr:#x}) == {got_val_str} passed"));
+                            }
+                        }
+                    }
+                    _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
+                }
+            }
+            crate::profile::ProfileCommand::Wait { ms } => {
+                if let Ok(mut s) = session.lock() {
+                    s.log_activity("PROFILE", format!("cmd {idx}: waiting {ms}ms..."));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(*ms));
+                if let Ok(mut s) = session.lock() {
+                    s.log_activity("PROFILE", format!("cmd {idx}: wait {ms}ms complete"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Allocate string memory in target game process and write bytes.
+pub(crate) fn allocate_string_in_game(session: &SharedSession, content: &str, kind: &str) -> Result<(u64, usize), String> {
+    let mut bytes = content.as_bytes().to_vec();
+    let kind_lower = kind.trim().to_lowercase();
+    let is_c_like = matches!(kind_lower.as_str(), "c" | "json" | "yaml" | "xml" | "js" | "config");
+    if is_c_like && !bytes.ends_with(&[0]) {
+        bytes.push(0);
+    }
+    let len = bytes.len();
+    let pid = {
+        let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+        s.game_pid().ok_or_else(|| "no attached game process".to_string())?
+    };
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+        let proc_handle = unsafe {
+            windows_sys::Win32::System::Threading::OpenProcess(
+                windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION
+                    | windows_sys::Win32::System::Threading::PROCESS_VM_WRITE
+                    | windows_sys::Win32::System::Threading::PROCESS_VM_READ,
+                0,
+                pid,
+            )
+        };
+        if proc_handle.is_null() {
+            return Err("failed to open process for allocation".into());
+        }
+        let ptr = unsafe {
+            VirtualAllocEx(proc_handle, std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+        };
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+        if ptr.is_null() {
+            return Err("VirtualAllocEx failed".into());
+        }
+        let alloc_addr = ptr as u64;
+
+        // Write bytes
+        use trainlab_core::memory::ProcessMemory;
+        let proc = trainlab_core::memory::WindowsProcess::open(pid).map_err(|e| e.to_string())?;
+        proc.write(alloc_addr, &bytes).map_err(|e| e.to_string())?;
+        Ok((alloc_addr, len))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        let _ = bytes;
+        Ok((0x10000u64, len))
     }
 }
 
