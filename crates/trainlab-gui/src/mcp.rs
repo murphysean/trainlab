@@ -1110,7 +1110,9 @@ impl TrainlabMcpServer {
             s.add_cheat(&pc.label, kind, pc.hotkey.as_deref(), pc.note.as_deref());
             materialized += 1;
         }
+        s.set_connected(true);
         drop(s);
+        self.request_repaint();
 
         let mut text = format!(
             "loaded profile '{}' ({}): {} setup step(s) resolved, {} cheat(s) materialized\n",
