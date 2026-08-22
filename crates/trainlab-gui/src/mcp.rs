@@ -1065,13 +1065,19 @@ impl TrainlabMcpServer {
             }
         }
 
-        // Materialize cheats into the session.
+        // Materialize cheats and setup markers into the session.
         let mut s = self
             .session
             .lock()
             .map_err(|_| err("session lock poisoned"))?;
         // Set the game name so attach/status reflect the profile.
         s.set_game_name(profile.game.clone());
+        s.log_activity("PROFILE", format!("loading profile '{}' ({})...", file, profile.game));
+
+        for (name, addr) in &resolved {
+            let _ = s.set_marker(name, *addr, Some(&format!("Resolved base address for profile '{}'", profile.game)));
+            s.log_activity("PROFILE", format!("resolved setup marker '${name}' = {addr:#x}"));
+        }
         let mut materialized = 0usize;
         for pc in &profile.cheats {
             let kind = match pc.kind.as_str() {
