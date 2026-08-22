@@ -550,6 +550,9 @@ pub struct AddCheatArgs {
     /// For toggle cheats: jump style ("absolute" or "relative").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
+    /// Optional hotkey binding (e.g. "Num 1", "Shift+Alt+K", "F1").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
     /// Optional human note / description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -806,7 +809,7 @@ impl TrainlabMcpServer {
             .session
             .lock()
             .map_err(|_| err("session lock poisoned"))?;
-        let id = s.add_cheat(&args.label, kind, args.note.as_deref());
+        let id = s.add_cheat(&args.label, kind, args.hotkey.as_deref(), args.note.as_deref());
         s.log_activity("MCP", format!("added cheat '{}' (id {id})", args.label));
         drop(s);
         self.request_repaint();
@@ -877,7 +880,7 @@ impl TrainlabMcpServer {
     /// Set a value cheat's value in game memory. This **stages** the write
     /// through the D8 confirmation gate — apply it with `confirm_op`.
     #[tool(description = "Set a value cheat's value in game memory. Stages the write (D8 gate); apply with 'confirm_op' or discard with 'reject_op'.")]
-    fn set_cheat_value(
+    pub(crate) fn set_cheat_value(
         &self,
         Parameters(args): Parameters<SetCheatValueArgs>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -923,7 +926,7 @@ impl TrainlabMcpServer {
 
     /// Enable/disable a toggle cheat (installs/removes the cave hook).
     #[tool(description = "Enable or disable a toggle cheat (e.g. god mode). Enabling installs the cave hook; disabling removes it. Stages the cave install/undo through the D8 gate.")]
-    fn set_cheat_toggle(
+    pub(crate) fn set_cheat_toggle(
         &self,
         Parameters(args): Parameters<SetCheatToggleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -1104,7 +1107,7 @@ impl TrainlabMcpServer {
                 }
                 other => return Err(err(format!("unknown cheat kind '{other}'"))),
             };
-            s.add_cheat(&pc.label, kind, pc.note.as_deref());
+            s.add_cheat(&pc.label, kind, pc.hotkey.as_deref(), pc.note.as_deref());
             materialized += 1;
         }
         drop(s);
@@ -1179,7 +1182,11 @@ impl TrainlabMcpServer {
                     mechanism: None,
                     rate_hz: None,
                     value: None,
-                    commands: None,
+                    commands: match &c.kind {
+                        CheatKind::Button { commands } => Some(commands.clone()),
+                        _ => None,
+                    },
+                    hotkey: c.hotkey.clone(),
                     note: c.note.clone(),
                 }
             })
@@ -1236,7 +1243,7 @@ impl TrainlabMcpServer {
 
     /// Read memory from the game process (raw bytes or typed value).
     #[tool(description = "Read memory from the game process. Supports raw hex bytes (default) OR typed values (value_type='ptr'|'i32'|'u32'|'f32'|'i64'|'u64'|'f64'|'cstr'). Supports expressions (e.g. 'game.exe+0x123', 'wood_ptr+0x10').")]
-    fn read(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, ErrorData> {
+    pub(crate) fn read(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&self.session, &args.address)?;
         let proc = game_process(&self.session)?;
         let vt_str = args.value_type.as_deref().unwrap_or("hex").trim().to_lowercase();
@@ -1468,7 +1475,7 @@ impl TrainlabMcpServer {
     /// do a range first-scan (matches `[value, max]`), useful for floats with
     /// fractional storage.
     #[tool(description = "First value scan: find all addresses holding a value (exact, or a range if 'max' is given). Stores the match set in the session for narrowing with 'next'.")]
-    fn scan(&self, Parameters(args): Parameters<ScanArgs>) -> Result<CallToolResult, ErrorData> {
+    pub(crate) fn scan(&self, Parameters(args): Parameters<ScanArgs>) -> Result<CallToolResult, ErrorData> {
         let value_type = parse_value_type(&args.value_type)?;
         let alignment = args.alignment.unwrap_or(0);
         let op = match args.max {
@@ -1514,7 +1521,7 @@ impl TrainlabMcpServer {
     /// Ops: changed, unchanged, increased, decreased, exact, range. For
     /// `exact` pass `value`; for `range` pass `value` (min) and `max`.
     #[tool(description = "Narrow the previous scan: keep matches that changed/unchanged/increased/decreased or match a new exact/range value.")]
-    fn next(&self, Parameters(args): Parameters<NextArgs>) -> Result<CallToolResult, ErrorData> {
+    pub(crate) fn next(&self, Parameters(args): Parameters<NextArgs>) -> Result<CallToolResult, ErrorData> {
         let op = parse_scan_op(&args.op, args.value, args.max)?;
         // Pull the current match set + value type from the session.
         let (value_type, matches) = {
@@ -1653,7 +1660,7 @@ impl TrainlabMcpServer {
 
     /// Set a labeled marker for an address (persists across turns).
     #[tool(description = "Save a labeled marker for an address so the agent can reference it later.")]
-    fn set_marker(
+    pub(crate) fn set_marker(
         &self,
         Parameters(args): Parameters<SetMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -2234,7 +2241,7 @@ impl TrainlabMcpServer {
     /// never have to hand-encode little-endian hex bytes. Stages the write; apply
     /// with `confirm_op` or discard with `reject_op`.
     #[tool(description = "Stage a write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Returns a pending op id; apply with 'confirm_op' or discard with 'reject_op'. Nothing is written until confirmed.")]
-    fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, ErrorData> {
+    pub(crate) fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&self.session, &args.address)?;
         let (data, desc) = match (args.data.as_deref(), args.value.as_deref()) {
             (Some(hex_str), None) => {
@@ -3169,8 +3176,9 @@ pub async fn serve(
             std::sync::Arc::new(LocalSessionManager::default()),
             config,
         );
-    let _ = std::fs::create_dir_all("snapshots");
+    let api_router = crate::api::router(session.clone(), egui_ctx.clone());
     let router = axum::Router::new()
+        .nest("/api", api_router)
         .nest_service("/mcp", service)
         .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))
         .route("/log", axum::routing::get(serve_session_log));
@@ -3260,6 +3268,7 @@ mod tests {
             rate_hz: None,
             value: None,
             commands: None,
+            hotkey: None,
             note: None,
         };
         assert_eq!(resolve_cheat_address(&resolved, &pc).unwrap(), 0x1000);

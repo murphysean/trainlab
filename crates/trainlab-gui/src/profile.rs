@@ -117,6 +117,9 @@ pub struct ProfileCheat {
     /// For button cheats: a sequence of commands to execute when pressed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<ProfileCommand>>,
+    /// Optional hotkey binding string (e.g. "Num 1", "Shift+Alt+K", "F1").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
     /// Optional human note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -327,6 +330,7 @@ mod tests {
                 rate_hz: None,
                 value: Some("400".into()),
                 commands: None,
+                hotkey: None,
                 note: Some("wood stock".into()),
             }],
         };

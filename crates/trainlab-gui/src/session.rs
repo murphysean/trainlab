@@ -35,6 +35,8 @@ pub struct Cheat {
     pub label: String,
     /// The kind of cheat.
     pub kind: CheatKind,
+    /// Optional hotkey string binding (e.g. "Num 1", "Shift+Alt+K").
+    pub hotkey: Option<String>,
     /// Optional human note / description.
     pub note: Option<String>,
 }
@@ -386,16 +388,32 @@ impl SessionState {
     }
 
     /// Add a cheat and return its id.
-    pub fn add_cheat(&mut self, label: &str, kind: CheatKind, note: Option<&str>) -> u64 {
+    pub fn add_cheat(
+        &mut self,
+        label: &str,
+        kind: CheatKind,
+        hotkey: Option<&str>,
+        note: Option<&str>,
+    ) -> u64 {
         let id = self.next_cheat_id;
         self.next_cheat_id += 1;
         self.cheats.push(Cheat {
             id,
             label: label.trim().to_string(),
             kind,
+            hotkey: hotkey.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
             note: note.map(|s| s.to_string()),
         });
         id
+    }
+
+    /// Set a cheat's hotkey string.
+    pub fn set_cheat_hotkey(&mut self, id: u64, hotkey: Option<String>) -> bool {
+        if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
+            c.hotkey = hotkey.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            return true;
+        }
+        false
     }
 
     /// Get a cheat by id.
@@ -583,6 +601,7 @@ mod tests {
                 address: 0x100,
                 value_type: ValueType::I32,
             },
+            None,
             Some("wood stock"),
         );
         // Toggle cheat.
@@ -596,6 +615,7 @@ mod tests {
                 target: 0x200,
                 enabled: false,
             },
+            None,
             None,
         );
         assert_ne!(id1, id2);

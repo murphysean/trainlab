@@ -22,9 +22,11 @@ use trainlab_core::protocol::{Request, Response};
 
 use crate::session::{Cheat, CheatKind, SharedSession, SessionState};
 
-mod mcp;
+mod api;
 mod controller;
+mod hotkeys;
 mod inject;
+mod mcp;
 mod profile;
 mod session;
 
@@ -46,6 +48,14 @@ struct MemOp {
 struct AobScan {
     pattern: String,
     result: String,
+}
+
+/// Registered Win32 hotkey binding state.
+#[derive(Debug, Clone)]
+struct RegisteredHotkey {
+    cheat_id: u64,
+    spec: hotkeys::HotkeySpec,
+    display: String,
 }
 
 struct TrainlabApp {
@@ -72,9 +82,11 @@ struct TrainlabApp {
     aob_scans: Vec<AobScan>,
     regions: Vec<trainlab_core::protocol::RegionInfo>,
 
-    // Cheats panel: editable value strings keyed by cheat id, and a flag to
-    // show the panel.
+    // Cheats panel: editable value strings keyed by cheat id, editable hotkey strings,
+    // active Win32 registered hotkeys, and a flag to show the panel.
     cheat_values: std::collections::HashMap<u64, String>,
+    cheat_hotkey_inputs: std::collections::HashMap<u64, String>,
+    registered_hotkeys: std::collections::HashMap<i32, RegisteredHotkey>,
     show_cheats: bool,
 
     // Value Search state
@@ -86,6 +98,8 @@ struct TrainlabApp {
     active_tab: ActiveTab,
     // Auto-run profile init_commands on attach
     auto_init: bool,
+    // Window visibility state for toggle hotkey
+    window_visible: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +121,10 @@ impl Default for ScanOpMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveTab {
     Cheats,
-    DiscoverScan,
-    PointersOffsets,
+    MemoryScan,
+    TaggedMarkers,
+    PointersInspection,
+    ActivityLog,
 }
 
 impl Default for ActiveTab {
@@ -141,6 +157,8 @@ impl TrainlabApp {
             aob_scans: vec![AobScan::default()],
             regions: Vec::new(),
             cheat_values: std::collections::HashMap::new(),
+            cheat_hotkey_inputs: std::collections::HashMap::new(),
+            registered_hotkeys: std::collections::HashMap::new(),
             show_cheats: true,
             scan_val: "".into(),
             scan_val_max: "".into(),
@@ -148,6 +166,7 @@ impl TrainlabApp {
             scan_op_mode: ScanOpMode::Exact,
             active_tab: ActiveTab::Cheats,
             auto_init: true,
+            window_visible: true,
         };
         app.auto_match_profile();
         app
@@ -432,7 +451,7 @@ impl TrainlabApp {
     /// Render the Cheats panel: user-facing adjustable game options discovered
     /// by the agent. Value cheats show a live read + editable field + Apply;
     /// toggle cheats show an on/off switch.
-    fn show_cheats_panel(&mut self, ui: &mut egui::Ui) {
+    fn show_cheats_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading("Cheats");
             if ui.checkbox(&mut self.show_cheats, "show").changed() {
@@ -575,7 +594,141 @@ impl TrainlabApp {
                         }
                     }
                 }
+
+                // Hotkey assignment input & button
+                ui.separator();
+                ui.label("Hotkey:");
+                let hk_field = self
+                    .cheat_hotkey_inputs
+                    .entry(cheat.id)
+                    .or_insert_with(|| cheat.hotkey.clone().unwrap_or_default());
+                ui.add(egui::TextEdit::singleline(hk_field).hint_text("e.g. Num1, Shift+Alt+K"));
+
+                if ui.button("Bind").clicked() {
+                    let text = hk_field.trim().to_string();
+                    if text.is_empty() {
+                        if let Ok(mut s) = self.session.lock() {
+                            s.set_cheat_hotkey(cheat.id, None);
+                        }
+                        self.sync_registered_hotkeys(ctx);
+                        self.log(format!("cleared hotkey for '{}'", cheat.label));
+                    } else {
+                        match hotkeys::HotkeySpec::parse(&text) {
+                            Ok(spec) => {
+                                let display = spec.display_string();
+                                if let Ok(mut s) = self.session.lock() {
+                                    s.set_cheat_hotkey(cheat.id, Some(display.clone()));
+                                }
+                                *hk_field = display.clone();
+                                self.sync_registered_hotkeys(ctx);
+                                self.log(format!("bound '{}' to hotkey '{display}'", cheat.label));
+                            }
+                            Err(e) => {
+                                self.log(format!("invalid hotkey format for '{}': {e}", cheat.label));
+                            }
+                        }
+                    }
+                }
             });
+        }
+    }
+
+    /// Synchronize Win32 RegisteredHotKeys with the cheats configured in the session.
+    fn sync_registered_hotkeys(&mut self, _ctx: &egui::Context) {
+        #[cfg(target_os = "windows")]
+        {
+            let raw_hwnd = 0isize; // NULL HWND registers global hotkey for current thread message loop
+
+            // Collect active hotkey targets from session cheats.
+            let mut desired: std::collections::HashMap<i32, (u64, hotkeys::HotkeySpec, String)> = std::collections::HashMap::new();
+            if let Ok(s) = self.session.lock() {
+                for c in s.list_cheats() {
+                    if let Some(hk_str) = &c.hotkey {
+                        if let Ok(spec) = hotkeys::HotkeySpec::parse(hk_str) {
+                            let id = c.id as i32 + 1000;
+                            desired.insert(id, (c.id, spec, spec.display_string()));
+                        }
+                    }
+                }
+            }
+
+            // Always register global window toggle hotkey ('J' key, ID 9999).
+            if let Ok(spec) = hotkeys::HotkeySpec::parse("J") {
+                desired.insert(9999, (0, spec, "J".into()));
+            }
+
+            // Unregister hotkeys no longer desired or updated.
+            let current_ids: Vec<i32> = self.registered_hotkeys.keys().cloned().collect();
+            for id in current_ids {
+                if !desired.contains_key(&id) {
+                    hotkeys::unregister_hotkey(raw_hwnd, id);
+                    self.registered_hotkeys.remove(&id);
+                }
+            }
+
+            // Register newly desired hotkeys.
+            for (id, (cheat_id, spec, display)) in desired {
+                if !self.registered_hotkeys.contains_key(&id) {
+                    if let Ok(()) = hotkeys::register_hotkey(raw_hwnd, id, spec) {
+                        self.registered_hotkeys.insert(
+                            id,
+                            RegisteredHotkey {
+                                cheat_id,
+                                spec,
+                                display,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Trigger a cheat by id (e.g. from hotkey or UI).
+    fn trigger_cheat(&mut self, cheat_id: u64) {
+        let (label, kind) = match self.session.lock() {
+            Ok(s) => match s.get_cheat(cheat_id) {
+                Some(c) => (c.label.clone(), c.kind.clone()),
+                None => return,
+            },
+            Err(_) => return,
+        };
+
+        match kind {
+            CheatKind::Toggle { target, enabled, .. } => {
+                let new_state = !enabled;
+                if let Ok(mut s) = self.session.lock() {
+                    s.set_cheat_toggle(cheat_id, new_state);
+                }
+                self.log(format!(
+                    "hotkey toggled '{}' -> {} (cave @ {target:#x})",
+                    label,
+                    if new_state { "ENABLED" } else { "DISABLED" }
+                ));
+            }
+            CheatKind::Button { commands } => {
+                self.log(format!("hotkey triggered button '{}': running {} command(s)...", label, commands.len()));
+                if let Err(e) = self.run_cheat_commands(&commands) {
+                    self.log(format!("hotkey button '{}' failed: {e}", label));
+                }
+            }
+            CheatKind::Value { address, value_type } => {
+                // For value cheats, re-apply the value currently in the edit box if present.
+                if let Some(val_str) = self.cheat_values.get(&cheat_id).cloned() {
+                    if let Ok(bytes) = parse_value_bytes(&val_str, value_type) {
+                        let r = self.request(&Request::Write {
+                            address,
+                            data: bytes,
+                        });
+                        match r {
+                            Some(Response::Write { bytes_written }) => {
+                                self.log(format!("hotkey applied '{}' = {val_str} ({bytes_written} bytes)", label));
+                            }
+                            _ => self.log(format!("hotkey apply for '{}' failed", label)),
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1113,6 +1266,7 @@ impl TrainlabApp {
                                                     address: *addr,
                                                     value_type: vt,
                                                 },
+                                                None,
                                                 Some("Added from search UI".into()),
                                             );
                                             s.log_activity("UI", format!("added cheat '{label}' (id {cheat_id})"));
@@ -1131,6 +1285,16 @@ impl TrainlabApp {
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
+
+    // Check if startup delay is requested via TRAINLAB_STARTUP_DELAY env var
+    if let Ok(delay_str) = std::env::var("TRAINLAB_STARTUP_DELAY") {
+        if let Ok(delay_secs) = delay_str.parse::<u64>() {
+            if delay_secs > 0 {
+                tracing::info!("trainlab-gui delaying window startup for {delay_secs} seconds...");
+                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+            }
+        }
+    }
 
     // One shared session state across the GUI and the MCP server. The GUI sets
     // `game_pid` when it injects the game; the MCP server reads it to open the
@@ -1178,25 +1342,68 @@ fn main() -> eframe::Result<()> {
 
 impl eframe::App for TrainlabApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.sync_registered_hotkeys(ctx);
+
         // Check window OS focus state to ensure controller / navigation inputs
         // only affect the GUI when the trainer window is focused.
         let is_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+
+        // Poll Win32 WM_HOTKEY message queue for global hotkeys (works even when window is hidden/unmapped)
+        while let Some(hotkey_id) = hotkeys::poll_wm_hotkey() {
+            if hotkey_id == 9999 { // ID 9999 is global toggle key '['
+                self.window_visible = !self.window_visible;
+                if self.window_visible {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            } else if let Some(reg) = self.registered_hotkeys.get(&hotkey_id) {
+                let cheat_id = reg.cheat_id;
+                self.trigger_cheat(cheat_id);
+            }
+        }
+
+        // Handle 'J' key press when window has focus
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::J) {
+                self.window_visible = !self.window_visible;
+                if self.window_visible {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+        });
 
         // Handle tab switching & controller navigation if the window is focused
         // and the user is NOT currently typing into a text field (ctx.wants_keyboard_input()).
         if is_focused && !ctx.wants_keyboard_input() {
             ctx.input(|i| {
-                if i.key_pressed(egui::Key::PageDown) || i.key_pressed(egui::Key::Q) {
+                if i.key_pressed(egui::Key::Escape) {
+                    self.window_visible = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                } else if i.key_pressed(egui::Key::PageDown) || i.key_pressed(egui::Key::Q) {
                     self.active_tab = match self.active_tab {
-                        ActiveTab::Cheats => ActiveTab::PointersOffsets,
-                        ActiveTab::DiscoverScan => ActiveTab::Cheats,
-                        ActiveTab::PointersOffsets => ActiveTab::DiscoverScan,
+                        ActiveTab::Cheats => ActiveTab::MemoryScan,
+                        ActiveTab::MemoryScan => ActiveTab::TaggedMarkers,
+                        ActiveTab::TaggedMarkers => ActiveTab::PointersInspection,
+                        ActiveTab::PointersInspection => ActiveTab::ActivityLog,
+                        ActiveTab::ActivityLog => ActiveTab::Cheats,
                     };
                 } else if i.key_pressed(egui::Key::PageUp) || i.key_pressed(egui::Key::E) {
                     self.active_tab = match self.active_tab {
-                        ActiveTab::Cheats => ActiveTab::DiscoverScan,
-                        ActiveTab::DiscoverScan => ActiveTab::PointersOffsets,
-                        ActiveTab::PointersOffsets => ActiveTab::Cheats,
+                        ActiveTab::Cheats => ActiveTab::ActivityLog,
+                        ActiveTab::MemoryScan => ActiveTab::Cheats,
+                        ActiveTab::TaggedMarkers => ActiveTab::MemoryScan,
+                        ActiveTab::PointersInspection => ActiveTab::TaggedMarkers,
+                        ActiveTab::ActivityLog => ActiveTab::PointersInspection,
                     };
                 }
             });
@@ -1235,6 +1442,13 @@ impl eframe::App for TrainlabApp {
                     ui.colored_label(egui::Color32::LIGHT_BLUE, "🎯 Focused (Input Active)");
                 } else {
                     ui.colored_label(egui::Color32::GRAY, "⏸ Unfocused (Input Muted)");
+                }
+
+                ui.separator();
+                if ui.button("👁 Background Me (Esc to restore)").clicked() {
+                    self.window_visible = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
 
                 if self.connected {
@@ -1384,19 +1598,19 @@ impl eframe::App for TrainlabApp {
                     ui.heading("Navigation");
                     ui.separator();
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Cheats, "🎮 Cheats");
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::DiscoverScan, "🔍 Discover & Scan");
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::PointersOffsets, "🎯 Pointers & Offsets");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::MemoryScan, "🔍 Memory Scanning");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::TaggedMarkers, "📌 Tagged Markers");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::PointersInspection, "🎯 Pointers & Inspection");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::ActivityLog, "📋 Activity Log");
                 });
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 egui::ScrollArea::both().show(ui, |ui| {
                     match self.active_tab {
                         ActiveTab::Cheats => {
-                            self.show_cheats_panel(ui);
-                            ui.separator();
-                            self.show_session_panel(ui);
+                            self.show_cheats_panel(ui, ctx);
                         }
-                        ActiveTab::DiscoverScan => {
+                        ActiveTab::MemoryScan => {
                             self.show_value_search_panel(ui);
                             ui.separator();
 
@@ -1449,40 +1663,11 @@ impl eframe::App for TrainlabApp {
                                 });
                                 ui.label(&scan.result);
                             }
-
-                            ui.separator();
-                            ui.heading("Memory Regions");
-                            if ui.button("List regions").clicked() {
-                                match self.request(&Request::ListRegions) {
-                                    Some(Response::ListRegions { regions }) => {
-                                        self.regions = regions;
-                                        self.log(format!("listed {} regions", self.regions.len()));
-                                    }
-                                    Some(Response::Error { message }) => self.log(message),
-                                    _ => {}
-                                }
-                            }
-                            egui::ScrollArea::vertical()
-                                .max_height(200.0)
-                                .show(ui, |ui| {
-                                    for r in &self.regions {
-                                        let perms = format!(
-                                            "{}{}{}",
-                                            if r.readable { "r" } else { "-" },
-                                            if r.writable { "w" } else { "-" },
-                                            if r.executable { "x" } else { "-" }
-                                        );
-                                        ui.monospace(format!(
-                                            "0x{:016x} - 0x{:016x}  {}  {}",
-                                            r.start,
-                                            r.end,
-                                            perms,
-                                            r.name.as_deref().unwrap_or("")
-                                        ));
-                                    }
-                                });
                         }
-                        ActiveTab::PointersOffsets => {
+                        ActiveTab::TaggedMarkers => {
+                            self.show_session_panel(ui);
+                        }
+                        ActiveTab::PointersInspection => {
                             ui.heading("Pointers & Offsets (Memory Inspection)");
                             ui.horizontal(|ui| {
                                 if ui.button("Read").clicked() {
@@ -1521,7 +1706,7 @@ impl eframe::App for TrainlabApp {
                                     for (i, addr, data) in ops {
                                         let result = match self.request(&Request::Write { address: addr, data }) {
                                             Some(Response::Write { bytes_written }) => {
-                                                format!("wrote {bytes_written} bytes")
+                                                format!("{bytes_written} bytes written")
                                             }
                                             Some(Response::Error { message }) => message,
                                             _ => "no response".into(),
@@ -1544,29 +1729,64 @@ impl eframe::App for TrainlabApp {
                                 });
                                 ui.label(&op.result);
                             }
-                        }
-                    }
 
-                    ui.separator();
-                    ui.heading("Activity Log");
-                    let activity_log = self
-                        .session
-                        .lock()
-                        .map(|s| s.list_activity_log())
-                        .unwrap_or_default();
-                    egui::ScrollArea::vertical()
-                        .max_height(140.0)
-                        .show(ui, |ui| {
-                            for line in &activity_log {
-                                if line.starts_with("UI:") {
-                                    ui.colored_label(egui::Color32::LIGHT_BLUE, line);
-                                } else if line.starts_with("MCP:") {
-                                    ui.colored_label(egui::Color32::YELLOW, line);
-                                } else {
-                                    ui.monospace(line);
+                            ui.separator();
+                            ui.heading("Memory Regions");
+                            if ui.button("List regions").clicked() {
+                                match self.request(&Request::ListRegions) {
+                                    Some(Response::ListRegions { regions }) => {
+                                        self.regions = regions;
+                                        self.log(format!("listed {} regions", self.regions.len()));
+                                    }
+                                    Some(Response::Error { message }) => self.log(message),
+                                    _ => {}
                                 }
                             }
-                        });
+                            egui::ScrollArea::vertical()
+                                .max_height(200.0)
+                                .show(ui, |ui| {
+                                    for r in &self.regions {
+                                        let perms = format!(
+                                            "{}{}{}",
+                                            if r.readable { "r" } else { "-" },
+                                            if r.writable { "w" } else { "-" },
+                                            if r.executable { "x" } else { "-" }
+                                        );
+                                        ui.monospace(format!(
+                                            "0x{:016x} - 0x{:016x}  {}  {}",
+                                            r.start,
+                                            r.end,
+                                            perms,
+                                            r.name.as_deref().unwrap_or("")
+                                        ));
+                                    }
+                                });
+                        }
+                        ActiveTab::ActivityLog => {
+                            ui.heading("📋 Activity & Event Log");
+                            ui.label("Full history of human UI actions and MCP agent commands executed in this session:");
+                            ui.add_space(5.0);
+
+                            let activity_log = self
+                                .session
+                                .lock()
+                                .map(|s| s.list_activity_log())
+                                .unwrap_or_default();
+                            egui::ScrollArea::both()
+                                .max_height(500.0)
+                                .show(ui, |ui| {
+                                    for line in &activity_log {
+                                        if line.starts_with("UI:") {
+                                            ui.colored_label(egui::Color32::LIGHT_BLUE, line);
+                                        } else if line.starts_with("MCP:") {
+                                            ui.colored_label(egui::Color32::YELLOW, line);
+                                        } else {
+                                            ui.monospace(line);
+                                        }
+                                    }
+                                });
+                        }
+                    }
                 });
             });
         }
