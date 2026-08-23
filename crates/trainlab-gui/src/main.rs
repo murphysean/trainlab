@@ -1104,14 +1104,43 @@ fn main() -> eframe::Result<()> {
                     .build()
                     .expect("failed to build MCP tokio runtime");
                 rt.block_on(async {
-                    // Spawn decoupled event listener task that triggers GUI repaints upon any event
+                    // Spawn decoupled event listener task that triggers GUI repaints upon any event.
+                    // For WindowVisibility events, also apply Win32 ShowWindow directly so the command
+                    // works even when the window is hidden/minimized and eframe's update() isn't running.
                     let mut rx = {
                         let s = event_session.lock().unwrap();
                         s.event_bus().subscribe()
                     };
                     tokio::spawn(async move {
-                        while let Ok(_evt) = rx.recv().await {
+                        while let Ok(evt) = rx.recv().await {
+                            // Always request a repaint to keep UI live
                             event_ctx.request_repaint();
+
+                            // Handle window visibility directly via Win32 so it works
+                            // even when the window is backgrounded / hidden.
+                            #[cfg(windows)]
+                            if let crate::event::SessionEvent::WindowVisibility { command } = &evt {
+                                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                                    FindWindowA, SetForegroundWindow, ShowWindow,
+                                    SW_HIDE, SW_RESTORE, SW_SHOW,
+                                };
+                                unsafe {
+                                    // Find the trainlab window by its class name (eframe/glow default)
+                                    let hwnd = FindWindowA(
+                                        b"egui_glow\0".as_ptr(),
+                                        std::ptr::null(),
+                                    );
+                                    if !hwnd.is_null() {
+                                        if command == "hide" {
+                                            ShowWindow(hwnd, SW_HIDE);
+                                        } else {
+                                            ShowWindow(hwnd, SW_SHOW);
+                                            ShowWindow(hwnd, SW_RESTORE);
+                                            SetForegroundWindow(hwnd);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     });
 

@@ -512,15 +512,38 @@
       } catch (e) {}
     }
 
+    async function sendWindowCmd(cmd) {
+      try {
+        const res = await fetchJson(`${API}/window`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: cmd })
+        });
+        console.log(`Window command '${cmd}' sent:`, res);
+      } catch (e) {
+        console.error(`Window command '${cmd}' failed:`, e);
+        alert(`Failed to send window command '${cmd}': ${e}`);
+      }
+    }
+
     async function loadSelectedProfile() {
       const name = document.getElementById('profile-select').value;
       if (!name) return;
-      await fetchJson(`${API}/profiles/load`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name })
-      });
-      refreshAll();
+      const btn = document.querySelector(`button[onclick="loadSelectedProfile()"]`);
+      const originalText = btn ? btn.textContent : '';
+      if (btn) { btn.textContent = '⏳ Loading...'; btn.disabled = true; }
+      try {
+        await fetchJson(`${API}/profiles/load`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name })
+        });
+        refreshAll();
+      } catch (e) {
+        alert(`Profile load failed: ${e}`);
+      } finally {
+        if (btn) { btn.textContent = originalText; btn.disabled = false; }
+      }
     }
 
     async function refreshMarkers() {

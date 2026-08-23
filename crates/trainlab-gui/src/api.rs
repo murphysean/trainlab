@@ -258,8 +258,19 @@ async fn load_profile(
     State(state): State<ApiState>,
     Json(req): Json<LoadProfileReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    let res = mcp_srv.load_profile_by_name(&req.name, true).map_err(|e| err(e))?;
+    let session = state.session.clone();
+    let egui_ctx = state.egui_ctx.clone();
+    let name = req.name.clone();
+
+    // Load profile runs AOB scans, installs code caves, and may sleep (Wait commands).
+    // Run on a blocking thread so we don't starve the Axum async runtime.
+    let res = tokio::task::spawn_blocking(move || {
+        let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(session, egui_ctx);
+        mcp_srv.load_profile_by_name(&name, true)
+    })
+    .await
+    .map_err(|e| err(format!("profile load task panicked: {e}")))?
+    .map_err(|e| err(e))?;
 
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "profile": req.name, "result": res })))
