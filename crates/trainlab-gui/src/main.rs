@@ -231,27 +231,13 @@ impl TrainlabApp {
         match controller::find_inject_connect(&self.session) {
             Ok(version) => {
                 self.log(format!("connected, inject v{version}"));
-                let profiles = profile::discover_profiles();
-                if let Some((file, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
-                    let mut init_ok = true;
-                    if self.auto_init {
-                        if let Some(init_cmds) = &p.init_commands {
-                            if !init_cmds.is_empty() {
-                                self.log(format!("auto-init: executing {} profile init_command(s)...", init_cmds.len()));
-                                if let Err(e) = self.run_cheat_commands(init_cmds) {
-                                    self.log(format!("profile init_commands failed: {e}"));
-                                    init_ok = false;
-                                }
-                            }
-                        }
-                    } else {
-                        self.log("connected (auto-init is OFF; click '⚡ Re-run Initialization' when ready)");
-                        init_ok = false;
-                    }
-                    if init_ok {
-                        let run_setup = p.init_commands.is_none();
-                        if let Ok(_) = mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, run_setup) {
-                            self.log(format!("populated cheats from profile '{file}'"));
+                // T-140: Only auto-run profile init if auto_init is enabled.
+                if self.auto_init {
+                    let profiles = profile::discover_profiles();
+                    if let Some((file, _p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
+                        match mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, true) {
+                            Ok(detail) => self.log(format!("profile '{file}' loaded: {detail}")),
+                            Err(e) => self.log(format!("profile '{file}' load FAILED: {e}")),
                         }
                     }
                 }
@@ -479,22 +465,15 @@ impl TrainlabApp {
             if ui.button("⚡ Re-run Initialization").clicked() {
                 let profiles = profile::discover_profiles();
                 if let Some((file, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
-                    let mut init_ok = true;
-                    if let Some(init_cmds) = &p.init_commands {
-                        if !init_cmds.is_empty() {
-                            self.log(format!("manual re-run: executing {} profile init_command(s)...", init_cmds.len()));
-                            if let Err(e) = self.run_cheat_commands(init_cmds) {
-                                self.log(format!("manual init_commands failed: {e}"));
-                                init_ok = false;
-                            }
-                        }
+                    // T-134: Run setup and init_commands independently — a profile may have both.
+                    // First run setup (run_setup=true), then run init_commands if present.
+                    match mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, true) {
+                        Ok(detail) => self.log(format!("re-populated cheats from profile '{file}': {detail}")),
+                        Err(e) => self.log(format!("re-run init FAILED: {e}")),
                     }
-                    if init_ok {
-                        let run_setup = p.init_commands.is_none();
-                        if let Ok(_) = mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, run_setup) {
-                            self.log(format!("re-populated cheats from profile '{file}'"));
-                        }
-                    }
+                    // Now run init_commands independently (load_profile_by_name already runs
+                    // init_commands, but if the user wants to re-run just init without setup,
+                    // they can use this path too).
                 }
             }
             if ui.button("Clear all").clicked() {
@@ -503,6 +482,12 @@ impl TrainlabApp {
                     for id in ids {
                         s.remove_cheat(id);
                     }
+                    // T-150: Emit event for clearing all cheats.
+                    s.event_bus().emit(crate::event::SessionEvent::ProfileLoaded {
+                        name: String::new(),
+                        game: String::new(),
+                        cheats_count: 0,
+                    });
                 }
                 self.cheat_values.clear();
             }
@@ -567,6 +552,15 @@ impl TrainlabApp {
                                                 "cheat '{}' set to {} ({bytes_written} bytes)",
                                                 cheat.label, field_val
                                             ));
+                                            // T-151: Emit CheatUpdated so SSE dashboard reflects the new value.
+                                            if let Ok(s) = self.session.lock() {
+                                                s.event_bus().emit(crate::event::SessionEvent::CheatUpdated {
+                                                    id: cheat.id,
+                                                    label: cheat.label.clone(),
+                                                    enabled: None,
+                                                    value: Some(field_val.clone()),
+                                                });
+                                            }
                                         }
                                         _ => self.log(format!(
                                             "cheat '{}' write failed",
@@ -578,19 +572,64 @@ impl TrainlabApp {
                             }
                         }
                     }
-                    CheatKind::Toggle { target, enabled, .. } => {
+                    CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
                         let mut on = *enabled;
                         if ui.checkbox(&mut on, &cheat.label).changed() {
-                            // Flip the toggle in the session; cave install/remove
-                            // is handled by the agent via MCP (staged + confirmed).
-                            if let Ok(mut s) = self.session.lock() {
-                                s.set_cheat_toggle(cheat.id, on);
+                            // T-112: GUI toggle drives the real cave — install on enable, restore on disable.
+                            if on {
+                                // Enable: install the cave directly (user is the human confirmation).
+                                let r = self.request(&Request::InstallCave {
+                                    target: *target,
+                                    hook: hook.clone(),
+                                });
+                                match r {
+                                    Some(Response::CaveInstalled { cave, original, .. }) => {
+                                        // Store original bytes for later disable.
+                                        if let Ok(mut s) = self.session.lock() {
+                                            s.set_toggle_cave_info(cheat.id, original.clone(), cave);
+                                            s.set_cheat_toggle(cheat.id, true);
+                                        }
+                                        self.log(format!(
+                                            "toggle '{}' ENABLED (cave @ {cave:#x}, target {target:#x})",
+                                            cheat.label
+                                        ));
+                                    }
+                                    _ => self.log(format!(
+                                        "toggle '{}' enable FAILED (cave @ {target:#x})",
+                                        cheat.label
+                                    )),
+                                }
+                            } else {
+                                // Disable: restore original bytes if we have them.
+                                if !original_bytes.is_empty() {
+                                    let r = self.request(&Request::Write {
+                                        address: *target,
+                                        data: original_bytes.clone(),
+                                    });
+                                    match r {
+                                        Some(Response::Write { bytes_written }) => {
+                                            if let Ok(mut s) = self.session.lock() {
+                                                s.set_cheat_toggle(cheat.id, false);
+                                            }
+                                            self.log(format!(
+                                                "toggle '{}' DISABLED (restored {bytes_written} bytes @ {target:#x})",
+                                                cheat.label
+                                            ));
+                                        }
+                                        _ => self.log(format!(
+                                            "toggle '{}' disable FAILED (restore @ {target:#x})",
+                                            cheat.label
+                                        )),
+                                    }
+                                } else {
+                                    // No original bytes stored — can't restore via GUI.
+                                    // Try via the MCP toggle path (stages it).
+                                    self.log(format!(
+                                        "toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
+                                        cheat.label
+                                    ));
+                                }
                             }
-                            self.log(format!(
-                                "toggle '{}' {} (cave @ {target:#x})",
-                                cheat.label,
-                                if on { "enabled" } else { "disabled" }
-                            ));
                         }
                         ui.label(format!("@ {target:#x}"));
                     }
@@ -707,16 +746,60 @@ impl TrainlabApp {
         };
 
         match kind {
-            CheatKind::Toggle { target, enabled, .. } => {
+            CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
+                // T-112: Hotkey toggle drives the real cave — install on enable, restore on disable.
                 let new_state = !enabled;
-                if let Ok(mut s) = self.session.lock() {
-                    s.set_cheat_toggle(cheat_id, new_state);
+                if new_state {
+                    // Enable: install the cave.
+                    let r = self.request(&Request::InstallCave {
+                        target,
+                        hook: hook.clone(),
+                    });
+                    match r {
+                        Some(Response::CaveInstalled { cave, original, .. }) => {
+                            if let Ok(mut s) = self.session.lock() {
+                                s.set_toggle_cave_info(cheat_id, original.clone(), cave);
+                                s.set_cheat_toggle(cheat_id, true);
+                            }
+                            self.log(format!(
+                                "hotkey toggled '{}' -> ENABLED (cave @ {cave:#x}, target {target:#x})",
+                                label
+                            ));
+                        }
+                        _ => self.log(format!(
+                            "hotkey toggle '{}' enable FAILED (cave @ {target:#x})",
+                            label
+                        )),
+                    }
+                } else {
+                    // Disable: restore original bytes.
+                    if !original_bytes.is_empty() {
+                        let r = self.request(&Request::Write {
+                            address: target,
+                            data: original_bytes.clone(),
+                        });
+                        match r {
+                            Some(Response::Write { bytes_written }) => {
+                                if let Ok(mut s) = self.session.lock() {
+                                    s.set_cheat_toggle(cheat_id, false);
+                                }
+                                self.log(format!(
+                                    "hotkey toggled '{}' -> DISABLED (restored {bytes_written} bytes @ {target:#x})",
+                                    label
+                                ));
+                            }
+                            _ => self.log(format!(
+                                "hotkey toggle '{}' disable FAILED (restore @ {target:#x})",
+                                label
+                            )),
+                        }
+                    } else {
+                        self.log(format!(
+                            "hotkey toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
+                            label
+                        ));
+                    }
                 }
-                self.log(format!(
-                    "hotkey toggled '{}' -> {} (cave @ {target:#x})",
-                    label,
-                    if new_state { "ENABLED" } else { "DISABLED" }
-                ));
             }
             CheatKind::Button { commands } => {
                 self.log(format!("hotkey triggered button '{}': running {} command(s)...", label, commands.len()));
@@ -1122,14 +1205,40 @@ fn main() -> eframe::Result<()> {
                             if let crate::event::SessionEvent::WindowVisibility { command } = &evt {
                                 use windows_sys::Win32::UI::WindowsAndMessaging::{
                                     FindWindowA, SetForegroundWindow, ShowWindow,
+                                    EnumWindows, GetWindowTextA,
                                     SW_HIDE, SW_RESTORE, SW_SHOW,
                                 };
+                                use windows_sys::Win32::Foundation::{BOOL, LPARAM, HWND};
+
                                 unsafe {
-                                    // Find the trainlab window by its class name (eframe/glow default)
-                                    let hwnd = FindWindowA(
-                                        b"egui_glow\0".as_ptr(),
+                                    // Helper: Find top-level trainlab window by title
+                                    unsafe extern "system" fn enum_win_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+                                        let mut buf = [0u8; 128];
+                                        let len = unsafe { GetWindowTextA(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+                                        if len > 0 {
+                                            let title = String::from_utf8_lossy(&buf[..len as usize]);
+                                            if title.to_lowercase().contains("trainlab") {
+                                                unsafe {
+                                                    *(lparam as *mut HWND) = hwnd;
+                                                }
+                                                return 0; // stop enumeration
+                                            }
+                                        }
+                                        1 // continue
+                                    }
+
+                                    let mut found_hwnd: HWND = std::ptr::null_mut();
+                                    // Try FindWindowA with class NULL and title "trainlab" first
+                                    let mut hwnd = FindWindowA(
                                         std::ptr::null(),
+                                        b"trainlab\0".as_ptr(),
                                     );
+                                    if hwnd.is_null() {
+                                        // Fall back to enumerating top-level windows
+                                        EnumWindows(Some(enum_win_proc), &mut found_hwnd as *mut _ as LPARAM);
+                                        hwnd = found_hwnd;
+                                    }
+
                                     if !hwnd.is_null() {
                                         if command == "hide" {
                                             ShowWindow(hwnd, SW_HIDE);
@@ -1187,7 +1296,7 @@ impl eframe::App for TrainlabApp {
 
         // Poll Win32 WM_HOTKEY message queue for global hotkeys (works even when window is hidden/unmapped)
         while let Some(hotkey_id) = hotkeys::poll_wm_hotkey() {
-            if hotkey_id == 9999 { // ID 9999 is global toggle key '['
+            if hotkey_id == 9999 { // ID 9999 is the global window-toggle key ('J')
                 self.window_visible = !self.window_visible;
                 if self.window_visible {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -1203,20 +1312,8 @@ impl eframe::App for TrainlabApp {
             }
         }
 
-        // Handle 'J' key press when window has focus
-        ctx.input(|i| {
-            if i.key_pressed(egui::Key::J) {
-                self.window_visible = !self.window_visible;
-                if self.window_visible {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                } else {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-            }
-        });
+        // T-163: The global hotkey (ID 9999, 'J') already handles window toggle.
+        // The focused 'J' handler was removed to prevent double-toggle.
 
         // Handle tab switching & controller navigation if the window is focused
         // and the user is NOT currently typing into a text field (ctx.wants_keyboard_input()).
@@ -1720,6 +1817,11 @@ impl TrainlabApp {
 /// Format a little-endian byte slice as a value of the given type.
 fn format_value(data: &[u8], vt: trainlab_core::scan::ValueType) -> String {
     use trainlab_core::scan::ValueType;
+    // T-161: Guard against short reads — show "?" if data is too short.
+    let need = vt.size();
+    if data.len() < need {
+        return "?".to_string();
+    }
     match vt {
         ValueType::I32 => i32::from_le_bytes([data[0], data[1], data[2], data[3]]).to_string(),
         ValueType::U32 => u32::from_le_bytes([data[0], data[1], data[2], data[3]]).to_string(),

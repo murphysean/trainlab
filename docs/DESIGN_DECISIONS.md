@@ -137,6 +137,35 @@ for safety (undo, region validation, confirmation) and the holder of session
 state (markers, undo log). The LLM talks only to the GUI; the GUI talks to the
 DLL.
 
+## D11: Profile commands are trusted code (T-100)
+
+**Decision:** Profile `init_commands` and button-cheat `commands` execute
+directly — they are **trusted code**, not ad-hoc agent actions. The D8
+confirmation gate does NOT apply to them.
+
+**Why:** A profile is a curated, versioned artifact you explicitly choose to
+load — analogous to loading a Cheat Engine `.CT` table. The commands in it
+are part of the profile's design, not autonomous agent decisions. Requiring
+confirmation for every profile command (dozens of writes/caves per load) would
+make profiles unusable.
+
+**What executes directly (no D8 gate):**
+- Loading a profile → runs `init_commands` (memory writes, cave installs,
+  shellcode) immediately.
+- Clicking a button cheat → runs its `commands` immediately.
+
+**Undo snapshots are still recorded** for profile-command writes/caves, so you
+can revert if something goes wrong — but there is no confirm/reject step.
+
+**What the D8 gate DOES cover (ad-hoc MCP tools only):**
+`write`, `install_cave`, `undo`, `set_cheat_value`, `set_cheat_toggle` — these
+stage a change and require `confirm_op` to apply.
+
+**Alternatives considered:**
+- Gate every profile command (rejected: makes profiles unusable).
+- Gate only writes but not cave installs (rejected: caves are equally
+  dangerous; the distinction is profile-vs-adhoc, not write-vs-cave).
+
 ## Open decisions (not yet made)
 
 - **OD1:** Fast channel — keep TCP or move to shared memory for hot loops?

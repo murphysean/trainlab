@@ -273,6 +273,12 @@
       <div id="cheats-list" class="empty-state">Loading cheats...</div>
     </div>
 
+    <!-- Pending Operations -->
+    <div class="card" id="pending-card" style="display:none;">
+      <h2>⏳ Pending Operations</h2>
+      <div id="pending-list"></div>
+    </div>
+
     <!-- Memory Scanner -->
     <div class="card">
       <h2>🔍 Memory Scanner</h2>
@@ -399,6 +405,14 @@
         </table>
       </div>
     </div>
+
+    <!-- Activity Log -->
+    <div class="card" style="grid-column: 1 / -1;">
+      <h2>📋 Activity Log <button onclick="refreshLog()" style="font-size:0.75rem; padding:0.2rem 0.5rem; margin-left:0.5rem;">↻</button> <button onclick="clearLogDisplay()" style="font-size:0.75rem; padding:0.2rem 0.5rem;">Clear display</button></h2>
+      <div id="log-container" style="max-height: 260px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 0.375rem; padding: 0.5rem;">
+        <div id="log-list" style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--text-muted); white-space: pre-wrap; word-break: break-all;">Loading log...</div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -474,9 +488,9 @@
               <div class="cheat-item">
                 <div class="cheat-info">
                   <span class="cheat-label">${c.label}</span>
-                  <span class="cheat-meta">ID: ${c.id}</span>
+                  <span class="cheat-meta">ID: ${c.id}${c.hotkey ? ' | Key: ' + c.hotkey : ''}</span>
                 </div>
-                <button onclick="toggleCheat(${c.id}, true)" class="primary">Trigger</button>
+                <button id="run-btn-${c.id}" onclick="runCheat(${c.id})" class="primary">▶ Run</button>
               </div>
             `;
           }
@@ -485,22 +499,46 @@
     }
 
     async function toggleCheat(id, enabled) {
-      await fetchJson(`${API}/cheats/toggle`, {
+      const res = await fetchJson(`${API}/cheats/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cheat_id: id, enabled })
       });
-      refreshCheats();
+      if (res.status === 'staged') {
+        alert(`Staged op #${res.pending_id} — use Pending Operations panel to confirm`);
+        refreshPending();
+      } else {
+        refreshCheats();
+      }
     }
 
     async function applyCheat(id) {
       const val = document.getElementById(`cheat-val-${id}`).value;
-      await fetchJson(`${API}/cheats/apply`, {
+      const res = await fetchJson(`${API}/cheats/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cheat_id: id, value: val })
       });
-      refreshCheats();
+      if (res.status === 'staged') {
+        alert(`Staged op #${res.pending_id} — use Pending Operations panel to confirm`);
+        refreshPending();
+      } else {
+        refreshCheats();
+      }
+    }
+
+    async function runCheat(id) {
+      const btn = document.getElementById(`run-btn-${id}`);
+      if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+      try {
+        await fetchJson(`${API}/cheats/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cheat_id: id })
+        });
+      } finally {
+        if (btn) { btn.textContent = '▶ Run'; btn.disabled = false; }
+      }
     }
 
     async function refreshProfiles() {
@@ -636,12 +674,62 @@
       const value = document.getElementById('rw-val').value;
       const value_type = document.getElementById('rw-type').value;
       if (!address || !value) return;
-      await fetchJson(`${API}/write`, {
+      const res = await fetchJson(`${API}/write`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address, value, value_type })
       });
-      alert(`Wrote ${value} to ${address}`);
+      if (res.status === 'staged') {
+        alert(`Staged op #${res.pending_id} — use Pending Operations panel to confirm`);
+        refreshPending();
+      } else {
+        alert(`Wrote ${value} to ${address}`);
+      }
+    }
+
+    async function refreshPending() {
+      try {
+        const ops = await fetchJson(`${API}/pending`);
+        const card = document.getElementById('pending-card');
+        const list = document.getElementById('pending-list');
+        if (!ops || ops.length === 0) {
+          card.style.display = 'none';
+          return;
+        }
+        card.style.display = '';
+        list.innerHTML = ops.map(op => `
+          <div class="cheat-item" style="flex-direction:column; align-items:stretch; gap:0.5rem;">
+            <div class="cheat-info">
+              <span class="cheat-label">Op #${op.id}: ${op.kind}</span>
+              <span class="cheat-meta">${op.preview || ''}</span>
+            </div>
+            <div class="form-row" style="justify-content:flex-end;">
+              <button onclick="confirmOp(${op.id})" style="border-color: var(--success); color: var(--success); padding: 0.25rem 0.75rem;">✓ Confirm</button>
+              <button onclick="rejectOp(${op.id})" style="border-color: var(--danger); color: var(--danger); padding: 0.25rem 0.75rem;">✗ Reject</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {}
+    }
+
+    async function confirmOp(id) {
+      await fetchJson(`${API}/confirm_op`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      refreshPending();
+      refreshCheats();
+    }
+
+    async function rejectOp(id) {
+      await fetchJson(`${API}/reject_op`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+      });
+      refreshPending();
+      refreshCheats();
     }
 
     async function refreshApps() {
@@ -689,6 +777,41 @@
       refreshProfiles();
       refreshMarkers();
       refreshApps();
+      refreshLog();
+      refreshPending();
+    }
+
+    async function refreshLog() {
+      try {
+        const entries = await fetchJson(`${API}/log`);
+        const el = document.getElementById('log-list');
+        if (!el) return;
+        if (entries.length === 0) {
+          el.textContent = '(no log entries yet)';
+          return;
+        }
+        el.textContent = entries.join('\n');
+        // Scroll to bottom so newest entries are visible.
+        const container = document.getElementById('log-container');
+        if (container) container.scrollTop = container.scrollHeight;
+      } catch (e) {}
+    }
+
+    function appendLogEntry(entry) {
+      const el = document.getElementById('log-list');
+      if (!el) return;
+      // Clear placeholder text on first real entry.
+      if (el.textContent === 'Loading log...' || el.textContent === '(no log entries yet)') {
+        el.textContent = '';
+      }
+      el.textContent += (el.textContent ? '\n' : '') + entry;
+      const container = document.getElementById('log-container');
+      if (container) container.scrollTop = container.scrollHeight;
+    }
+
+    function clearLogDisplay() {
+      const el = document.getElementById('log-list');
+      if (el) el.textContent = '(display cleared — entries still recorded server-side)';
     }
 
     // Init
@@ -704,6 +827,7 @@
           if (evt.type === 'cheat_updated' || evt.type === 'profile_loaded') {
             refreshCheats();
             refreshMarkers();
+            refreshPending();
           } else if (evt.type === 'marker_set') {
             refreshMarkers();
           } else if (evt.type === 'connection_changed') {
@@ -712,6 +836,11 @@
             refreshScanMatches();
           } else if (evt.type === 'app_launched') {
             refreshApps();
+          } else if (evt.type === 'activity_logged') {
+            // Append each log entry live — no full refresh needed.
+            if (evt.data && evt.data.entry) {
+              appendLogEntry(evt.data.entry);
+            }
           }
         } catch (e) {}
       };

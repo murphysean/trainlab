@@ -59,7 +59,32 @@ Rules that must never be violated:
 - **Purpose:** expose the Trainer's capabilities as MCP *tools* the agent can
   call, plus the agent's persistent session state.
 
-## 3. The tool surface (MCP tools)
+> **⚠️ Security note (T-162):** The MCP/REST server binds to `0.0.0.0` by
+> default, making all endpoints (`/api/write`, `/api/cheats/*`, `/log`,
+> `/snapshots`) reachable from the LAN with **no authentication or token
+> guard**. This is intentional for the Steam Deck / LAN use case but carries
+> risk: anyone on the LAN can write to game memory or install code caves. To
+> restrict to loopback only, bind to `127.0.0.1` (set
+> `TRAINLAB_MCP_HOST=127.0.0.1`). See [`LAUNCHING.md`](LAUNCHING.md) for
+> details.
+
+### Attach → init flow (T-141)
+
+All frontends — GUI attach, MCP `load_profile`, web `/profiles/load` — follow
+the **same** attach→init flow:
+
+1. **Attach** to the game process (find game → inject DLL → connect to listener).
+2. **Run setup** (if `run_setup=true`) — AOB scans, pointer chains, addresses;
+   store resolved addresses as named markers.
+3. **Run init_commands** (if present) — macro commands (cave installs, writes,
+   allocations) that establish memory state.
+4. **Materialize cheats** — resolve each cheat against setup markers and
+   populate the session / Cheats panel.
+
+The MCP `attach_game` tool does **not** trigger profile init — it only finds
+the game, injects the DLL, and connects. Use `load_profile` for the full
+init flow. The GUI `auto_init` checkbox gates whether the GUI auto-runs
+profile init after attach.
 
 Grouped by risk. This is the contract the Trainer exposes to the agent.
 

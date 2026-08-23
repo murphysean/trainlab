@@ -131,6 +131,25 @@ trainer over the network. Choose the transport that fits your network:
   the trainer's Tailscale IP (or MagicDNS name) in place of `127.0.0.1`:
   `http://trainer-host:8123/mcp`.
 
+### Security note: LAN exposure (T-162)
+
+The MCP/REST server binds to `0.0.0.0` by default (see `TRAINLAB_MCP_HOST`
+above), making **all** endpoints reachable from the LAN:
+
+- `/api/write` — write arbitrary bytes to game memory
+- `/api/cheats/*` — set cheat values, toggle cheats
+- `/log` — read session logs
+- `/snapshots` — read undo snapshots
+
+There is **no authentication or token guard**. Anyone on the same network can
+write to game memory, install code caves, or manipulate cheats. This is
+**intentional** for the Steam Deck / LAN use case (the trainer runs on a trusted
+home network), but carries real risk.
+
+**To restrict to loopback only**, set `TRAINLAB_MCP_HOST=127.0.0.1` so the
+server only accepts local connections. For remote access over untrusted
+networks, prefer an **SSH tunnel or Tailscale** over exposing the raw port.
+
 ### Security note
 
 The MCP server has **no authentication** and, when bound to `0.0.0.0`, exposes

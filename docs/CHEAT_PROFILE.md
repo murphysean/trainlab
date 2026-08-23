@@ -84,6 +84,20 @@ setup:
       module: Unrailed2.exe
       offset: +0x4B7F4
 
+# ---- Init commands: macro commands run after setup to establish memory state ----
+# These are OPTIONAL. If present, they run after setup resolves named base
+# addresses into markers. They execute memory writes, cave installs, and
+# shellcode directly — no staging/confirmation gate (see §9).
+init_commands:
+  # Example: install a code cave that hooks a function for a cheat to use
+  - install_cave:
+      target_ref: some_function
+      payload: "90 90 90 90"        # shellcode (hex)
+  # Example: write an initial value to a resolved setup address
+  - write:
+      address_ref: wood_addr
+      value: 999
+
 # ---- Cheats: user-facing adjustable options (the Cheats panel) ----
 cheats:
   # A value cheat, "set and forget" — one write, stays until the game overwrites it.
@@ -132,19 +146,63 @@ cheats:
 | toggle cheat | `add_cheat` (`CheatKind::Toggle`) + `install_cave` / `set_cheat_toggle` |
 | live value read/write | `read` / `write` |
 
-## 5. Proposed flow at launch
+## 5. Attach → init flow
+
+All frontends — GUI attach, MCP `load_profile`, web `/profiles/load` — follow
+the **same** attach→init flow:
+
+1. **Attach** to the game process (find the game → inject DLL → connect to its
+   listener).
+2. **Run setup** (if `run_setup=true`) — AOB scans, pointer chains, addresses;
+   store resolved addresses as named markers.
+3. **Run init_commands** (if present) — macro commands that establish memory
+   state (cave installs, string allocations, initial writes).
+4. **Materialize cheats** — each cheat is resolved against setup markers and
+   populated into the session / Cheats panel.
+
+### `setup` vs `init_commands` — independent and complementary
+
+`setup` steps and `init_commands` are **independent** — a profile may have
+both, either, or neither.
+
+- **`setup`** resolves *how to find* addresses (AOB scans, pointer chains,
+  module-relative addresses). It is read-only recon that produces named markers.
+  It runs **first**.
+- **`init_commands`** are *macro commands* that establish memory state (install
+  code caves, allocate strings, write initial values). They run **after** setup,
+  so they can reference resolved markers via `address_ref` / `target_ref`.
+
+The GUI **"Re-run Initialization"** button runs **both** setup and init_commands
+independently — it re-scans for addresses, then re-runs the macro commands.
+
+### `attach_game` (MCP) does NOT trigger profile init
+
+The MCP `attach_game` tool only finds the game process, injects the DLL, and
+connects to its listener. It does **not** run setup or init_commands. To get
+the full init flow via MCP, use `load_profile` (which runs attach → setup →
+init_commands → materialize cheats).
+
+### `auto_init` (GUI checkbox)
+
+The GUI has an **auto_init** checkbox that gates whether profile init runs
+automatically after attach. When enabled, attaching to a detected game
+triggers the full init flow (setup + init_commands + materialize). When
+disabled, the user must manually trigger initialization (e.g. via the
+"Re-run Initialization" button or by loading a profile).
+
+### Launch flow summary
 
 1. **GUI starts**, scans `cheats/*.yaml`.
 2. For each profile, compares `game` against `find_game_candidates()` /
    running processes.
 3. If a profile's game is running: GUI shows "Detected Unrailed2 — attach +
-   initialize profile?" → user (or agent via `attach_game`) confirms.
-4. **Inject** DLL (per `inject_dll`), **connect**.
-5. Run `setup` steps in order: AOB scans → pointer chains → addresses; store
-   the resolved addresses as named values.
-6. Materialize each cheat in `setup`-resolved addresses → **Cheats panel**
-   populated with working, live addresses.
-7. User adjusts cheats; the table can be **saved** (`save_profile`) to persist
+   initialize profile?" → user confirms (or agent via `load_profile`).
+4. **Attach**: inject DLL (per `inject_dll`), connect to listener.
+5. **Run setup** steps: AOB scans → pointer chains → addresses → named markers.
+6. **Run init_commands** (if present): cave installs, writes, allocations.
+7. **Materialize cheats** into the session → Cheats panel populated with
+   working, live addresses.
+8. User adjusts cheats; the table can be **saved** (`save_profile`) to persist
    any tweaks, or **reloaded** (`load_profile`).
 
 ## 6. Pinning: `mechanism` (cave vs timer)
@@ -199,5 +257,44 @@ writes at 60 Hz" — both are valid, and both are expressible in the profile.
 7. **Where the resolved values live** — a resolved `SetupValue` map in the
    session (name → address), separate from cheats. **Recommend yes.**
 8. **Security** — loading a profile runs AOB scans (read-only) and may inject.
-   No writes until the user confirms a cheat. Loading an untrusted profile
-   should be treated like loading an untrusted CE table.
+   Setup steps are read-only recon. `init_commands` and button-cheat commands
+   execute directly (they are trusted code — see §9). Ad-hoc MCP mutating tools
+   (`write`, `install_cave`, `undo`, etc.) go through the D8 confirmation gate.
+   Loading an untrusted profile should be treated like loading an untrusted CE
+   table.
+
+## 9. Profile commands are trusted code (T-100)
+
+Profile `init_commands` and button-cheat `commands` are **trusted code** — the
+profile is a program you choose to run, not an ad-hoc agent action.
+
+### What this means
+
+- Loading a profile or clicking a button cheat executes memory writes, cave
+  installs, and shellcode **directly** — no staging, no confirmation gate.
+- The D8 confirmation gate does **not** apply to profile commands.
+- **Undo snapshots ARE recorded** for profile-command writes and cave installs
+  (for safety), but there is no confirm/reject step — the commands execute
+  immediately.
+
+### What the D8 gate DOES cover
+
+The D8 confirmation gate applies only to **ad-hoc MCP tools**:
+
+- `write` — stage a byte write
+- `install_cave` — stage a cave install
+- `undo` — stage a revert
+- `set_cheat_value` — stage a value write for a cheat
+- `set_cheat_toggle` — stage enabling/disabling a toggle cheat
+
+These tools stage a change and return a pending op id + preview. A human must
+call `confirm_op` to apply (or `reject_op` to discard).
+
+### Why profile commands are different
+
+A profile is a curated, versioned artifact you explicitly load — analogous to
+loading a Cheat Engine `.CT` table. The commands in it are part of the
+profile's design, not autonomous agent decisions. Requiring confirmation for
+every profile command would make profiles unusable (dozens of writes/caves per
+load). The safety contract is: **you trust the profile when you load it**, and
+undo snapshots are there if something goes wrong.

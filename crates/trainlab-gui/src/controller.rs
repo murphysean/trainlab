@@ -125,9 +125,17 @@ pub fn find_inject_connect(session: &SharedSession) -> Result<String, String> {
     }
     // Inject the DLL.
     crate::inject::inject_dll(pid, &dll_path).map_err(|e| format!("inject failed: {e}"))?;
-    // Give the DLL a moment to start its listener, then ping it.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    check_connection(session)
+
+    // Poll the DLL listener with retries while its thread spins up.
+    let mut last_err = String::from("timed out waiting for DLL listener");
+    for _ in 0..15 {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        match check_connection(session) {
+            Ok(version) => return Ok(version),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 /// Apply the session's default host/port (used when no explicit config is set).

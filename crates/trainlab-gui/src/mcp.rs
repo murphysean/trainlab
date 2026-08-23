@@ -22,6 +22,8 @@ use crate::session::{CheatKind, PendingKind, SharedSession};
 /// Where the injected DLL's fast channel listens.
 const DLL_HOST: &str = "127.0.0.1";
 const DLL_PORT: u16 = 31337;
+// NOTE: `call_dll` now reads host/port from the session (T-160); these constants
+// serve as fallback defaults when the session has no explicit host/port set.
 
 /// Format the last Windows error code for diagnostics.
 #[cfg(windows)]
@@ -66,9 +68,17 @@ pub(crate) fn game_process(
 /// error instead of blocking the calling MCP tool indefinitely (which wedges
 /// the whole handler). `connect`, `write`, and both `read_exact` phases all
 /// share the same deadline.
-fn call_dll(req: &Request) -> Result<Response, String> {
+///
+/// T-160: Reads the host/port from the session instead of hardcoding them.
+fn call_dll(session: &SharedSession, req: &Request) -> Result<Response, String> {
     const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    let addr = format!("{DLL_HOST}:{DLL_PORT}");
+    let (host, port) = {
+        let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+        let h = if s.dll_host().is_empty() { "127.0.0.1".to_string() } else { s.dll_host().to_string() };
+        let p = if s.dll_port() == 0 { 31337 } else { s.dll_port() };
+        (h, p)
+    };
+    let addr = format!("{host}:{port}");
     let mut stream = std::net::TcpStream::connect(&addr)
         .map_err(|e| format!("connect to DLL ({addr}) failed: {e}"))?;
     let _ = stream.set_nodelay(true);
@@ -811,6 +821,8 @@ impl TrainlabMcpServer {
                     hook,
                     target,
                     enabled: false,
+                    original_bytes: Vec::new(),
+                    cave_addr: 0,
                 }
             }
             other => return Err(err(format!("unknown cheat kind '{other}' (expected 'value' or 'toggle')"))),
@@ -880,9 +892,21 @@ impl TrainlabMcpServer {
             s.remove_cheat(args.id)
         };
         match removed {
-            Some(c) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format!("removed cheat '{}' (id {})", c.label, c.id)),
-            ])),
+            Some(c) => {
+                // T-150: Emit event for cheat removal.
+                if let Ok(s) = self.session.lock() {
+                    s.event_bus().emit(crate::event::SessionEvent::CheatUpdated {
+                        id: c.id,
+                        label: c.label.clone(),
+                        enabled: None,
+                        value: None,
+                    });
+                }
+                self.request_repaint();
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!("removed cheat '{}' (id {})", c.label, c.id)),
+                ]))
+            }
             None => Err(err(format!("no cheat with id {}", args.id))),
         }
     }
@@ -935,13 +959,13 @@ impl TrainlabMcpServer {
     }
 
     /// Enable/disable a toggle cheat (installs/removes the cave hook).
-    #[tool(description = "Enable or disable a toggle cheat (e.g. god mode). Enabling installs the cave hook; disabling removes it. Stages the cave install/undo through the D8 gate.")]
+    #[tool(description = "Enable or disable a toggle cheat (e.g. god mode). Enabling installs the cave hook; disabling removes it (restores original bytes). Stages the cave install/undo through the D8 gate; call 'confirm_op' to apply.")]
     pub(crate) fn set_cheat_toggle(
         &self,
         Parameters(args): Parameters<SetCheatToggleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         // Look up the toggle cheat.
-        let (target, hook, currently_enabled) = {
+        let (target, hook, currently_enabled, original_bytes) = {
             let s = self
                 .session
                 .lock()
@@ -950,8 +974,8 @@ impl TrainlabMcpServer {
                 .get_cheat(args.id)
                 .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
             match &c.kind {
-                CheatKind::Toggle { target, hook, enabled } => {
-                    (*target, hook.clone(), *enabled)
+                CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
+                    (*target, hook.clone(), *enabled, original_bytes.clone())
                 }
                 _ => {
                     return Err(err(format!("cheat {} is not a toggle cheat", args.id)))
@@ -973,22 +997,30 @@ impl TrainlabMcpServer {
             .lock()
             .map_err(|_| err("session lock poisoned"))?;
         let pid = if args.enabled {
-            s.stage_op(
+            s.stage_op_with_cheat(
                 target,
                 PendingKind::InstallCave { hook, marker: None },
                 format!("enable toggle cheat {} at {:#x}", args.id, target),
+                Some(args.id),
             )
         } else {
-            // Disabling: we need the original bytes to restore. For now, stage
-            // an undo of the most recent cave at this target is not tracked;
-            // we stage a no-op marker and let the GUI/agent handle restore.
-            // (Full cave-restore wiring is a follow-up.)
-            s.stage_op(
+            // Disabling: restore the original bytes that were saved when the
+            // cave was installed. If no original bytes are stored (e.g. cave
+            // was installed by init_commands, not the toggle path), we can't
+            // cleanly restore via staging — error out.
+            if original_bytes.is_empty() {
+                return Err(err(format!(
+                    "toggle cheat {} has no stored original bytes; cannot restore (was the cave installed outside the toggle path?)",
+                    args.id
+                )));
+            }
+            s.stage_op_with_cheat(
                 target,
                 PendingKind::Undo {
-                    original_bytes: Vec::new(),
+                    original_bytes,
                 },
                 format!("disable toggle cheat {} at {:#x}", args.id, target),
+                Some(args.id),
             )
         };
         drop(s);
@@ -1027,7 +1059,15 @@ impl TrainlabMcpServer {
 
     pub(crate) fn load_profile_by_name(&self, profile_name: &str, run_setup: bool) -> Result<String, String> {
         let args = LoadProfileArgs { profile: profile_name.into(), run_setup };
-        self.load_profile(Parameters(args)).map_err(|e| e.message.to_string()).map(|_| "profile loaded".to_string())
+        // T-143: Return the detailed result text (resolved addresses, counts)
+        // instead of the constant "profile loaded".
+        self.load_profile(Parameters(args)).map_err(|e| e.message.to_string()).and_then(|result| {
+            // Extract the text content from the CallToolResult.
+            result.content.into_iter().find_map(|block| match block {
+                rmcp::model::ContentBlock::Text(t) => Some(t.text),
+                _ => None,
+            }).ok_or_else(|| "profile loaded (no detail)".to_string())
+        })
     }
 
     /// Load a cheat profile: run its setup steps to resolve base addresses,
@@ -1062,6 +1102,47 @@ impl TrainlabMcpServer {
             s.set_game_name(profile.game.clone());
         }
 
+        // If inject_dll is true and we don't have a game_pid yet (or not connected to this game),
+        // automatically attach to the target game process first.
+        let needs_attach = {
+            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            !s.connected() || s.game_pid().is_none() || !s.game_name().eq_ignore_ascii_case(&profile.game)
+        };
+
+        if needs_attach && profile.inject_dll {
+            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            s.set_game_name(profile.game.clone());
+            let current_dll = s.dll_path().to_string();
+            let raw_dll = if current_dll.is_empty() { "trainlab_inject.dll" } else { &current_dll };
+            let resolved_dll = if raw_dll.contains('/') || raw_dll.contains('\\') {
+                raw_dll.to_string()
+            } else if let Ok(exe) = std::env::current_exe() {
+                exe.parent()
+                    .map(|d| d.join(raw_dll).to_string_lossy().into_owned())
+                    .unwrap_or_else(|| raw_dll.to_string())
+            } else {
+                raw_dll.to_string()
+            };
+            s.set_dll_path(resolved_dll);
+            drop(s);
+
+            let attach_res = crate::controller::find_inject_connect(&self.session);
+            match attach_res {
+                Ok(version) => {
+                    if let Ok(mut s) = self.session.lock() {
+                        s.log_activity("PROFILE", format!("attached to '{}' (inject v{version})", profile.game));
+                    }
+                }
+                Err(e) => {
+                    let err_msg = format!("auto-attach to '{}' failed: {e}", profile.game);
+                    if let Ok(mut s) = self.session.lock() {
+                        s.log_activity("PROFILE", &err_msg);
+                    }
+                    return Err(err(err_msg));
+                }
+            }
+        }
+
         // Run setup steps or init_commands to resolve base addresses and create markers.
         let mut resolved: Vec<(String, u64)> = Vec::new();
         if args.run_setup {
@@ -1079,21 +1160,21 @@ impl TrainlabMcpServer {
                     }
                 }
             }
+        }
 
-            // Also execute profile init_commands if defined so markers are saved
-            if let Some(init_cmds) = &profile.init_commands {
-                if !init_cmds.is_empty() {
-                    if let Ok(mut s) = self.session.lock() {
-                        s.log_activity("PROFILE", format!("executing {} profile init_command(s)...", init_cmds.len()));
-                    }
-                    execute_profile_commands(&self.session, init_cmds).map_err(|e| {
-                        let err_msg = format!("profile init_commands failed: {e}");
-                        if let Ok(mut s) = self.session.lock() {
-                            s.log_activity("PROFILE", &err_msg);
-                        }
-                        err(err_msg)
-                    })?;
+        // Execute profile init_commands if defined so memory markers and allocations are established
+        if let Some(init_cmds) = &profile.init_commands {
+            if !init_cmds.is_empty() {
+                if let Ok(mut s) = self.session.lock() {
+                    s.log_activity("PROFILE", format!("executing {} profile init_command(s)...", init_cmds.len()));
                 }
+                execute_profile_commands(&self.session, init_cmds).map_err(|e| {
+                    let err_msg = format!("profile init_commands failed: {e}");
+                    if let Ok(mut s) = self.session.lock() {
+                        s.log_activity("PROFILE", &err_msg);
+                    }
+                    err(err_msg)
+                })?;
             }
         }
 
@@ -1105,6 +1186,7 @@ impl TrainlabMcpServer {
         // Set the game name so attach/status reflect the profile.
         s.set_game_name(profile.game.clone());
         s.log_activity("PROFILE", format!("loading profile '{}' ({})...", file, profile.game));
+        s.clear_cheats();
 
         for (name, addr) in &resolved {
             let _ = s.set_marker(name, *addr, Some(&format!("Resolved base address for profile '{}'", profile.game)));
@@ -1137,6 +1219,8 @@ impl TrainlabMcpServer {
                         hook,
                         target,
                         enabled: false,
+                        original_bytes: Vec::new(),
+                        cave_addr: 0,
                     }
                 }
                 "button" => {
@@ -1148,7 +1232,9 @@ impl TrainlabMcpServer {
             s.add_cheat(&pc.label, kind, pc.hotkey.as_deref(), pc.note.as_deref());
             materialized += 1;
         }
-        s.set_connected(true);
+        // T-142: Only set connected=true if we actually attached/injected.
+        // The attach flow above (find_inject_connect) already sets connected
+        // on success; don't override it here if attach was skipped or failed.
         let completion_msg = format!("successfully loaded profile '{}' ({}): {} setup step(s) resolved, {} cheat(s) materialized", file, profile.game, resolved.len(), materialized);
         s.log_activity("PROFILE", &completion_msg);
         s.event_bus().emit(crate::event::SessionEvent::ProfileLoaded {
@@ -1281,7 +1367,143 @@ impl TrainlabMcpServer {
         ]))
     }
 
-    /// List the readable memory regions of the game process.
+    /// Validate a cheat profile without touching game memory (dry-run).
+    /// Parses the profile, resolves address refs against setup step names,
+    /// parses every payload/value/hex, and reports errors.
+    #[tool(description = "Validate a cheat profile by file name or game exe without touching game memory. Checks that setup steps are parseable, address refs resolve, payloads are valid hex, and value types are known. Reports all errors found.")]
+    fn validate_profile(
+        &self,
+        Parameters(args): Parameters<LoadProfileArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use crate::profile::find_profile_for_game;
+        let profiles = crate::profile::discover_profiles();
+        let target = args.profile.trim().to_lowercase();
+        let found = profiles
+            .iter()
+            .find(|(f, _)| f.to_lowercase() == target)
+            .or_else(|| find_profile_for_game(&profiles, &args.profile));
+        let (file, profile) = match found {
+            Some(x) => x,
+            None => {
+                return Err(err(format!(
+                    "no profile found for '{}' (looked in cheats/)",
+                    args.profile
+                )))
+            }
+        };
+
+        let mut errors: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+
+        // Check setup step names are unique and parseable.
+        let setup_names: Vec<String> = profile.setup.iter().map(|s| s.name().to_string()).collect();
+        for (i, name) in setup_names.iter().enumerate() {
+            if setup_names[i+1..].contains(name) {
+                errors.push(format!("setup step name '{}' is not unique", name));
+            }
+        }
+
+        // Validate each cheat's address_ref / target_ref resolves against setup names or is a raw address.
+        for pc in &profile.cheats {
+            let refs = [pc.address_ref.as_deref(), pc.target_ref.as_deref()];
+            for r in refs.into_iter().flatten() {
+                if !setup_names.contains(&r.to_string()) {
+                    // Not a named setup value — check if it's a raw address.
+                    if parse_addr_str(r).is_err() {
+                        errors.push(format!(
+                            "cheat '{}': ref '{}' is not a named setup value or raw address",
+                            pc.label, r
+                        ));
+                    }
+                }
+            }
+            // Validate value_type if present.
+            if let Some(vt) = &pc.value_type {
+                if parse_value_type(vt).is_err() {
+                    errors.push(format!("cheat '{}': unknown value_type '{}'", pc.label, vt));
+                }
+            }
+            // Validate payload hex if present.
+            if let Some(payload) = &pc.payload {
+                if !payload.is_empty() {
+                    if parse_hex_bytes(payload).is_err() {
+                        errors.push(format!("cheat '{}': invalid payload hex '{}'", pc.label, payload));
+                    }
+                }
+            }
+            // Validate hook kind if present.
+            if let Some(h) = &pc.hook {
+                if h != "trampoline" && h != "override" {
+                    errors.push(format!("cheat '{}': unknown hook '{}' (expected 'trampoline' or 'override')", pc.label, h));
+                }
+            }
+            // Validate jump style if present.
+            if let Some(j) = &pc.jump {
+                if j != "absolute" && j != "relative" && j != "short" {
+                    warnings.push(format!("cheat '{}': unknown jump '{}' (expected 'absolute' or 'relative')", pc.label, j));
+                }
+            }
+        }
+
+        // Validate init_commands payloads if present.
+        if let Some(init_cmds) = &profile.init_commands {
+            for (i, cmd) in init_cmds.iter().enumerate() {
+                match cmd {
+                    crate::profile::ProfileCommand::Write { value, value_type, .. } => {
+                        if let Some(vt) = value_type {
+                            if parse_value_type(vt).is_err() {
+                                errors.push(format!("init_cmd {i}: unknown value_type '{vt}'"));
+                            }
+                        }
+                        // Value is hard to validate without session markers, but check non-empty.
+                        if value.trim().is_empty() {
+                            errors.push(format!("init_cmd {i}: write value is empty"));
+                        }
+                    }
+                    crate::profile::ProfileCommand::InstallCave { payload, hook, .. } => {
+                        if !payload.is_empty() && parse_hex_bytes(payload).is_err() {
+                            errors.push(format!("init_cmd {i}: invalid cave payload hex"));
+                        }
+                        if hook != "trampoline" && hook != "override" {
+                            errors.push(format!("init_cmd {i}: unknown hook '{hook}'"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            let mut text = format!("✅ profile '{}' ({}) is valid\n", file, profile.game);
+            text.push_str(&format!("  {} setup step(s), {} cheat(s)", profile.setup.len(), profile.cheats.len()));
+            if let Some(ic) = &profile.init_commands {
+                text.push_str(&format!(", {} init_command(s)", ic.len()));
+            }
+            if !warnings.is_empty() {
+                text.push_str(&format!("\n  {} warning(s):", warnings.len()));
+                for w in &warnings {
+                    text.push_str(&format!("\n    ⚠ {w}"));
+                }
+            }
+            Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(text),
+            ]))
+        } else {
+            let mut text = format!("❌ profile '{}' ({}) has {} error(s):\n", file, profile.game, errors.len());
+            for e in &errors {
+                text.push_str(&format!("  • {e}\n"));
+            }
+            if !warnings.is_empty() {
+                text.push_str(&format!("  {} warning(s):\n", warnings.len()));
+                for w in &warnings {
+                    text.push_str(&format!("    ⚠ {w}\n"));
+                }
+            }
+            Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(text),
+            ]))
+        }
+    }
     #[tool(description = "List readable memory regions of the game process, read externally.")]
     fn list_regions(&self) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
@@ -2105,7 +2327,7 @@ impl TrainlabMcpServer {
             _ => trainlab_core::cave_hook::JumpStyle::Absolute,
         };
         let spec = CaptureRegSpec::new(reg, value_type).with_optional_gate(gate).with_jump(jump_style);
-        match call_dll(&Request::CaptureReg {
+        match call_dll(&self.session, &Request::CaptureReg {
             target,
             spec,
             capacity: args.capacity,
@@ -2154,7 +2376,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<ReadCapturesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match call_dll(&Request::ReadCaptures { id: args.id }) {
+        match call_dll(&self.session, &Request::ReadCaptures { id: args.id }) {
             Ok(Response::ReadCaptures { entries, disarmed }) => {
                 if entries.is_empty() {
                     let note = if disarmed {
@@ -2194,7 +2416,7 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<UninstallCaptureArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match call_dll(&Request::UninstallCapture { id: args.id }) {
+        match call_dll(&self.session, &Request::UninstallCapture { id: args.id }) {
             Ok(Response::CaptureUninstalled { id }) => Ok(CallToolResult::success(vec![
                 rmcp::model::ContentBlock::text(format!(
                     "uninstalled capture {id}: original bytes restored, scratch freed."
@@ -2218,7 +2440,7 @@ impl TrainlabMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&self.session, &args.address)?;
         let len = args.len.unwrap_or(4);
-        match call_dll(&Request::WatchWrites {
+        match call_dll(&self.session, &Request::WatchWrites {
             address,
             len,
             one_shot: args.one_shot,
@@ -2241,7 +2463,7 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<BreakOnCodeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&self.session, &args.address)?;
-        match call_dll(&Request::BreakOnCode {
+        match call_dll(&self.session, &Request::BreakOnCode {
             address,
             one_shot: args.one_shot,
         }) {
@@ -2259,7 +2481,7 @@ impl TrainlabMcpServer {
     /// Poll for a hit from an armed watchpoint/breakpoint.
     #[tool(description = "Retrieve the most recent watchpoint/breakpoint hit (registers + stack). Returns nothing if no hit is pending.")]
     fn watch_poll(&self) -> Result<CallToolResult, ErrorData> {
-        match call_dll(&Request::PollHit) {
+        match call_dll(&self.session, &Request::PollHit) {
             Ok(Response::PollHit { hit: Some(info) }) => Ok(CallToolResult::success(vec![
                 rmcp::model::ContentBlock::text(format_hit(
                     info.rip,
@@ -2287,7 +2509,7 @@ impl TrainlabMcpServer {
     /// Clear any active watchpoints / breakpoints.
     #[tool(description = "Disarm any active watchpoint or breakpoint and restore any patched bytes.")]
     fn clear_breakpoints(&self) -> Result<CallToolResult, ErrorData> {
-        match call_dll(&Request::ClearBreakpoints) {
+        match call_dll(&self.session, &Request::ClearBreakpoints) {
             Ok(Response::BreakpointsCleared) => Ok(CallToolResult::success(vec![
                 rmcp::model::ContentBlock::text("breakpoints cleared"),
             ])),
@@ -2474,16 +2696,17 @@ impl TrainlabMcpServer {
     /// step of the D8 gate. Once applied, the original bytes are snapshotted in
     /// the undo log so the op can later be reverted.
     #[tool(description = "Apply a staged mutation (from 'write'/'install_cave'/'undo') by id. This is the human-confirmation step: it actually modifies memory and records an undo entry. Discard instead with 'reject_op'.")]
-    fn confirm_op(
+    pub(crate) fn confirm_op(
         &self,
         Parameters(args): Parameters<OpConfirmArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Peek at the op first — only remove it from pending on success (T-102).
         let op = {
-            let mut s = self
+            let s = self
                 .session
                 .lock()
                 .map_err(|_| err("session lock poisoned"))?;
-            s.take_pending(args.id)
+            s.peek_pending(args.id).cloned()
         };
         let Some(op) = op else {
             return Err(err(format!(
@@ -2493,13 +2716,14 @@ impl TrainlabMcpServer {
         };
         let address = op.address;
         let preview = op.preview.clone();
+        let cheat_id = op.cheat_id;
         // Apply according to the op kind.
         let result = match &op.kind {
             PendingKind::Write { data } => {
                 // Snapshot originals for the undo log before writing.
                 let proc = game_process(&self.session)?;
                 let original = proc.read(address, data.len()).unwrap_or_default();
-                match call_dll(&Request::Write {
+                match call_dll(&self.session, &Request::Write {
                     address,
                     data: data.clone(),
                 }) {
@@ -2533,7 +2757,7 @@ impl TrainlabMcpServer {
                 }
             }
             PendingKind::InstallCave { hook, marker } => {
-                match call_dll(&Request::InstallCave {
+                match call_dll(&self.session, &Request::InstallCave {
                     target: address,
                     hook: hook.clone(),
                 }) {
@@ -2550,6 +2774,11 @@ impl TrainlabMcpServer {
                         if let Some(m) = marker {
                             let _ = s.set_marker(&m, cave, Some(&format!("Code cave allocated for target {target:#x}")));
                         }
+                        // T-110/T-111: update the toggle cheat's cave info + flip enabled.
+                        if let Some(cid) = cheat_id {
+                            s.set_toggle_cave_info(cid, original.clone(), cave);
+                            s.set_cheat_toggle(cid, true);
+                        }
                         drop(s);
                         Ok(format!(
                             "confirmed cave: cave={:#x} target={:#x} ({}) original saved ({} byte(s)) (undo id {id})",
@@ -2565,14 +2794,24 @@ impl TrainlabMcpServer {
                 }
             }
             PendingKind::Undo { original_bytes } => {
-                match call_dll(&Request::Write {
+                match call_dll(&self.session, &Request::Write {
                     address,
                     data: original_bytes.clone(),
                 }) {
-                    Ok(Response::Write { bytes_written }) => Ok(format!(
-                        "confirmed undo: restored {bytes_written} byte(s) at {:#x}",
-                        address
-                    )),
+                    Ok(Response::Write { bytes_written }) => {
+                        // T-111: flip the toggle off when the undo is a toggle disable.
+                        if let Some(cid) = cheat_id {
+                            let mut s = self
+                                .session
+                                .lock()
+                                .map_err(|_| err("session lock poisoned"))?;
+                            s.set_cheat_toggle(cid, false);
+                        }
+                        Ok(format!(
+                            "confirmed undo: restored {bytes_written} byte(s) at {:#x}",
+                            address
+                        ))
+                    }
                     Ok(Response::Error { message }) => Err(message),
                     Ok(_) => Err("unexpected response from DLL".into()),
                     Err(e) => Err(e),
@@ -2580,16 +2819,27 @@ impl TrainlabMcpServer {
             }
         };
         match result {
-            Ok(text) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(text),
-            ])),
-            Err(e) => Err(err(format!("failed to apply pending op {}: {e}", args.id))),
+            Ok(text) => {
+                // T-102: only now remove the op from pending (it succeeded).
+                if let Ok(mut s) = self.session.lock() {
+                    s.take_pending(args.id);
+                }
+                // T-150/T-151: emit event + request repaint.
+                self.request_repaint();
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(text),
+                ]))
+            }
+            Err(e) => {
+                // T-102: leave the op in pending so it can be retried or rejected.
+                Err(err(format!("failed to apply pending op {}: {e}", args.id)))
+            }
         }
     }
 
     /// Discard a previously staged (pending) mutation without applying it.
     #[tool(description = "Discard a staged mutation (from 'write'/'install_cave'/'undo') by id without applying it.")]
-    fn reject_op(
+    pub(crate) fn reject_op(
         &self,
         Parameters(args): Parameters<OpConfirmArgs>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -2840,14 +3090,28 @@ pub(crate) fn execute_profile_commands(
                 let bytes = parse_value_bytes(&eval_val_str, vt)
                     .map_err(|e| format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}': {e:?}"))?;
 
+                // T-101: Read original bytes for undo before writing.
+                let original = game_process(session)
+                    .ok()
+                    .and_then(|proc| proc.read(parsed_addr, bytes.len()).ok())
+                    .unwrap_or_default();
+
                 let resp = crate::controller::request(
                     session,
-                    &trainlab_core::protocol::Request::Write { address: parsed_addr, data: bytes },
+                    &trainlab_core::protocol::Request::Write { address: parsed_addr, data: bytes.clone() },
                 ).map_err(|e| format!("cmd {idx}: write to {addr_str} ({parsed_addr:#x}) failed: {e}"))?;
                 if let trainlab_core::protocol::Response::Error { message } = resp {
                     return Err(format!("cmd {idx}: write failed: {message}"));
                 }
                 if let Ok(mut s) = session.lock() {
+                    // T-101: Record undo snapshot for profile-command writes.
+                    if !original.is_empty() {
+                        s.record_undo(
+                            parsed_addr,
+                            original,
+                            format!("profile write {} byte(s) at {:#x}", bytes.len(), parsed_addr),
+                        );
+                    }
                     s.log_activity("PROFILE", format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({parsed_addr:#x}) -> ok"));
                 }
             }
@@ -2867,7 +3131,8 @@ pub(crate) fn execute_profile_commands(
                 };
                 let cave_hook = match hook.as_str() {
                     "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: jump_style },
-                    _ => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: jump_style },
+                    "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: jump_style },
+                    other => return Err(format!("cmd {idx}: unknown hook kind '{other}' (expected 'trampoline' or 'override')")),
                 };
 
                 let resp = crate::controller::request(
@@ -2876,13 +3141,21 @@ pub(crate) fn execute_profile_commands(
                 ).map_err(|e| format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed: {e}"))?;
 
                 match resp {
-                    trainlab_core::protocol::Response::CaveInstalled { cave, .. } => {
+                    trainlab_core::protocol::Response::CaveInstalled { cave, original, .. } => {
                         if let Some(m) = marker {
                             if let Ok(mut s) = session.lock() {
                                 let _ = s.set_marker(m, cave, Some(&format!("Cave for target {target_addr:#x}")));
                             }
                         }
                         if let Ok(mut s) = session.lock() {
+                            // T-101: Record undo snapshot for profile-command cave installs.
+                            if !original.is_empty() {
+                                s.record_undo(
+                                    target_addr,
+                                    original.clone(),
+                                    format!("profile install_cave at {:#x}", target_addr),
+                                );
+                            }
                             s.log_activity("PROFILE", format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> cave={cave:#x}"));
                         }
                     }
@@ -2939,16 +3212,31 @@ pub(crate) fn execute_profile_commands(
                         s.log_activity("PROFILE", format!("cmd {idx}: external AOB scan found match at {final_addr:#x} -> saved marker '${marker}'"));
                     }
                 } else {
-                    return Err(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches; sequence aborted"));
+                    // If AOB pattern wasn't found (e.g. hook was already patched with a JMP instruction in this game session),
+                    // check if the session already has a valid non-zero marker for this label.
+                    let existing_addr = {
+                        let s = session.lock().ok();
+                        s.and_then(|s| s.get_marker(marker).map(|m| m.address))
+                    };
+                    if let Some(addr) = existing_addr.filter(|a| *a != 0) {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity("PROFILE", format!("cmd {idx}: AOB pattern '{pattern}' already patched/hooked; reusing existing marker '${marker}' = {addr:#x}"));
+                        }
+                    } else {
+                        return Err(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches; sequence aborted"));
+                    }
                 }
             }
             crate::profile::ProfileCommand::PointerChase { marker, base, offsets } => {
                 let mut curr_addr = parse_addr_expr(session, base)
                     .map_err(|e| format!("cmd {idx}: bad base '{base}': {e:?}"))?;
-                let parsed_offs: Vec<u64> = offsets.iter().filter_map(|o| {
+                // T-131: Parse offsets strictly — error on malformed offsets instead of silently dropping them.
+                let parsed_offs: Vec<u64> = offsets.iter().map(|o| {
                     let clean = o.trim_start_matches('+').trim();
-                    u64::from_str_radix(clean.strip_prefix("0x").unwrap_or(clean), 16).ok()
-                }).collect();
+                    let hex_str = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")).unwrap_or(clean);
+                    u64::from_str_radix(hex_str, 16)
+                        .map_err(|e| format!("cmd {idx}: bad pointer chase offset '{o}': {e}"))
+                }).collect::<Result<Vec<_>, _>>()?;
 
                 for off in &parsed_offs {
                     let read_res = crate::controller::request(
@@ -3007,8 +3295,17 @@ pub(crate) fn execute_profile_commands(
                                 s.log_activity("PROFILE", format!("cmd {idx}: assert non-null @ {addr_str} ({target_addr:#x}) passed ({val_u64:#x})"));
                             }
                         } else {
+                            // T-130: Parse the expected value per the value_type and compare.
+                            let expected_bytes = parse_value_bytes(exp_clean, vt)
+                                .map_err(|e| format!("cmd {idx}: assert failed to parse expected value '{exp_clean}': {e:?}"))?;
+                            if data != expected_bytes {
+                                let exp_val_str = crate::format_value(&expected_bytes, vt);
+                                return Err(format!(
+                                    "cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) == {got_val_str} (expected {exp_val_str})"
+                                ));
+                            }
                             if let Ok(mut s) = session.lock() {
-                                s.log_activity("PROFILE", format!("cmd {idx}: assert read @ {addr_str} ({target_addr:#x}) == {got_val_str} passed"));
+                                s.log_activity("PROFILE", format!("cmd {idx}: assert {got_val_str} == {exp_clean} @ {addr_str} ({target_addr:#x}) passed"));
                             }
                         }
                     }
@@ -3077,7 +3374,8 @@ pub(crate) fn allocate_string_in_game(session: &SharedSession, content: &str, ki
     {
         let _ = pid;
         let _ = bytes;
-        Ok((0x10000u64, len))
+        // T-164: Return an error instead of a fake address on non-Windows platforms.
+        Err("string allocation is only supported on Windows".to_string())
     }
 }
 
@@ -3180,6 +3478,7 @@ fn resolve_cheat_address(
     pc: &crate::profile::ProfileCheat,
 ) -> Result<u64, ErrorData> {
     let refs = [pc.address_ref.as_deref(), pc.target_ref.as_deref()];
+    let mut tried = Vec::new();
     for r in refs.into_iter().flatten() {
         // Named setup value?
         if let Some((_, a)) = resolved.iter().find(|(n, _)| n == r) {
@@ -3189,9 +3488,16 @@ fn resolve_cheat_address(
         if let Ok(a) = parse_addr_str(r) {
             return Ok(a);
         }
-        return Err(err(format!("setup value '{r}' not resolved and not a raw address")));
+        tried.push(r.to_string());
     }
-    Err(err("cheat has no address_ref/target_ref"))
+    if tried.is_empty() {
+        Err(err("cheat has no address_ref/target_ref"))
+    } else {
+        Err(err(format!(
+            "could not resolve address ref(s): {} (not a named setup value or raw address)",
+            tried.join(", ")
+        )))
+    }
 }
 
 /// Parse an address string (decimal or 0x hex) into a u64.

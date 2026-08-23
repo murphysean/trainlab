@@ -59,6 +59,15 @@ pub enum CheatKind {
         target: u64,
         /// Whether the toggle is currently active.
         enabled: bool,
+        /// Original bytes at the target before the cave was installed.
+        /// Populated when the cave is confirmed/installed so it can be
+        /// restored on disable. Empty if no cave is currently installed.
+        #[allow(dead_code)]
+        original_bytes: Vec<u8>,
+        /// The allocated cave address (from CaveInstalled response).
+        /// Zero if no cave is currently installed.
+        #[allow(dead_code)]
+        cave_addr: u64,
     },
     /// An action button that runs a sequence of commands when clicked.
     Button {
@@ -99,6 +108,9 @@ pub struct PendingOp {
     /// Human-readable preview of what will happen (shown to the user for
     /// confirmation).
     pub preview: String,
+    /// Optional cheat id associated with this op (used by toggle cheats
+    /// so confirm_op can update the cheat's enabled state + cave info).
+    pub cheat_id: Option<u64>,
 }
 
 /// The kind of a staged mutation.
@@ -459,6 +471,18 @@ impl SessionState {
         kind: PendingKind,
         preview: String,
     ) -> u64 {
+        self.stage_op_with_cheat(address, kind, preview, None)
+    }
+
+    /// Stage a mutation with an optional associated cheat id (used by toggle
+    /// cheats so confirm_op can update the cheat's enabled state + cave info).
+    pub fn stage_op_with_cheat(
+        &mut self,
+        address: u64,
+        kind: PendingKind,
+        preview: String,
+        cheat_id: Option<u64>,
+    ) -> u64 {
         let id = self.next_pending_id;
         self.next_pending_id += 1;
         self.pending_ops.push(PendingOp {
@@ -466,8 +490,15 @@ impl SessionState {
             address,
             kind,
             preview,
+            cheat_id,
         });
         id
+    }
+
+    /// Peek at a staged (pending) op by id without removing it.
+    /// Used by confirm_op to avoid consuming the op before the DLL call succeeds.
+    pub fn peek_pending(&self, id: u64) -> Option<&PendingOp> {
+        self.pending_ops.iter().find(|p| p.id == id)
     }
 
     /// Look up a staged (pending) op by id without removing it.
@@ -532,6 +563,12 @@ impl SessionState {
         Some(self.cheats.remove(idx))
     }
 
+    /// Clear all cheats from the session.
+    pub fn clear_cheats(&mut self) {
+        self.cheats.clear();
+        self.next_cheat_id = 0;
+    }
+
     /// Set a toggle cheat's enabled state (used by the GUI/MCP to flip a cave).
     pub fn set_cheat_toggle(&mut self, id: u64, enabled: bool) -> bool {
         if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
@@ -548,6 +585,35 @@ impl SessionState {
             }
         }
         false
+    }
+
+    /// Update a toggle cheat's cave installation info (original bytes + cave address).
+    /// Called after a cave is successfully installed for this toggle.
+    pub fn set_toggle_cave_info(&mut self, id: u64, original_bytes: Vec<u8>, cave_addr: u64) -> bool {
+        if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
+            if let CheatKind::Toggle { original_bytes: ob, cave_addr: ca, .. } = &mut c.kind {
+                *ob = original_bytes;
+                *ca = cave_addr;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get a toggle cheat's cave restore info (original bytes, target address).
+    /// Returns None if the cheat is not a toggle or has no cave installed.
+    pub fn get_toggle_restore_info(&self, id: u64) -> Option<(Vec<u8>, u64)> {
+        let c = self.cheats.iter().find(|c| c.id == id)?;
+        match &c.kind {
+            CheatKind::Toggle { original_bytes, target, enabled, .. } => {
+                if *enabled && !original_bytes.is_empty() {
+                    Some((original_bytes.clone(), *target))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Set the active value scan.
@@ -727,6 +793,8 @@ mod tests {
                 },
                 target: 0x200,
                 enabled: false,
+                original_bytes: Vec::new(),
+                cave_addr: 0,
             },
             None,
             None,

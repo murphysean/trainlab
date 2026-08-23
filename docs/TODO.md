@@ -349,6 +349,14 @@ D9 for the reasoning.
 
 ---
 
+## See also
+
+- **`docs/CODE_REVIEW.md`** — the 2026-08-23 architecture / frontend / YAML
+  intake review (findings, with severity and file:line evidence).
+- **`docs/CODE_REVIEW_FIXES.md`** — the task-tracked fix plan (T-100+) for the
+  correctness and consistency issues found in that review. Unlike the items
+  above (new capability), those fix existing behavior.
+
 ## Notes on dependencies
 
 - Add `windows-sys` for the Windows memory backend + injection.
