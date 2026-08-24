@@ -99,7 +99,10 @@ pub unsafe extern "system" fn hooked_present(
         }
     }
 
-    // 3. Call original Present trampoline
+    // 3. Run frame-synchronous cheat value pinning cadence
+    super::overlay::execute_pinning_cadence();
+
+    // 4. Call original Present trampoline
     let orig = ORIGINAL_PRESENT.load(Ordering::Relaxed);
     if !orig.is_null() {
         let orig_fn: FnPresent = unsafe { std::mem::transmute(orig) };

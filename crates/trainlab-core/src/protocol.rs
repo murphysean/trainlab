@@ -7,6 +7,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Envelope for multiplexed messages across the single full-duplex IPC connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Message {
+    /// Request sent from GUI/Client to DLL with a unique correlation sequence ID.
+    Request { id: u64, req: Request },
+    /// Response returned from DLL to GUI/Client matching the request's sequence ID.
+    Response { id: u64, resp: Response },
+    /// Asynchronous notification pushed from DLL to GUI (e.g. overlay button press, game state event).
+    Notification(Notification),
+}
+
+/// Asynchronous push notification types emitted by the injected DLL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Notification {
+    /// In-game overlay cheat toggled directly via controller or on-screen overlay.
+    OverlayCheatToggled { id: u64, enabled: bool },
+    /// In-game overlay window visibility toggled (e.g. Select + Start).
+    OverlayVisibilityChanged { visible: bool },
+    /// Game state or render hook lifecycle notification.
+    Log { level: String, message: String },
+}
+
 /// A single request sent from the GUI/scanner to the injected DLL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
@@ -133,8 +155,12 @@ pub enum Request {
     PollHit,
     /// Query the status of in-game render loop hooking (DXGI/DX9/OpenGL) and input capture.
     GetRenderStatus,
+    /// Wait until the injected DLL has completed graphics/hook setup and is fully ready.
+    WaitForReady,
     /// Set the visibility of the in-game cheat overlay.
     SetOverlayVisible { visible: bool },
+    /// Sync active cheats from GUI to the in-game overlay & pinning loop.
+    SyncCheats { cheats: Vec<OverlayCheatDto> },
 }
 
 /// The response to a [`Request`].
@@ -229,13 +255,40 @@ pub enum Response {
         frame_count: u64,
         /// Whether the in-game overlay is currently visible.
         overlay_visible: bool,
+        /// Name of active input hook subsystem (e.g. "SDL2 GameController", "XInput", "DirectInput8", "RawInput (WM_INPUT)").
+        input_hook: String,
+        /// Total number of controller / hotkey combo toggle events recorded.
+        combo_count: u64,
         /// Third-party overlays detected in-process (e.g. Steam, OBS, Discord, RTSS).
         detected_overlays: Vec<String>,
     },
+    /// Reply to [`Request::WaitForReady`] confirming the injected DLL is fully initialized.
+    Ready {
+        api: String,
+        input_hook: String,
+        present_hooked: bool,
+        frame_count: u64,
+        combo_count: u64,
+    },
     /// Reply to [`Request::SetOverlayVisible`].
     OverlayVisibilitySet { visible: bool },
+    /// Reply to [`Request::SyncCheats`].
+    CheatsSynced { count: usize },
     /// An error occurred while handling the request.
     Error { message: String },
+}
+
+/// A serialized cheat representation sent to the injected in-game overlay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlayCheatDto {
+    pub id: u64,
+    pub label: String,
+    pub address: u64,
+    pub kind_str: String, // "toggle", "value", "button"
+    pub enabled: bool,
+    pub current_value: Option<String>,
+    pub hotkey: Option<String>,
+    pub pinned_bytes: Option<Vec<u8>>,
 }
 
 /// A single register value captured by a `CaptureReg` capture.

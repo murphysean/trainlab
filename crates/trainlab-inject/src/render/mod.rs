@@ -11,6 +11,9 @@ use std::sync::Mutex;
 mod dxgi;
 #[cfg(windows)]
 mod input;
+#[cfg(windows)]
+pub mod xinput;
+pub mod overlay;
 
 /// Global render and overlay state tracked in-process.
 pub struct RenderState {
@@ -18,6 +21,7 @@ pub struct RenderState {
     pub present_hooked: AtomicBool,
     pub wndproc_hooked: AtomicBool,
     pub frame_count: AtomicU64,
+    pub combo_press_count: AtomicU64,
     pub overlay_visible: AtomicBool,
     pub detected_overlays: Mutex<Vec<String>>,
 }
@@ -29,6 +33,7 @@ impl Default for RenderState {
             present_hooked: AtomicBool::new(false),
             wndproc_hooked: AtomicBool::new(false),
             frame_count: AtomicU64::new(0),
+            combo_press_count: AtomicU64::new(0),
             overlay_visible: AtomicBool::new(false),
             detected_overlays: Mutex::new(Vec::new()),
         }
@@ -40,6 +45,7 @@ pub static STATE: RenderState = RenderState {
     present_hooked: AtomicBool::new(false),
     wndproc_hooked: AtomicBool::new(false),
     frame_count: AtomicU64::new(0),
+    combo_press_count: AtomicU64::new(0),
     overlay_visible: AtomicBool::new(false),
     detected_overlays: Mutex::new(Vec::new()),
 };
@@ -94,19 +100,26 @@ pub fn init() {
         std::thread::spawn(|| {
             dxgi::init_dxgi_hook();
         });
+
+        // Spawn background thread for controller combo hook (Select + Start)
+        std::thread::spawn(|| {
+            xinput::init_xinput_hook();
+        });
     }
 }
 
 /// Returns a snapshot of the current render status for the protocol.
-pub fn get_status() -> (String, bool, bool, u64, bool, Vec<String>) {
+pub fn get_status() -> (String, bool, bool, u64, bool, String, u64, Vec<String>) {
     let api = STATE.api_name.lock().map(|s| s.clone()).unwrap_or_else(|_| "Unknown".into());
     let present_hooked = STATE.present_hooked.load(Ordering::Relaxed);
     let wndproc_hooked = STATE.wndproc_hooked.load(Ordering::Relaxed);
     let frame_count = STATE.frame_count.load(Ordering::Relaxed);
+    let combo_count = STATE.combo_press_count.load(Ordering::Relaxed);
     let overlay_visible = STATE.overlay_visible.load(Ordering::Relaxed);
+    let input_hook = xinput::get_active_input_hook();
     let overlays = STATE.detected_overlays.lock().map(|s| s.clone()).unwrap_or_default();
 
-    (api, present_hooked, wndproc_hooked, frame_count, overlay_visible, overlays)
+    (api, present_hooked, wndproc_hooked, frame_count, overlay_visible, input_hook, combo_count, overlays)
 }
 
 /// Set overlay visibility.

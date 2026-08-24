@@ -6,10 +6,13 @@
 //! (Steam Deck / Steam machine use case). This module centralizes that logic
 //! and the low-level framed request/response over the DLL fast channel.
 
-use std::io::Write;
-use std::net::TcpStream;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
 
-use trainlab_core::protocol::{self, Request, Response};
+use trainlab_core::protocol::{self, Message, Request, Response};
 
 use crate::session::SharedSession;
 
@@ -17,42 +20,111 @@ use crate::session::SharedSession;
 const DEFAULT_DLL_HOST: &str = "127.0.0.1";
 const DEFAULT_DLL_PORT: u16 = 31337;
 
-/// Read a 4-byte length-prefixed frame from `stream`, returning the raw frame
-/// (length prefix + body) ready for `protocol::decode`.
-fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
-    use std::io::Read;
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|e| format!("read length error: {e}"))?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len == 0 || len > 64 * 1024 * 1024 {
-        return Err("bad frame length".into());
-    }
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .map_err(|e| format!("read body error: {e}"))?;
-    let mut full = Vec::with_capacity(4 + len);
-    full.extend_from_slice(&len_buf);
-    full.extend_from_slice(&body);
-    Ok(full)
+static NEXT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+struct PendingRequest {
+    tx: oneshot::Sender<Response>,
 }
 
-/// Send a request to the DLL listener at `(host, port)` and return the response.
-///
-/// Returns a `String` error on any connection/framing/decode failure.
+/// A thread-safe handle to the single persistent multiplexed IPC client.
+#[derive(Clone)]
+pub struct IpcClient {
+    tx: std::sync::mpsc::Sender<(u64, Request, oneshot::Sender<Response>)>,
+}
+
+static GLOBAL_CLIENT: Mutex<Option<(String, u16, IpcClient)>> = Mutex::new(None);
+
+impl IpcClient {
+    pub fn connect(host: String, port: u16) -> Result<Self, String> {
+        let (tx, rx) = std::sync::mpsc::channel::<(u64, Request, oneshot::Sender<Response>)>();
+        let target_addr = format!("{host}:{port}");
+
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            use std::net::ToSocketAddrs;
+
+            while let Ok((id, req, resp_tx)) = rx.recv() {
+                // Connect with short timeout
+                let mut resp_opt: Option<Response> = None;
+                if let Ok(mut addrs) = target_addr.to_socket_addrs() {
+                    if let Some(sock_addr) = addrs.next() {
+                        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(&sock_addr, Duration::from_millis(500)) {
+                            let _ = stream.set_nodelay(true);
+                            let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+                            let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+
+                            let msg = Message::Request { id, req };
+                            if let Ok(frame) = protocol::encode(&msg) {
+                                if stream.write_all(&frame).is_ok() {
+                                    let mut len_buf = [0u8; 4];
+                                    if stream.read_exact(&mut len_buf).is_ok() {
+                                        let len = u32::from_le_bytes(len_buf) as usize;
+                                        if len > 0 && len <= 64 * 1024 * 1024 {
+                                            let mut body = vec![0u8; len];
+                                            if stream.read_exact(&mut body).is_ok() {
+                                                let mut full = Vec::with_capacity(4 + len);
+                                                full.extend_from_slice(&len_buf);
+                                                full.extend_from_slice(&body);
+                                                if let Ok(msg) = protocol::decode::<Message>(&full) {
+                                                    if let Message::Response { resp, .. } = msg {
+                                                        resp_opt = Some(resp);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let resp = resp_opt.unwrap_or_else(|| Response::Error {
+                    message: "IPC request failed / timeout".into(),
+                });
+                let _ = resp_tx.send(resp);
+            }
+        });
+
+        Ok(Self { tx })
+    }
+
+    pub fn request(&self, req: Request) -> Result<Response, String> {
+        let seq = NEXT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let (resp_tx, mut resp_rx) = oneshot::channel();
+        self.tx
+            .send((seq, req, resp_tx))
+            .map_err(|e| format!("IPC mailbox send failed: {e}"))?;
+        
+        // Non-infinite blocking with timeout so caller NEVER wedges
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(2000) {
+            match resp_rx.try_recv() {
+                Ok(resp) => return Ok(resp),
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    return Err("IPC channel closed".into());
+                }
+            }
+        }
+        Err("IPC request timed out".into())
+    }
+}
+
+/// Send a request to the DLL listener at `(host, port)` via the single multiplexed channel.
 pub fn request_at(host: &str, port: u16, req: &Request) -> Result<Response, String> {
-    let addr = format!("{host}:{port}");
-    let mut stream = TcpStream::connect(&addr)
-        .map_err(|e| format!("connect to DLL ({addr}) failed: {e}"))?;
-    let _ = stream.set_nodelay(true);
-    let frame = protocol::encode(req).map_err(|e| format!("encode error: {e}"))?;
-    stream
-        .write_all(&frame)
-        .map_err(|e| format!("write error: {e}"))?;
-    let full = read_frame(&mut stream)?;
-    protocol::decode::<Response>(&full).map_err(|e| format!("decode error: {e}"))
+    let mut lock = GLOBAL_CLIENT.lock().unwrap();
+    let client = match &*lock {
+        Some((h, p, c)) if h == host && *p == port => c.clone(),
+        _ => {
+            let c = IpcClient::connect(host.to_string(), port)?;
+            *lock = Some((host.to_string(), port, c.clone()));
+            c
+        }
+    };
+    drop(lock);
+    client.request(req.clone())
 }
 
 /// Send a request to the DLL using the session's configured host/port.

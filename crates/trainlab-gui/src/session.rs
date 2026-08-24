@@ -616,6 +616,30 @@ impl SessionState {
         }
     }
 
+    /// Export session cheats as lightweight DTOs for the in-game overlay.
+    pub fn export_overlay_cheats(&self) -> Vec<trainlab_core::protocol::OverlayCheatDto> {
+        self.cheats
+            .iter()
+            .map(|c| {
+                let (address, kind_str, enabled) = match &c.kind {
+                    CheatKind::Value { address, .. } => (*address, "value".to_string(), false),
+                    CheatKind::Toggle { target, enabled, .. } => (*target, "toggle".to_string(), *enabled),
+                    CheatKind::Button { .. } => (0, "button".to_string(), false),
+                };
+                trainlab_core::protocol::OverlayCheatDto {
+                    id: c.id,
+                    label: c.label.clone(),
+                    address,
+                    kind_str,
+                    enabled,
+                    current_value: None,
+                    hotkey: c.hotkey.clone(),
+                    pinned_bytes: None,
+                }
+            })
+            .collect()
+    }
+
     /// Set the active value scan.
     pub fn set_scan(&mut self, scan: trainlab_core::scan::Scan) {
         let count = scan.len();

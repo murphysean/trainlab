@@ -86,6 +86,7 @@ struct TrainlabApp {
     // Cheats panel: editable value strings keyed by cheat id, editable hotkey strings,
     // active Win32 registered hotkeys, and a flag to show the panel.
     cheat_values: std::collections::HashMap<u64, String>,
+    cheat_values_cache: std::collections::HashMap<u64, (std::time::Instant, Option<Vec<u8>>)>,
     cheat_hotkey_inputs: std::collections::HashMap<u64, String>,
     registered_hotkeys: std::collections::HashMap<i32, RegisteredHotkey>,
     show_cheats: bool,
@@ -104,6 +105,8 @@ struct TrainlabApp {
     auto_init: bool,
     // Window visibility state for toggle hotkey
     window_visible: bool,
+    // In-flight attachment / initialization indicator & lock
+    is_attaching: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +165,7 @@ impl TrainlabApp {
             aob_scans: vec![AobScan::default()],
             regions: Vec::new(),
             cheat_values: std::collections::HashMap::new(),
+            cheat_values_cache: std::collections::HashMap::new(),
             cheat_hotkey_inputs: std::collections::HashMap::new(),
             registered_hotkeys: std::collections::HashMap::new(),
             show_cheats: true,
@@ -174,8 +178,10 @@ impl TrainlabApp {
             active_tab: ActiveTab::Cheats,
             auto_init: true,
             window_visible: true,
+            is_attaching: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         app.auto_match_profile();
+        app.sync_registered_hotkeys();
         app
     }
 
@@ -217,38 +223,77 @@ impl TrainlabApp {
 
     /// Find the game process, inject the DLL, then connect to its listener.
     /// Routes through the shared controller so the MCP server can do the same
-    /// flow remotely.
+    /// flow remotely. Runs on a background thread so the GUI UI never freezes.
     fn inject_and_connect(&mut self) {
-        self.sync_session();
-        // Resolve the DLL path relative to this exe's directory so the DLL can
-        // live side-by-side with the trainer.
-        {
-            let dll_path = resolve_dll_path(&self.dll_path);
-            if let Ok(mut s) = self.session.lock() {
-                s.set_dll_path(dll_path);
-            }
+        use std::sync::atomic::Ordering;
+        if self.is_attaching.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            // Already an in-flight attach / injection operation running!
+            return;
         }
-        match controller::find_inject_connect(&self.session) {
-            Ok(version) => {
-                self.log(format!("connected, inject v{version}"));
-                // T-140: Only auto-run profile init if auto_init is enabled.
-                if self.auto_init {
-                    let profiles = profile::discover_profiles();
-                    if let Some((file, _p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
-                        match mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, true) {
-                            Ok(detail) => self.log(format!("profile '{file}' loaded: {detail}")),
-                            Err(e) => self.log(format!("profile '{file}' load FAILED: {e}")),
+
+        self.sync_session();
+        let session = self.session.clone();
+        let auto_init = self.auto_init;
+        let game_name = self.game_name.clone();
+        let dll_path = resolve_dll_path(&self.dll_path);
+        let attaching_flag = self.is_attaching.clone();
+
+        if let Ok(mut s) = self.session.lock() {
+            s.set_dll_path(dll_path);
+            s.log_activity("UI", "attaching and injecting in background...");
+        }
+
+        std::thread::spawn(move || {
+            match controller::find_inject_connect(&session) {
+                Ok(version) => {
+                    if let Ok(mut s) = session.lock() {
+                        s.log_activity("UI", format!("connected, inject v{version} — awaiting DLL graphics & engine readiness..."));
+                    }
+
+                    // Explicit handshake: Wait for DLL graphics hooks / engine initialization to settle
+                    match controller::request(&session, &Request::WaitForReady) {
+                        Ok(Response::Ready { api, input_hook, present_hooked, frame_count, combo_count }) => {
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("UI", format!("DLL ready: {api} | Input: {input_hook} (present hooked: {present_hooked}, {frame_count} frames, {combo_count} combos)"));
+                            }
+                        }
+                        _ => {
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("UI", "DLL ready handshake completed (default)");
+                            }
+                        }
+                    }
+
+                    if auto_init {
+                        let profiles = profile::discover_profiles();
+                        if let Some((file, _p)) = profile::find_profile_for_game(&profiles, &game_name) {
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("UI", format!("starting sequential profile initialization for '{file}'..."));
+                            }
+                            match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(&file, true) {
+                                Ok(detail) => {
+                                    if let Ok(mut s) = session.lock() {
+                                        s.log_activity("UI", format!("profile '{file}' loaded: {detail}"));
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Ok(mut s) = session.lock() {
+                                        s.log_activity("UI", format!("profile '{file}' load FAILED: {e}"));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-            }
-            Err(e) => {
-                self.log(format!("attach failed: {e}"));
-                if let Ok(mut s) = self.session.lock() {
-                    s.set_connected(false);
+                Err(e) => {
+                    if let Ok(mut s) = session.lock() {
+                        s.log_activity("UI", format!("attach failed: {e}"));
+                        s.set_connected(false);
+                    }
                 }
             }
-        }
+            attaching_flag.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Render the Session panel: markers, undo log, and pending (staged)
@@ -296,14 +341,14 @@ impl TrainlabApp {
                         ui.label(format!("${label}"));
                         ui.label(format!("{addr:#x}"));
 
-                        // Read 8 bytes at marker address to display live interpretations (only if valid non-null address)
+                        // Read 8 bytes at marker address to display live interpretations (debounced cache)
                         let read_res = if *addr != 0 {
-                            self.request(&Request::Read { address: *addr, len: 8 })
+                            self.read_cached(*addr, 8)
                         } else {
                             None
                         };
                         match read_res {
-                            Some(Response::Read { data }) => {
+                            Some(data) => {
                                 let i32_val = if data.len() >= 4 {
                                     format!("{}", i32::from_le_bytes(data[..4].try_into().unwrap()))
                                 } else { "-".into() };
@@ -389,6 +434,23 @@ impl TrainlabApp {
                 });
             }
         }
+    }
+
+    /// Cached live reads to avoid firing blocking TCP read requests on every UI frame.
+    fn read_cached(&mut self, address: u64, len: usize) -> Option<Vec<u8>> {
+        let now = std::time::Instant::now();
+        if let Some((cached_time, cached_val)) = self.cheat_values_cache.get(&address) {
+            if now.duration_since(*cached_time) < std::time::Duration::from_millis(250) {
+                return cached_val.clone();
+            }
+        }
+        let r = self.request(&Request::Read { address, len });
+        let val = match r {
+            Some(Response::Read { data }) => Some(data),
+            _ => None,
+        };
+        self.cheat_values_cache.insert(address, (now, val.clone()));
+        val
     }
 
     /// Apply a confirmed pending op: write bytes / install cave / undo.
@@ -509,16 +571,9 @@ impl TrainlabApp {
             ui.horizontal(|ui| {
                 match &cheat.kind {
                     CheatKind::Value { address, value_type } => {
-                        // Live-read the current value.
+                        // Live-read the current value (debounced cache).
                         let current = self
-                            .request(&Request::Read {
-                                address: *address,
-                                len: value_type.size(),
-                            })
-                            .and_then(|r| match r {
-                                Response::Read { data } => Some(data),
-                                _ => None,
-                            })
+                            .read_cached(*address, value_type.size())
                             .map(|d| format_value(&d, *value_type))
                             .unwrap_or_else(|| "?".into());
 
@@ -636,9 +691,16 @@ impl TrainlabApp {
                     CheatKind::Button { commands } => {
                         if ui.button(format!("▶ {}", cheat.label)).clicked() {
                             self.log(format!("button '{}' clicked: running {} command(s)...", cheat.label, commands.len()));
-                            if let Err(e) = self.run_cheat_commands(commands) {
-                                self.log(format!("button '{}' failed: {e}", cheat.label));
-                            }
+                            let session = self.session.clone();
+                            let label = cheat.label.clone();
+                            let cmds = commands.clone();
+                            std::thread::spawn(move || {
+                                if let Err(e) = mcp::execute_profile_commands(&session, &cmds) {
+                                    if let Ok(mut s) = session.lock() {
+                                        s.log_activity("UI", format!("button '{label}' failed: {e}"));
+                                    }
+                                }
+                            });
                         }
                         if let Some(n) = &cheat.note {
                             ui.label(format!("({n})"));
@@ -661,7 +723,7 @@ impl TrainlabApp {
                         if let Ok(mut s) = self.session.lock() {
                             s.set_cheat_hotkey(cheat.id, None);
                         }
-                        self.sync_registered_hotkeys(ctx);
+                        self.sync_registered_hotkeys();
                         self.log(format!("cleared hotkey for '{}'", cheat.label));
                     } else {
                         match hotkeys::HotkeySpec::parse(&text) {
@@ -671,7 +733,7 @@ impl TrainlabApp {
                                     s.set_cheat_hotkey(cheat.id, Some(display.clone()));
                                 }
                                 *hk_field = display.clone();
-                                self.sync_registered_hotkeys(ctx);
+                                self.sync_registered_hotkeys();
                                 self.log(format!("bound '{}' to hotkey '{display}'", cheat.label));
                             }
                             Err(e) => {
@@ -685,7 +747,7 @@ impl TrainlabApp {
     }
 
     /// Synchronize Win32 RegisteredHotKeys with the cheats configured in the session.
-    fn sync_registered_hotkeys(&mut self, _ctx: &egui::Context) {
+    fn sync_registered_hotkeys(&mut self) {
         #[cfg(target_os = "windows")]
         {
             let raw_hwnd = 0isize; // NULL HWND registers global hotkey for current thread message loop
@@ -1270,8 +1332,6 @@ fn main() -> eframe::Result<()> {
 
 impl eframe::App for TrainlabApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.sync_registered_hotkeys(ctx);
-
         // Check window OS focus state to ensure controller / navigation inputs
         // only affect the GUI when the trainer window is focused.
         let is_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
@@ -1295,7 +1355,7 @@ impl eframe::App for TrainlabApp {
         }
 
         // Poll Win32 WM_HOTKEY message queue for global hotkeys (works even when window is hidden/unmapped)
-        while let Some(hotkey_id) = hotkeys::poll_wm_hotkey() {
+        if let Some(hotkey_id) = hotkeys::poll_wm_hotkey() {
             if hotkey_id == 9999 { // ID 9999 is the global window-toggle key ('J')
                 self.window_visible = !self.window_visible;
                 if self.window_visible {
@@ -1474,8 +1534,16 @@ impl eframe::App for TrainlabApp {
                         ui.checkbox(&mut self.auto_init, "Auto-run profile initialization commands on connect");
 
                         ui.add_space(5.0);
-                        if ui.button("🚀 Find & Inject DLL").clicked() {
-                            self.inject_and_connect();
+                        let attaching = self.is_attaching.load(std::sync::atomic::Ordering::Relaxed);
+                        if attaching {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.colored_label(egui::Color32::LIGHT_BLUE, "⏳ Injecting & Initializing Profile in background...");
+                            });
+                        } else {
+                            if ui.button("🚀 Find & Inject DLL").clicked() {
+                                self.inject_and_connect();
+                            }
                         }
                     });
 

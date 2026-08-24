@@ -121,6 +121,7 @@ pub fn start(port: u16) -> std::io::Result<u16> {
 /// disconnects.
 fn handle_connection(mut stream: TcpStream) {
     use std::io::Write;
+    use trainlab_core::protocol::Message;
     let mem = SelfProcess;
     loop {
         // Read the 4-byte length prefix.
@@ -140,6 +141,24 @@ fn handle_connection(mut stream: TcpStream) {
         frame.extend_from_slice(&len_buf);
         frame.extend_from_slice(&body);
 
+        // Try decoding as new multiplexed Message envelope first
+        if let Ok(msg) = protocol::decode::<Message>(&frame) {
+            match msg {
+                Message::Request { id, req } => {
+                    let resp = handle_request_guarded(&mem, req);
+                    let resp_msg = Message::Response { id, resp };
+                    if let Ok(out) = protocol::encode(&resp_msg) {
+                        if stream.write_all(&out).is_err() {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        // Fallback to legacy raw Request decoding for backwards compatibility
         let response = match protocol::decode::<Request>(&frame) {
             Ok(req) => handle_request_guarded(&mem, req),
             Err(e) => Response::Error {
@@ -387,7 +406,7 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             Err(e) => Response::Error { message: e },
         },
         Request::GetRenderStatus => {
-            let (api, present_hooked, wndproc_hooked, frame_count, overlay_visible, detected_overlays) =
+            let (api, present_hooked, wndproc_hooked, frame_count, overlay_visible, input_hook, combo_count, detected_overlays) =
                 render::get_status();
             Response::RenderStatus {
                 api,
@@ -395,12 +414,37 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 wndproc_hooked,
                 frame_count,
                 overlay_visible,
+                input_hook,
+                combo_count,
                 detected_overlays,
+            }
+        }
+        Request::WaitForReady => {
+            // Wait up to 3 seconds for present hook to lock on if in progress
+            for _ in 0..30 {
+                let (_, present_hooked, _, frame_count, _, _, _, _) = render::get_status();
+                if present_hooked || frame_count > 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let (api, present_hooked, _, frame_count, _, input_hook, combo_count, _) = render::get_status();
+            Response::Ready {
+                api,
+                input_hook,
+                present_hooked,
+                frame_count,
+                combo_count,
             }
         }
         Request::SetOverlayVisible { visible } => {
             render::set_overlay_visible(visible);
             Response::OverlayVisibilitySet { visible }
+        }
+        Request::SyncCheats { cheats } => {
+            let count = cheats.len();
+            render::overlay::sync_cheats(cheats);
+            Response::CheatsSynced { count }
         }
     }
 }

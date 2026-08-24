@@ -1052,13 +1052,17 @@ impl TrainlabMcpServer {
                 wndproc_hooked,
                 frame_count,
                 overlay_visible,
+                input_hook,
+                combo_count,
                 detected_overlays,
             } => {
                 let report = serde_json::json!({
                     "api": api,
+                    "input_hook": input_hook,
                     "present_hooked": present_hooked,
                     "wndproc_hooked": wndproc_hooked,
                     "frame_count": frame_count,
+                    "combo_count": combo_count,
                     "overlay_visible": overlay_visible,
                     "detected_foreign_overlays": detected_overlays,
                 });
@@ -1305,6 +1309,16 @@ impl TrainlabMcpServer {
         });
         drop(s);
         self.request_repaint();
+
+        // Sync materialized cheats to the injected overlay
+        let overlay_cheats = if let Ok(s) = self.session.lock() {
+            s.export_overlay_cheats()
+        } else {
+            Vec::new()
+        };
+        if !overlay_cheats.is_empty() {
+            let _ = crate::controller::request(&self.session, &Request::SyncCheats { cheats: overlay_cheats });
+        }
 
         let mut text = format!(
             "loaded profile '{}' ({}): {} setup step(s) resolved, {} cheat(s) materialized\n",
@@ -2884,6 +2898,15 @@ impl TrainlabMcpServer {
                 // T-102: only now remove the op from pending (it succeeded).
                 if let Ok(mut s) = self.session.lock() {
                     s.take_pending(args.id);
+                }
+                // Sync updated cheats to the in-game overlay
+                let overlay_cheats = if let Ok(s) = self.session.lock() {
+                    s.export_overlay_cheats()
+                } else {
+                    Vec::new()
+                };
+                if !overlay_cheats.is_empty() {
+                    let _ = crate::controller::request(&self.session, &Request::SyncCheats { cheats: overlay_cheats });
                 }
                 // T-150/T-151: emit event + request repaint.
                 self.request_repaint();
