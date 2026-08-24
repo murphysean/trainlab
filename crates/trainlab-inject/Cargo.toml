@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 trainlab-core = { path = "../trainlab-core" }
 trainlab-cave = { path = "../trainlab-cave" }
+egui.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 libc = "0.2"

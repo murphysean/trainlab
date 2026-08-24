@@ -29,17 +29,28 @@ pub struct XINPUT_STATE {
 }
 
 // Button bitmasks
-pub const XINPUT_GAMEPAD_BACK: u16 = 0x0020;        // Select / View / Back
+pub const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
+pub const XINPUT_GAMEPAD_DPAD_DOWN: u16 = 0x0002;
+pub const XINPUT_GAMEPAD_DPAD_LEFT: u16 = 0x0004;
+pub const XINPUT_GAMEPAD_DPAD_RIGHT: u16 = 0x0008;
 pub const XINPUT_GAMEPAD_START: u16 = 0x0010;       // Start / Menu
+pub const XINPUT_GAMEPAD_BACK: u16 = 0x0020;        // Select / View / Back
 pub const XINPUT_GAMEPAD_LEFT_THUMB: u16 = 0x0040;  // L3 (Left Stick Click)
 pub const XINPUT_GAMEPAD_RIGHT_THUMB: u16 = 0x0080; // R3 (Right Stick Click)
+pub const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0100;
+pub const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0200;
+pub const XINPUT_GAMEPAD_A: u16 = 0x1000;           // South / Cross / Enter
+pub const XINPUT_GAMEPAD_B: u16 = 0x2000;           // East / Circle / Escape
+pub const XINPUT_GAMEPAD_X: u16 = 0x4000;
+pub const XINPUT_GAMEPAD_Y: u16 = 0x8000;
 
 type FnXInputGetState = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 
 static ORIGINAL_XINPUT_GET_STATE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static COMBO_WAS_DOWN: AtomicBool = AtomicBool::new(false);
+static PREV_BUTTONS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
-/// Hooked `XInputGetState` callback.
+/// Hooked `XInputGetState` callback with full input proxying to egui.
 pub unsafe extern "system" fn hooked_xinput_get_state(
     user_index: u32,
     state: *mut XINPUT_STATE,
@@ -67,7 +78,6 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
                 let visible = super::STATE.overlay_visible.load(Ordering::Relaxed);
                 tracing::info!("🎮 Controller combo #{count} toggled overlay: {visible}");
 
-                // Write directly to in-game inject log file for verification
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -77,8 +87,36 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
                     let _ = writeln!(f, "[COMBO] #{count} (back_start={back_start}, sticks={sticks}) -> overlay_visible={visible}");
                 }
             }
+            // Consume toggle buttons
+            unsafe {
+                (*state).Gamepad.wButtons = 0;
+            }
+            return ret;
         } else {
             COMBO_WAS_DOWN.store(false, Ordering::Relaxed);
+        }
+
+        let overlay_active = super::STATE.overlay_visible.load(Ordering::Relaxed);
+        if overlay_active {
+            // Overlay is ACTIVE: Translate buttons into egui keyboard navigation events
+            let prev = PREV_BUTTONS.swap(buttons, Ordering::Relaxed);
+            let just_pressed = buttons & !prev;
+
+            // Route to egui event queue
+            super::overlay::push_controller_buttons(just_pressed);
+
+            // MASK OUT game buttons so game receives ZERO input while overlay is open
+            unsafe {
+                (*state).Gamepad.wButtons = 0;
+                (*state).Gamepad.sThumbLX = 0;
+                (*state).Gamepad.sThumbLY = 0;
+                (*state).Gamepad.sThumbRX = 0;
+                (*state).Gamepad.sThumbRY = 0;
+                (*state).Gamepad.bLeftTrigger = 0;
+                (*state).Gamepad.bRightTrigger = 0;
+            }
+        } else {
+            PREV_BUTTONS.store(0, Ordering::Relaxed);
         }
     }
 

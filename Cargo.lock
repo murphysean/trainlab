@@ -4435,6 +4435,7 @@ dependencies = [
 name = "trainlab-inject"
 version = "0.1.0"
 dependencies = [
+ "egui",
  "libc",
  "tokio",
  "tracing",

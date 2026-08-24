@@ -13,6 +13,8 @@ mod dxgi;
 mod input;
 #[cfg(windows)]
 pub mod xinput;
+#[cfg(windows)]
+pub mod d3d11;
 pub mod overlay;
 
 /// Global render and overlay state tracked in-process.

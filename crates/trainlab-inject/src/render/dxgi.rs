@@ -102,7 +102,12 @@ pub unsafe extern "system" fn hooked_present(
     // 3. Run frame-synchronous cheat value pinning cadence
     super::overlay::execute_pinning_cadence();
 
-    // 4. Call original Present trampoline
+    // 4. Run Direct3D 11 in-game overlay render pass if overlay is active
+    if super::STATE.overlay_visible.load(Ordering::Relaxed) {
+        super::d3d11::render_overlay_frame(swapchain);
+    }
+
+    // 5. Call original Present trampoline
     let orig = ORIGINAL_PRESENT.load(Ordering::Relaxed);
     if !orig.is_null() {
         let orig_fn: FnPresent = unsafe { std::mem::transmute(orig) };
