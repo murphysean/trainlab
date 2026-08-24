@@ -620,7 +620,16 @@ pub struct SaveProfileArgs {
     /// "<game>.yaml".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
-}/// `#[tool_router(server_handler)]` generates the `ServerHandler` impl.
+}
+
+/// Arguments for [`set_overlay_visible`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SetOverlayVisibleArgs {
+    /// Whether the overlay is visible.
+    pub visible: bool,
+}
+
+/// `#[tool_router(server_handler)]` generates the `ServerHandler` impl.
 #[tool_router(server_handler)]
 impl TrainlabMcpServer {
     /// Simple connectivity check.
@@ -1030,6 +1039,58 @@ impl TrainlabMcpServer {
                 args.id
             )),
         ]))
+    }
+
+    /// List cheat profiles discovered in the `cheats/` directory.
+    #[tool(description = "Query in-game graphics API detection, DXGI frame presentation hook, and input capture status.")]
+    fn get_render_status(&self) -> Result<CallToolResult, ErrorData> {
+        let resp = crate::controller::request(&self.session, &Request::GetRenderStatus).map_err(err)?;
+        match resp {
+            Response::RenderStatus {
+                api,
+                present_hooked,
+                wndproc_hooked,
+                frame_count,
+                overlay_visible,
+                detected_overlays,
+            } => {
+                let report = serde_json::json!({
+                    "api": api,
+                    "present_hooked": present_hooked,
+                    "wndproc_hooked": wndproc_hooked,
+                    "frame_count": frame_count,
+                    "overlay_visible": overlay_visible,
+                    "detected_foreign_overlays": detected_overlays,
+                });
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(
+                        serde_json::to_string_pretty(&report).unwrap_or_default(),
+                    ),
+                ]))
+            }
+            Response::Error { message } => Err(err(message)),
+            other => Err(err(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    /// Set in-game cheat overlay visibility.
+    #[tool(description = "Set in-game cheat overlay visibility.")]
+    fn set_overlay_visible(
+        &self,
+        Parameters(args): Parameters<SetOverlayVisibleArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let resp = crate::controller::request(
+            &self.session,
+            &Request::SetOverlayVisible { visible: args.visible },
+        )
+        .map_err(err)?;
+        match resp {
+            Response::OverlayVisibilitySet { visible } => Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(format!("in-game overlay visibility set to {visible}")),
+            ])),
+            Response::Error { message } => Err(err(message)),
+            other => Err(err(format!("unexpected response: {other:?}"))),
+        }
     }
 
     /// List cheat profiles discovered in the `cheats/` directory.

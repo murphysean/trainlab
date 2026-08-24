@@ -29,6 +29,9 @@ mod watch;
 /// Non-stalling register capture registry + handlers.
 mod captures;
 
+/// In-game graphics API detection, swapchain present hook, and input capture.
+pub mod render;
+
 /// Non-Windows stubs so the crate still builds (and behaves gracefully) on
 /// Linux. All watchpoint/breakpoint requests return a "not supported" error.
 #[cfg(not(windows))]
@@ -81,6 +84,9 @@ pub fn start(port: u16) -> std::io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     let actual = listener.local_addr()?.port();
     tracing::info!(port = actual, "trainlab-inject listening");
+
+    // Initialize graphics API detection and render loop hooks
+    render::init();
 
     thread::Builder::new()
         .name("trainlab-inject".into())
@@ -380,6 +386,22 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             Ok(()) => Response::CaptureUninstalled { id },
             Err(e) => Response::Error { message: e },
         },
+        Request::GetRenderStatus => {
+            let (api, present_hooked, wndproc_hooked, frame_count, overlay_visible, detected_overlays) =
+                render::get_status();
+            Response::RenderStatus {
+                api,
+                present_hooked,
+                wndproc_hooked,
+                frame_count,
+                overlay_visible,
+                detected_overlays,
+            }
+        }
+        Request::SetOverlayVisible { visible } => {
+            render::set_overlay_visible(visible);
+            Response::OverlayVisibilitySet { visible }
+        }
     }
 }
 

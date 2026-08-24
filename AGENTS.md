@@ -27,23 +27,28 @@ cargo build --release --target x86_64-pc-windows-gnu --package trainlab-gui --pa
 - **Steam Machine IP**: `192.168.254.143`
 - **Target Folder**: `~/Documents/Trainers/Trainlab/`
 
-### Copying Binaries
+### Copying Binaries & Launch Scripts
 
-Use `scp` to transfer both built release artifacts to the target devices:
+Use `scp` to transfer the release artifacts and launcher script to the target devices:
 
 #### Deploy to Steam Deck:
 ```bash
 scp target/x86_64-pc-windows-gnu/release/trainlab-gui.exe \
     target/x86_64-pc-windows-gnu/release/trainlab_inject.dll \
+    scripts/launch.sh \
     deck@192.168.254.27:~/Documents/Trainers/Trainlab/
+ssh deck@192.168.254.27 "chmod +x ~/Documents/Trainers/Trainlab/launch.sh"
 ```
 
 #### Deploy to Steam Machine:
 ```bash
 scp target/x86_64-pc-windows-gnu/release/trainlab-gui.exe \
     target/x86_64-pc-windows-gnu/release/trainlab_inject.dll \
+    scripts/launch.sh \
     deck@192.168.254.143:~/Documents/Trainers/Trainlab/
+ssh deck@192.168.254.143 "chmod +x ~/Documents/Trainers/Trainlab/launch.sh"
 ```
+
 
 ---
 

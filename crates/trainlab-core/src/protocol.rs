@@ -131,6 +131,10 @@ pub enum Request {
     /// Poll for a hit from an armed watchpoint/breakpoint that fired since the
     /// last poll. Returns `None` if none is pending.
     PollHit,
+    /// Query the status of in-game render loop hooking (DXGI/DX9/OpenGL) and input capture.
+    GetRenderStatus,
+    /// Set the visibility of the in-game cheat overlay.
+    SetOverlayVisible { visible: bool },
 }
 
 /// The response to a [`Request`].
@@ -213,6 +217,23 @@ pub enum Response {
     },
     /// Reply to [`Request::UninstallCapture`].
     CaptureUninstalled { id: u64 },
+    /// Reply to [`Request::GetRenderStatus`].
+    RenderStatus {
+        /// Detected graphics API (e.g. "DXGI (Direct3D 11/12)", "Direct3D 9", "OpenGL", "None").
+        api: String,
+        /// Whether the frame presentation function (e.g. Present / EndScene) is actively hooked.
+        present_hooked: bool,
+        /// Whether the game's window procedure is hooked for keyboard/mouse input capture.
+        wndproc_hooked: bool,
+        /// Total number of rendered frames intercepted since injection.
+        frame_count: u64,
+        /// Whether the in-game overlay is currently visible.
+        overlay_visible: bool,
+        /// Third-party overlays detected in-process (e.g. Steam, OBS, Discord, RTSS).
+        detected_overlays: Vec<String>,
+    },
+    /// Reply to [`Request::SetOverlayVisible`].
+    OverlayVisibilitySet { visible: bool },
     /// An error occurred while handling the request.
     Error { message: String },
 }

@@ -34,23 +34,32 @@ Just run `trainlab-gui.exe`. It finds the game process by name, injects
 `trainlab_inject.dll`, and connects to the DLL's listener. You can override the
 target game with the `TRAINLAB_GAME` environment variable (see below).
 
-### Linux / SteamOS (Proton/Wine)
+### Linux / SteamOS (Steam Deck & Steam Machine)
 
-`trainlab-gui.exe` is a Windows binary; it runs under Wine/Proton. Launch it so
-it shares the game's Wine prefix, then it can inject the DLL via Windows APIs
-(`OpenProcess` / `CreateRemoteThread`). You can start it:
+`trainlab-gui.exe` is a Windows binary; it runs under Proton/Wine. To inject `trainlab_inject.dll`, it must share the game's Proton prefix and environment.
 
-- **from a terminal** inside the game's Wine prefix / Proton environment,
-- via a **custom script** (yours, or a community one) that starts the game and
-  the trainer together,
-- via **Steam Tinker Launch (STL)** as one of several options — STL can
-  *fork* the trainer alongside the game in the same prefix, or *inject* it
-  after the game loads. This is a convenience, not a requirement.
+#### Recommended Method: Steam Launch Options + Wrapper Script
 
-Because launch tooling on SteamOS/Linux evolves quickly and varies by setup, we
-deliberately don't ship launcher scripts — use whatever works for your
-environment. Community guides (Cheat Engine / Fling-style "how to run alongside
-a game") are a good starting point.
+We provide a helper script [`scripts/launch.sh`](../scripts/launch.sh) that starts the game, waits for Gamescope/Proton initialization, forks `trainlab-gui.exe` in the same Proton context, and automatically terminates the trainer when the game exits.
+
+1. Copy `scripts/launch.sh` to target devices (`~/Documents/Trainers/Trainlab/launch.sh`) and make it executable:
+   ```bash
+   chmod +x ~/Documents/Trainers/Trainlab/launch.sh
+   ```
+
+2. Open the Steam game properties (**Right-click Game** -> **Properties** -> **General** -> **Launch Options**).
+
+3. Set the launch options:
+   ```bash
+   /home/deck/Documents/Trainers/Trainlab/launch.sh %command%
+   ```
+
+*(Steam substitutes `%command%` with the game binary and default Proton environment arguments).*
+
+#### Alternative Methods
+- **Steam Tinker Launch (STL)**: Configure STL to fork `trainlab-gui.exe` as a custom / sidecar executable or USERSTART hook.
+- **Terminal / Custom Script**: Run inside the Wine prefix manually using `wine trainlab-gui.exe` or `$PROTON_BIN run trainlab-gui.exe`.
+
 
 ## Environment variables
 
