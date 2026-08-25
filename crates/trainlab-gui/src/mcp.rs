@@ -570,6 +570,15 @@ pub struct AddCheatArgs {
     /// For toggle cheats: jump style ("absolute" or "relative").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
+    /// For patch cheats (zero-alloc toggles): hex bytes to write when enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_bytes: Option<String>,
+    /// For patch cheats (zero-alloc toggles): original hex bytes to restore when disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_bytes: Option<String>,
+    /// For patch cheats: optional reference to named cave marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cave_ref: Option<String>,
     /// Optional hotkey binding (e.g. "Num 1", "Shift+Alt+K", "F1").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hotkey: Option<String>,
@@ -627,6 +636,37 @@ pub struct SaveProfileArgs {
 pub struct SetOverlayVisibleArgs {
     /// Whether the overlay is visible.
     pub visible: bool,
+}
+
+/// Arguments for [`alloc_code_cave`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AllocCodeCaveArgs {
+    /// Marker name to store the allocated cave address under (e.g. "cave_god_mode").
+    pub name: String,
+    /// Size in bytes to allocate (default 1024).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+    /// Optional target code address to allocate within relative jump distance (±2GB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_target: Option<String>,
+    /// Optional shellcode payload (hex string) to immediately write into the cave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// Optional human note / description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Arguments for [`emit_relative_jump`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EmitRelativeJumpArgs {
+    /// Source / patch address where the jump will be placed.
+    pub from: String,
+    /// Destination address (or cave marker) where the jump will land.
+    pub to: String,
+    /// Total instruction length to pad with NOPs (e.g. 5, 7, 8). Default 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pad_to_len: Option<usize>,
 }
 
 /// `#[tool_router(server_handler)]` generates the `ServerHandler` impl.
@@ -834,7 +874,37 @@ impl TrainlabMcpServer {
                     cave_addr: 0,
                 }
             }
-            other => return Err(err(format!("unknown cheat kind '{other}' (expected 'value' or 'toggle')"))),
+            "patch" => {
+                let target = args
+                    .target
+                    .as_deref()
+                    .ok_or_else(|| err("patch cheat requires 'target'"))?;
+                let target = parse_addr(&self.session, target)?;
+                let patch_bytes = parse_hex_bytes(
+                    args.patch_bytes
+                        .as_deref()
+                        .or(args.payload.as_deref())
+                        .ok_or_else(|| err("patch cheat requires 'patch_bytes' (or 'payload')"))?,
+                )?;
+                let original_bytes = if let Some(orig) = &args.original_bytes {
+                    parse_hex_bytes(orig)?
+                } else {
+                    // Auto-read current original bytes from the game if connected!
+                    let len = patch_bytes.len();
+                    match crate::controller::request(&self.session, &Request::Read { address: target, len }) {
+                        Ok(Response::Read { data }) => data,
+                        _ => Vec::new(),
+                    }
+                };
+                CheatKind::Patch {
+                    target,
+                    patch_bytes,
+                    original_bytes,
+                    enabled: false,
+                    cave_ref: args.cave_ref.clone(),
+                }
+            }
+            other => return Err(err(format!("unknown cheat kind '{other}' (expected 'value', 'toggle', or 'patch')"))),
         };
         let mut s = self
             .session
@@ -874,6 +944,10 @@ impl TrainlabMcpServer {
                     }
                     CheatKind::Toggle { target, enabled, .. } => {
                         format!("toggle @ {target:#x} ({})", if *enabled { "on" } else { "off" })
+                    }
+                    CheatKind::Patch { target, enabled, cave_ref, .. } => {
+                        let desc = cave_ref.as_deref().unwrap_or("fast patch");
+                        format!("patch @ {target:#x} ({}, {desc})", if *enabled { "on" } else { "off" })
                     }
                     CheatKind::Button { commands } => {
                         format!("button ({} cmd(s))", commands.len())
@@ -974,7 +1048,7 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<SetCheatToggleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         // Look up the toggle cheat.
-        let (target, hook, currently_enabled, original_bytes) = {
+        let kind = {
             let s = self
                 .session
                 .lock()
@@ -982,63 +1056,85 @@ impl TrainlabMcpServer {
             let c = s
                 .get_cheat(args.id)
                 .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
-            match &c.kind {
-                CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
-                    (*target, hook.clone(), *enabled, original_bytes.clone())
-                }
-                _ => {
-                    return Err(err(format!("cheat {} is not a toggle cheat", args.id)))
-                }
-            }
+            c.kind.clone()
         };
-        if currently_enabled == args.enabled {
-            return Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format!(
-                    "toggle cheat {} already {}",
-                    args.id,
-                    if args.enabled { "enabled" } else { "disabled" }
-                )),
-            ]));
+
+        match kind {
+            CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
+                if enabled == args.enabled {
+                    return Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text(format!(
+                            "toggle cheat {} already {}",
+                            args.id,
+                            if args.enabled { "enabled" } else { "disabled" }
+                        )),
+                    ]));
+                }
+                let mut s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
+                let pid = if args.enabled {
+                    s.stage_op_with_cheat(
+                        target,
+                        PendingKind::InstallCave { hook, marker: None },
+                        format!("enable toggle cheat {} at {:#x}", args.id, target),
+                        Some(args.id),
+                    )
+                } else {
+                    if original_bytes.is_empty() {
+                        return Err(err(format!(
+                            "toggle cheat {} has no stored original bytes; cannot restore",
+                            args.id
+                        )));
+                    }
+                    s.stage_op_with_cheat(
+                        target,
+                        PendingKind::Undo { original_bytes },
+                        format!("disable toggle cheat {} at {:#x}", args.id, target),
+                        Some(args.id),
+                    )
+                };
+                drop(s);
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "staged toggle change (pending id {pid}) for cheat {}. Call 'confirm_op' to apply.",
+                        args.id
+                    )),
+                ]))
+            }
+            CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+                if enabled == args.enabled {
+                    return Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text(format!(
+                            "patch cheat {} already {}",
+                            args.id,
+                            if args.enabled { "enabled" } else { "disabled" }
+                        )),
+                    ]));
+                }
+                let desc = cave_ref.as_deref().unwrap_or("fast patch");
+                let data = if args.enabled { patch_bytes } else { original_bytes };
+                let mut s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
+                let pid = s.stage_op_with_cheat(
+                    target,
+                    PendingKind::Write { data },
+                    format!("{} patch cheat {} at {:#x} ({desc})", if args.enabled { "enable" } else { "disable" }, args.id, target),
+                    Some(args.id),
+                );
+                drop(s);
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "staged patch toggle (pending id {pid}) for cheat {}. Call 'confirm_op' to apply.",
+                        args.id
+                    )),
+                ]))
+            }
+            _ => Err(err(format!("cheat {} is not a toggle or patch cheat", args.id))),
         }
-        // Stage the cave install (enable) or undo (disable) through the D8 gate.
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let pid = if args.enabled {
-            s.stage_op_with_cheat(
-                target,
-                PendingKind::InstallCave { hook, marker: None },
-                format!("enable toggle cheat {} at {:#x}", args.id, target),
-                Some(args.id),
-            )
-        } else {
-            // Disabling: restore the original bytes that were saved when the
-            // cave was installed. If no original bytes are stored (e.g. cave
-            // was installed by init_commands, not the toggle path), we can't
-            // cleanly restore via staging — error out.
-            if original_bytes.is_empty() {
-                return Err(err(format!(
-                    "toggle cheat {} has no stored original bytes; cannot restore (was the cave installed outside the toggle path?)",
-                    args.id
-                )));
-            }
-            s.stage_op_with_cheat(
-                target,
-                PendingKind::Undo {
-                    original_bytes,
-                },
-                format!("disable toggle cheat {} at {:#x}", args.id, target),
-                Some(args.id),
-            )
-        };
-        drop(s);
-        Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "staged toggle change (pending id {pid}) for cheat {}. Call 'confirm_op' to apply.",
-                args.id
-            )),
-        ]))
     }
 
     /// List cheat profiles discovered in the `cheats/` directory.
@@ -1288,6 +1384,21 @@ impl TrainlabMcpServer {
                         cave_addr: 0,
                     }
                 }
+                "patch" => {
+                    let target = resolve_cheat_address(&resolved, pc)?;
+                    let patch_bytes = parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?;
+                    let original_bytes = match crate::controller::request(&self.session, &Request::Read { address: target, len: patch_bytes.len() }) {
+                        Ok(Response::Read { data }) => data,
+                        _ => Vec::new(),
+                    };
+                    crate::session::CheatKind::Patch {
+                        target,
+                        patch_bytes,
+                        original_bytes,
+                        enabled: false,
+                        cave_ref: pc.hook.clone(),
+                    }
+                }
                 "button" => {
                     let cmds = pc.commands.clone().unwrap_or_default();
                     crate::session::CheatKind::Button { commands: cmds }
@@ -1388,6 +1499,9 @@ impl TrainlabMcpServer {
                             }
                         };
                         ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl)
+                    }
+                    crate::session::CheatKind::Patch { target, patch_bytes, original_bytes, cave_ref, .. } => {
+                        ("patch".to_string(), None, None, Some(format!("{target:#x}")), cave_ref.clone(), Some(hex_encode(patch_bytes)))
                     }
                     CheatKind::Button { commands } => {
                         ("button".to_string(), None, None, None, None, None)
@@ -2719,6 +2833,91 @@ impl TrainlabMcpServer {
         ]))
     }
 
+    /// Allocate an executable memory cave with optional payload and register it as a named marker.
+    /// This supports the upfront-allocation / zero-alloc toggle architecture for games like DRG: Survivor.
+    #[tool(description = "Allocate an executable memory cave block in the game process, optionally write initial payload shellcode/constants, and record it as a named marker (e.g. 'cave_god_mode'). Returns the allocated cave address.")]
+    fn alloc_code_cave(
+        &self,
+        Parameters(args): Parameters<AllocCodeCaveArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let size = args.size.unwrap_or(1024).max(64);
+        let resp = crate::controller::request(
+            &self.session,
+            &Request::Allocate { size, executable: true },
+        )
+        .map_err(err)?;
+        match resp {
+            Response::Allocate { address } => {
+                let mut payload_written = 0usize;
+                if let Some(pl_hex) = &args.payload {
+                    let bytes = parse_hex_bytes(pl_hex)?;
+                    if !bytes.is_empty() {
+                        let w_resp = crate::controller::request(
+                            &self.session,
+                            &Request::Write { address, data: bytes.clone() },
+                        )
+                        .map_err(err)?;
+                        match w_resp {
+                            Response::Write { bytes_written } => {
+                                payload_written = bytes_written;
+                            }
+                            Response::Error { message } => return Err(err(message)),
+                            _ => return Err(err("unexpected write response")),
+                        }
+                    }
+                }
+                let note = args.note.clone().unwrap_or_else(|| format!("Pre-allocated code cave ({size} bytes)"));
+                if let Ok(mut s) = self.session.lock() {
+                    let _ = s.set_marker(&args.name, address, Some(&note));
+                    s.log_activity("CAVE", format!("allocated code cave '${}' at {address:#x} ({size} bytes, {payload_written} payload bytes)", args.name));
+                }
+                self.request_repaint();
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "allocated code cave at {address:#x} (marker '${}', {size} bytes, {payload_written} bytes payload written)",
+                        args.name
+                    )),
+                ]))
+            }
+            Response::Error { message } => Err(err(message)),
+            other => Err(err(format!("unexpected response: {other:?}"))),
+        }
+    }
+
+    /// Calculate a relative jump (5-byte E9 rel32) from a patch site to a destination (or cave marker)
+    /// and optionally pad with 0x90 (NOP) bytes to match a target instruction length (e.g. 7 bytes).
+    #[tool(description = "Calculate relative jump bytes (E9 <rel32>) from 'from' to 'to' (or named cave marker), padded with NOPs up to 'pad_to_len'. Returns the exact hex string to use in patch_bytes.")]
+    fn emit_relative_jump(
+        &self,
+        Parameters(args): Parameters<EmitRelativeJumpArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let from = parse_addr(&self.session, &args.from)?;
+        let to = parse_addr(&self.session, &args.to)?;
+        let pad_len = args.pad_to_len.unwrap_or(5).max(5);
+
+        // RIP at the end of the 5-byte E9 instruction is (from + 5)
+        let rel_i64 = (to as i64) - (from as i64 + 5);
+        if rel_i64 < (i32::MIN as i64) || rel_i64 > (i32::MAX as i64) {
+            return Err(err(format!(
+                "relative jump distance ({rel_i64} bytes) exceeds 32-bit ±2GB range between {from:#x} and {to:#x}"
+            )));
+        }
+        let rel_i32 = rel_i64 as i32;
+        let mut bytes = vec![0xE9u8];
+        bytes.extend_from_slice(&rel_i32.to_le_bytes());
+
+        while bytes.len() < pad_len {
+            bytes.push(0x90); // NOP padding
+        }
+
+        let hex_str = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(format!(
+                "relative jump from {from:#x} to {to:#x} (padded to {pad_len} bytes):\nhex: \"{hex_str}\""
+            )),
+        ]))
+    }
+
     /// Stage an undo for human confirmation (D8).
     ///
     /// This *stages* the revert and returns a pending op id + preview; it does
@@ -2807,6 +3006,15 @@ impl TrainlabMcpServer {
                             .session
                             .lock()
                             .map_err(|_| err("session lock poisoned"))?;
+                        if let Some(cid) = cheat_id {
+                            // Toggle patch cheat state
+                            if let Some(c) = s.get_cheat(cid) {
+                                if let CheatKind::Patch { patch_bytes, .. } = &c.kind {
+                                    let is_enabling = data == patch_bytes;
+                                    s.set_cheat_toggle(cid, is_enabling);
+                                }
+                            }
+                        }
                         if !original.is_empty() {
                             let id = s.record_undo(
                                 address,

@@ -689,6 +689,37 @@ impl TrainlabApp {
                         }
                         ui.label(format!("@ {target:#x}"));
                     }
+                    CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+                        let mut on = *enabled;
+                        let desc = cave_ref.as_deref().unwrap_or("fast patch");
+                        if ui.checkbox(&mut on, &cheat.label).changed() {
+                            let bytes_to_write = if on { patch_bytes } else { original_bytes };
+                            if !bytes_to_write.is_empty() {
+                                let r = self.request(&Request::Write {
+                                    address: *target,
+                                    data: bytes_to_write.clone(),
+                                });
+                                match r {
+                                    Some(Response::Write { bytes_written }) => {
+                                        if let Ok(mut s) = self.session.lock() {
+                                            s.set_cheat_toggle(cheat.id, on);
+                                        }
+                                        self.log(format!(
+                                            "patch '{}' -> {} ({bytes_written} bytes @ {target:#x}, {desc})",
+                                            cheat.label,
+                                            if on { "ENABLED" } else { "DISABLED" }
+                                        ));
+                                    }
+                                    _ => self.log(format!(
+                                        "patch '{}' {} FAILED (@ {target:#x})",
+                                        cheat.label,
+                                        if on { "enable" } else { "disable" }
+                                    )),
+                                }
+                            }
+                        }
+                        ui.label(format!("@ {target:#x} ({desc})"));
+                    }
                     CheatKind::Button { commands } => {
                         if ui.button(format!("▶ {}", cheat.label)).clicked() {
                             self.log(format!("button '{}' clicked: running {} command(s)...", cheat.label, commands.len()));
@@ -861,6 +892,34 @@ impl TrainlabApp {
                             "hotkey toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
                             label
                         ));
+                    }
+                }
+            }
+            CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+                let new_state = !enabled;
+                let desc = cave_ref.as_deref().unwrap_or("fast patch");
+                let bytes_to_write = if new_state { patch_bytes } else { original_bytes };
+                if !bytes_to_write.is_empty() {
+                    let r = self.request(&Request::Write {
+                        address: target,
+                        data: bytes_to_write,
+                    });
+                    match r {
+                        Some(Response::Write { bytes_written }) => {
+                            if let Ok(mut s) = self.session.lock() {
+                                s.set_cheat_toggle(cheat_id, new_state);
+                            }
+                            self.log(format!(
+                                "hotkey toggled patch '{}' -> {} ({bytes_written} bytes @ {target:#x}, {desc})",
+                                label,
+                                if new_state { "ENABLED" } else { "DISABLED" }
+                            ));
+                        }
+                        _ => self.log(format!(
+                            "hotkey toggle patch '{}' {} FAILED (@ {target:#x})",
+                            label,
+                            if new_state { "enable" } else { "disable" }
+                        )),
                     }
                 }
             }

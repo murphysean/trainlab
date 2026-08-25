@@ -240,6 +240,7 @@ async fn get_cheats(State(state): State<ApiState>) -> Result<Json<Vec<CheatDto>>
     let cheats = s.list_cheats().into_iter().map(|c| {
         let (kind_str, enabled, val) = match &c.kind {
             crate::session::CheatKind::Toggle { enabled, .. } => ("toggle".to_string(), Some(*enabled), None),
+            crate::session::CheatKind::Patch { enabled, .. } => ("patch".to_string(), Some(*enabled), None),
             crate::session::CheatKind::Button { .. } => ("button".to_string(), None, None),
             crate::session::CheatKind::Value { value_type, .. } => ("value".to_string(), None, Some(format!("{value_type:?}"))),
         };

@@ -51,7 +51,7 @@ pub enum CheatKind {
         /// The value type (i32, f32, etc.).
         value_type: trainlab_core::scan::ValueType,
     },
-    /// A code-cave hook the user can toggle on/off.
+    /// A code-cave hook the user can toggle on/off (dynamic install/uninstall).
     Toggle {
         /// The cave hook to install/remove.
         hook: trainlab_core::cave_hook::CaveHook,
@@ -68,6 +68,21 @@ pub enum CheatKind {
         /// Zero if no cave is currently installed.
         #[allow(dead_code)]
         cave_addr: u64,
+    },
+    /// A pre-allocated / pre-configured code patch toggle (zero-alloc fast toggle).
+    /// Used for games like DRG: Survivor where caves are allocated at startup with named markers,
+    /// and the toggle simply writes `patch_bytes` (on) or `original_bytes` (off) to `target`.
+    Patch {
+        /// Target code address to patch.
+        target: u64,
+        /// Bytes to write when toggled ON (e.g. 5-byte/7-byte jump or NOPs).
+        patch_bytes: Vec<u8>,
+        /// Original bytes to restore when toggled OFF.
+        original_bytes: Vec<u8>,
+        /// Whether the patch is currently active.
+        enabled: bool,
+        /// Optional named cave marker or description.
+        cave_ref: Option<String>,
     },
     /// An action button that runs a sequence of commands when clicked.
     Button {
@@ -569,19 +584,32 @@ impl SessionState {
         self.next_cheat_id = 0;
     }
 
-    /// Set a toggle cheat's enabled state (used by the GUI/MCP to flip a cave).
+    /// Set a toggle cheat's enabled state (used by the GUI/MCP to flip a cave or patch).
     pub fn set_cheat_toggle(&mut self, id: u64, enabled: bool) -> bool {
         if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
             let label = c.label.clone();
-            if let CheatKind::Toggle { enabled: e, .. } = &mut c.kind {
-                *e = enabled;
-                self.event_bus.emit(crate::event::SessionEvent::CheatUpdated {
-                    id,
-                    label,
-                    enabled: Some(enabled),
-                    value: None,
-                });
-                return true;
+            match &mut c.kind {
+                CheatKind::Toggle { enabled: e, .. } => {
+                    *e = enabled;
+                    self.event_bus.emit(crate::event::SessionEvent::CheatUpdated {
+                        id,
+                        label,
+                        enabled: Some(enabled),
+                        value: None,
+                    });
+                    return true;
+                }
+                CheatKind::Patch { enabled: e, .. } => {
+                    *e = enabled;
+                    self.event_bus.emit(crate::event::SessionEvent::CheatUpdated {
+                        id,
+                        label,
+                        enabled: Some(enabled),
+                        value: None,
+                    });
+                    return true;
+                }
+                _ => {}
             }
         }
         false
@@ -612,6 +640,13 @@ impl SessionState {
                     None
                 }
             }
+            CheatKind::Patch { original_bytes, target, enabled, .. } => {
+                if *enabled && !original_bytes.is_empty() {
+                    Some((original_bytes.clone(), *target))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -624,6 +659,7 @@ impl SessionState {
                 let (address, kind_str, enabled) = match &c.kind {
                     CheatKind::Value { address, .. } => (*address, "value".to_string(), false),
                     CheatKind::Toggle { target, enabled, .. } => (*target, "toggle".to_string(), *enabled),
+                    CheatKind::Patch { target, enabled, .. } => (*target, "toggle".to_string(), *enabled),
                     CheatKind::Button { .. } => (0, "button".to_string(), false),
                 };
                 trainlab_core::protocol::OverlayCheatDto {
