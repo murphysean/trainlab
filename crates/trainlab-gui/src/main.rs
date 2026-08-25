@@ -524,6 +524,25 @@ impl TrainlabApp {
             }
             ui.separator();
             ui.checkbox(&mut self.auto_init, "Auto-run init on attach");
+
+            // Display profile metadata if matched
+            let profiles = profile::discover_profiles();
+            if let Some((_file, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
+                ui.separator();
+                let mut meta = Vec::new();
+                if let Some(gv) = &p.game_version {
+                    meta.push(format!("Game v{gv}"));
+                }
+                if let Some(d) = &p.date {
+                    meta.push(format!("📅 {d}"));
+                }
+                if !p.version.is_empty() {
+                    meta.push(format!("Profile v{}", p.version));
+                }
+                if !meta.is_empty() {
+                    ui.colored_label(egui::Color32::from_rgb(130, 200, 255), format!("({})", meta.join(" | ")));
+                }
+            }
         });
         if !self.show_cheats {
             return;

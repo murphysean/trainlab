@@ -25,6 +25,15 @@ pub struct GameProfile {
     /// Profile version (for sharing/patching).
     #[serde(default)]
     pub version: String,
+    /// Target game version this profile was built upon (e.g. "1.1.73p", "1.0.239p").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_version: Option<String>,
+    /// Date the profile was created / last verified (e.g. "2026-08-25").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    /// Profile author or source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     /// Setup steps that resolve base addresses for the current launch.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
