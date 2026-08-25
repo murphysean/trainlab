@@ -107,6 +107,8 @@ struct TrainlabApp {
     auto_init: bool,
     // Window visibility state for toggle hotkey
     window_visible: bool,
+    // Last broadcasted overlay visibility mask to avoid 20 Hz event spam
+    last_synced_mask: Option<bool>,
     // In-flight attachment / initialization indicator & lock
     is_attaching: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -180,6 +182,7 @@ impl TrainlabApp {
             active_tab: ActiveTab::Cheats,
             auto_init: true,
             window_visible: true,
+            last_synced_mask: None,
             is_attaching: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         app.auto_match_profile();
@@ -1479,12 +1482,15 @@ impl eframe::App for TrainlabApp {
         let is_focused = is_trainer_focused().unwrap_or_else(|| ctx.input(|i| i.viewport().focused.unwrap_or(true)));
 
         // Sync focus/visibility state to injected DLL so XInput controller inputs
-        // are masked from the background game while the trainer is focused.
+        // are masked from the background game only when state transitions.
         if self.connected {
             let active_mask = is_focused && self.window_visible;
-            controller::emit_event_to_dll(&self.session, trainlab_core::protocol::Event::OverlayVisibilityChanged {
-                visible: active_mask,
-            });
+            if self.last_synced_mask != Some(active_mask) {
+                self.last_synced_mask = Some(active_mask);
+                controller::emit_event_to_dll(&self.session, trainlab_core::protocol::Event::OverlayVisibilityChanged {
+                    visible: active_mask,
+                });
+            }
         }
 
         // Process remote window visibility commands from REST API / MCP / Web Dashboard
