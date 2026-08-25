@@ -1416,7 +1416,9 @@ impl TrainlabMcpServer {
                 "patch" => {
                     let target = resolve_cheat_address(&resolved, pc)?;
                     let patch_bytes = parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?;
-                    let original_bytes = match crate::controller::request(&self.session, &Request::Read { address: target, len: patch_bytes.len() }) {
+                    let host = s.dll_host().to_string();
+                    let port = s.dll_port();
+                    let original_bytes = match crate::controller::request_at(&host, port, &Request::Read { address: target, len: patch_bytes.len() }, Some(&self.session)) {
                         Ok(Response::Read { data }) => data,
                         _ => Vec::new(),
                     };
