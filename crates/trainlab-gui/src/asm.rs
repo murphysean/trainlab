@@ -28,20 +28,39 @@ pub fn assemble_text(
 
     let mut a = CodeAssembler::new(64).map_err(|e| format!("assembler init: {e}"))?;
     let mut labels_map: HashMap<String, CodeLabel> = HashMap::new();
+    let mut defined_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut referenced_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total_instructions = 0usize;
 
-    // Pre-create labels for any known symbols
+    // Pre-create labels for any known external session symbols
     for sym_name in symbols.keys() {
         let name = sym_name.trim().trim_start_matches('$').to_lowercase();
         if !labels_map.contains_key(&name) {
             let lbl = a.create_label();
-            labels_map.insert(name, lbl);
+            labels_map.insert(name.clone(), lbl);
+        }
+        defined_labels.insert(name);
+    }
+
+    let lines: Vec<&str> = asm_code.lines().collect();
+
+    // First pass: scan for all defined labels `label_name:`
+    for raw_line in &lines {
+        let line = strip_comments(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(label_name) = line.strip_suffix(':') {
+            let name = label_name.trim().to_lowercase();
+            if !labels_map.contains_key(&name) {
+                let lbl = a.create_label();
+                labels_map.insert(name.clone(), lbl);
+            }
+            defined_labels.insert(name);
         }
     }
 
-    // First pass: collect labels and parse lines
-    let lines: Vec<&str> = asm_code.lines().collect();
-
+    // Second pass: emit instructions and directives
     for raw_line in &lines {
         let line = strip_comments(raw_line).trim();
         if line.is_empty() {
@@ -51,10 +70,6 @@ pub fn assemble_text(
         // Check for label definition: `my_label:`
         if let Some(label_name) = line.strip_suffix(':') {
             let name = label_name.trim().to_lowercase();
-            if !labels_map.contains_key(&name) {
-                let lbl = a.create_label();
-                labels_map.insert(name.clone(), lbl);
-            }
             if let Some(lbl) = labels_map.get_mut(&name) {
                 a.set_label(lbl).map_err(|e| format!("set label '{name}': {e}"))?;
             }
@@ -82,8 +97,15 @@ pub fn assemble_text(
         }
 
         // Parse standard instruction: mnemonic op1, op2
-        parse_and_emit_instruction(&mut a, line, origin_rip, symbols, &mut labels_map)?;
+        parse_and_emit_instruction(&mut a, line, origin_rip, symbols, &mut labels_map, &mut referenced_labels)?;
         total_instructions += 1;
+    }
+
+    // Check for any referenced label that was not defined
+    for ref_lbl in &referenced_labels {
+        if !defined_labels.contains(ref_lbl) {
+            return Err(format!("unresolved label or marker '{ref_lbl}'"));
+        }
     }
 
     let assembled = a.assemble(origin_rip).map_err(|e| format!("assemble error: {e}"))?;
@@ -166,6 +188,7 @@ fn parse_and_emit_instruction(
     origin_rip: u64,
     symbols: &HashMap<String, u64>,
     labels: &mut HashMap<String, iced_x86::code_asm::CodeLabel>,
+    referenced_labels: &mut std::collections::HashSet<String>,
 ) -> Result<(), String> {
     use iced_x86::code_asm::*;
 
@@ -212,7 +235,8 @@ fn parse_and_emit_instruction(
                 return Ok(());
             }
             // Local label
-            let name = target.to_lowercase();
+            let name = target.trim().trim_start_matches('$').to_lowercase();
+            referenced_labels.insert(name.clone());
             let lbl = labels.entry(name.clone()).or_insert_with(|| a.create_label()).clone();
             a.jmp(lbl).map_err(|e| e.to_string())?;
         }
@@ -222,7 +246,7 @@ fn parse_and_emit_instruction(
             if let Ok(src) = parse_xmm(args[1]) {
                 a.mulss(dst, src).map_err(|e| e.to_string())?;
             } else {
-                let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                 a.mulss(dst, mem).map_err(|e| e.to_string())?;
             }
         }
@@ -232,7 +256,7 @@ fn parse_and_emit_instruction(
             if let Ok(src) = parse_xmm(args[1]) {
                 a.divss(dst, src).map_err(|e| e.to_string())?;
             } else {
-                let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                 a.divss(dst, mem).map_err(|e| e.to_string())?;
             }
         }
@@ -242,7 +266,7 @@ fn parse_and_emit_instruction(
             if let Ok(src) = parse_xmm(args[1]) {
                 a.addss(dst, src).map_err(|e| e.to_string())?;
             } else {
-                let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                 a.addss(dst, mem).map_err(|e| e.to_string())?;
             }
         }
@@ -252,7 +276,7 @@ fn parse_and_emit_instruction(
             if let Ok(src) = parse_xmm(args[1]) {
                 a.subss(dst, src).map_err(|e| e.to_string())?;
             } else {
-                let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                 a.subss(dst, mem).map_err(|e| e.to_string())?;
             }
         }
@@ -262,11 +286,11 @@ fn parse_and_emit_instruction(
                 if let Ok(src) = parse_xmm(args[1]) {
                     a.movss(dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.movss(dst, mem).map_err(|e| e.to_string())?;
                 }
             } else {
-                let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a)?;
+                let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
                 let src = parse_xmm(args[1])?;
                 a.movss(dst_mem, src).map_err(|e| e.to_string())?;
             }
@@ -276,7 +300,7 @@ fn parse_and_emit_instruction(
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.mov(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a) {
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
                     a.mov(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.mov(dst, imm).map_err(|e| e.to_string())?;
@@ -286,14 +310,14 @@ fn parse_and_emit_instruction(
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.mov(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a) {
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
                     a.mov(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.mov(dst, imm as u32).map_err(|e| e.to_string())?;
                 } else {
                     return Err(format!("unknown source operand for mov: {}", args[1]));
                 }
-            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a) {
+            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.mov(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr32(args[1]) {
@@ -413,6 +437,7 @@ fn parse_mem(
     origin_rip: u64,
     labels: &mut HashMap<String, iced_x86::code_asm::CodeLabel>,
     a: &mut iced_x86::code_asm::CodeAssembler,
+    referenced_labels: &mut std::collections::HashSet<String>,
 ) -> Result<iced_x86::code_asm::AsmMemoryOperand, String> {
     use iced_x86::code_asm::*;
 
@@ -429,12 +454,14 @@ fn parse_mem(
     if let Some(stripped) = inner.strip_prefix("rip +").or_else(|| inner.strip_prefix("RIP +")).or_else(|| inner.strip_prefix("rip+")).or_else(|| inner.strip_prefix("RIP+")) {
         let trimmed = stripped.trim();
         let sym_name = trimmed.trim_start_matches('$').to_lowercase();
+        referenced_labels.insert(sym_name.clone());
         let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
         return Ok(dword_ptr(lbl));
     }
     if let Some(stripped) = inner.strip_prefix("rip -").or_else(|| inner.strip_prefix("RIP -")).or_else(|| inner.strip_prefix("rip-")).or_else(|| inner.strip_prefix("RIP-")) {
         let trimmed = stripped.trim();
         let sym_name = trimmed.trim_start_matches('$').to_lowercase();
+        referenced_labels.insert(sym_name.clone());
         let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
         return Ok(dword_ptr(lbl));
     }
@@ -598,5 +625,19 @@ mod ce_verbatim_porting {
     fn freeze_droppod_single_instruction() {
         let r = assemble_text("inc eax", 0x140000000, &HashMap::new()).unwrap();
         assert_eq!(r.hex, "ff c0", "inc eax must be FF C0, got {}", r.hex);
+    }
+
+    #[test]
+    fn unresolved_label_fails_with_hard_error() {
+        // [rip + typoLabel] where typoLabel is never defined anywhere
+        let code = r#"
+            miningSpeedValue:
+            dd (float)4.0
+            divss xmm2, [rip + miningSpeedValTypo]
+        "#;
+        let r = assemble_text(code, 0x140000000, &HashMap::new());
+        assert!(r.is_err(), "expected unresolved label error, but succeeded with hex: {:?}", r.unwrap().hex);
+        let err_msg = r.unwrap_err();
+        assert!(err_msg.contains("unresolved label or marker 'miningspeedvaltypo'"), "unexpected error msg: {err_msg}");
     }
 }
