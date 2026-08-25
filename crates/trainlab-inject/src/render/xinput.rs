@@ -226,17 +226,21 @@ pub fn init_xinput_hook() {
                 }
             }
 
-            // Tier 2: Try XInput hooks (ONLY if naturally loaded by the game binary)
+            // Tier 2: Try XInput hooks across all known XInput dll names
             let xinput_dlls = [
                 b"xinput1_4.dll\0".as_ptr(),
                 b"xinput1_3.dll\0".as_ptr(),
+                b"xinput1_2.dll\0".as_ptr(),
+                b"xinput1_1.dll\0".as_ptr(),
                 b"xinput9_1_0.dll\0".as_ptr(),
             ];
 
             for dll_name in xinput_dlls {
                 let hmod = GetModuleHandleA(dll_name);
                 if !hmod.is_null() {
-                    let fn_ptr = GetProcAddress(hmod, b"XInputGetState\0".as_ptr());
+                    // Try by name first, then by secret ordinal 100 (which Unity & Steam frequently bind directly)
+                    let fn_ptr = GetProcAddress(hmod, b"XInputGetState\0".as_ptr())
+                        .or_else(|| GetProcAddress(hmod, 100 as *const u8));
                     if let Some(target_fn) = fn_ptr {
                         let target_u64 = target_fn as u64;
                         let callback_addr = hooked_xinput_get_state as *const () as u64;
