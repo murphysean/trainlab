@@ -1620,10 +1620,12 @@ impl TrainlabMcpServer {
                     }
                 }
             }
-            // Validate hook kind if present.
+            // Validate hook kind if present (for toggle, must be trampoline/override; for patch, it's a cave marker ref).
             if let Some(h) = &pc.hook {
-                if h != "trampoline" && h != "override" {
-                    errors.push(format!("cheat '{}': unknown hook '{}' (expected 'trampoline' or 'override')", pc.label, h));
+                if pc.kind.eq_ignore_ascii_case("toggle") {
+                    if h != "trampoline" && h != "override" {
+                        errors.push(format!("cheat '{}': unknown hook '{}' (expected 'trampoline' or 'override')", pc.label, h));
+                    }
                 }
             }
             // Validate jump style if present.
