@@ -1532,36 +1532,8 @@ impl eframe::App for TrainlabApp {
         // T-163: The global hotkey (ID 9999, 'J') already handles window toggle.
         // The focused 'J' handler was removed to prevent double-toggle.
 
-        // Handle tab switching & controller navigation if the window is focused
-        // and the user is NOT currently typing into a text field (ctx.wants_keyboard_input()).
-        if is_focused && !ctx.wants_keyboard_input() {
-            // Check XInput Controller (LB / RB to cycle tabs, B to background)
-            if let Some(ctrl) = xinput_poll::poll_controller() {
-                if ctrl.tab_next {
-                    self.active_tab = match self.active_tab {
-                        ActiveTab::Cheats => ActiveTab::MemoryScan,
-                        ActiveTab::MemoryScan => ActiveTab::TaggedMarkers,
-                        ActiveTab::TaggedMarkers => ActiveTab::PointersInspection,
-                        ActiveTab::PointersInspection => ActiveTab::RunApplications,
-                        ActiveTab::RunApplications => ActiveTab::ActivityLog,
-                        ActiveTab::ActivityLog => ActiveTab::Cheats,
-                    };
-                } else if ctrl.tab_prev {
-                    self.active_tab = match self.active_tab {
-                        ActiveTab::Cheats => ActiveTab::ActivityLog,
-                        ActiveTab::MemoryScan => ActiveTab::Cheats,
-                        ActiveTab::TaggedMarkers => ActiveTab::MemoryScan,
-                        ActiveTab::PointersInspection => ActiveTab::TaggedMarkers,
-                        ActiveTab::RunApplications => ActiveTab::PointersInspection,
-                        ActiveTab::ActivityLog => ActiveTab::RunApplications,
-                    };
-                } else if ctrl.back_action {
-                    self.window_visible = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-            }
-
+        // Handle keyboard tab switching (PageUp/PageDown, Q/E) when user is not typing in a text field.
+        if !ctx.wants_keyboard_input() {
             ctx.input(|i| {
                 if i.key_pressed(egui::Key::Escape) {
                     self.window_visible = false;
