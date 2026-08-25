@@ -30,6 +30,15 @@ pub fn assemble_text(
     let mut labels_map: HashMap<String, CodeLabel> = HashMap::new();
     let mut total_instructions = 0usize;
 
+    // Pre-create labels for any known symbols
+    for sym_name in symbols.keys() {
+        let name = sym_name.trim().trim_start_matches('$').to_lowercase();
+        if !labels_map.contains_key(&name) {
+            let lbl = a.create_label();
+            labels_map.insert(name, lbl);
+        }
+    }
+
     // First pass: collect labels and parse lines
     let lines: Vec<&str> = asm_code.lines().collect();
 
@@ -213,7 +222,7 @@ fn parse_and_emit_instruction(
             if let Ok(src) = parse_xmm(args[1]) {
                 a.mulss(dst, src).map_err(|e| e.to_string())?;
             } else {
-                let mem = parse_mem(args[1], symbols, origin_rip)?;
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
                 a.mulss(dst, mem).map_err(|e| e.to_string())?;
             }
         }
@@ -223,7 +232,7 @@ fn parse_and_emit_instruction(
             if let Ok(src) = parse_xmm(args[1]) {
                 a.divss(dst, src).map_err(|e| e.to_string())?;
             } else {
-                let mem = parse_mem(args[1], symbols, origin_rip)?;
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
                 a.divss(dst, mem).map_err(|e| e.to_string())?;
             }
         }
@@ -233,7 +242,7 @@ fn parse_and_emit_instruction(
             if let Ok(src) = parse_xmm(args[1]) {
                 a.addss(dst, src).map_err(|e| e.to_string())?;
             } else {
-                let mem = parse_mem(args[1], symbols, origin_rip)?;
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
                 a.addss(dst, mem).map_err(|e| e.to_string())?;
             }
         }
@@ -243,7 +252,7 @@ fn parse_and_emit_instruction(
             if let Ok(src) = parse_xmm(args[1]) {
                 a.subss(dst, src).map_err(|e| e.to_string())?;
             } else {
-                let mem = parse_mem(args[1], symbols, origin_rip)?;
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
                 a.subss(dst, mem).map_err(|e| e.to_string())?;
             }
         }
@@ -253,11 +262,11 @@ fn parse_and_emit_instruction(
                 if let Ok(src) = parse_xmm(args[1]) {
                     a.movss(dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip)?;
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a)?;
                     a.movss(dst, mem).map_err(|e| e.to_string())?;
                 }
             } else {
-                let dst_mem = parse_mem(args[0], symbols, origin_rip)?;
+                let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a)?;
                 let src = parse_xmm(args[1])?;
                 a.movss(dst_mem, src).map_err(|e| e.to_string())?;
             }
@@ -267,7 +276,7 @@ fn parse_and_emit_instruction(
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.mov(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip) {
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a) {
                     a.mov(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.mov(dst, imm).map_err(|e| e.to_string())?;
@@ -277,14 +286,14 @@ fn parse_and_emit_instruction(
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.mov(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip) {
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a) {
                     a.mov(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.mov(dst, imm as u32).map_err(|e| e.to_string())?;
                 } else {
                     return Err(format!("unknown source operand for mov: {}", args[1]));
                 }
-            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip) {
+            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.mov(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr32(args[1]) {
@@ -401,7 +410,9 @@ fn parse_gpr32(s: &str) -> Result<iced_x86::code_asm::AsmRegister32, String> {
 fn parse_mem(
     s: &str,
     symbols: &HashMap<String, u64>,
-    _origin_rip: u64,
+    origin_rip: u64,
+    labels: &mut HashMap<String, iced_x86::code_asm::CodeLabel>,
+    a: &mut iced_x86::code_asm::CodeAssembler,
 ) -> Result<iced_x86::code_asm::AsmMemoryOperand, String> {
     use iced_x86::code_asm::*;
 
@@ -413,6 +424,20 @@ fn parse_mem(
     };
 
     let inner = inner.trim();
+
+    // Check for RIP-relative addressing: `[rip + ...]` or `[rip - ...]`
+    if let Some(stripped) = inner.strip_prefix("rip +").or_else(|| inner.strip_prefix("RIP +")).or_else(|| inner.strip_prefix("rip+")).or_else(|| inner.strip_prefix("RIP+")) {
+        let trimmed = stripped.trim();
+        let sym_name = trimmed.trim_start_matches('$').to_lowercase();
+        let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
+        return Ok(dword_ptr(lbl));
+    }
+    if let Some(stripped) = inner.strip_prefix("rip -").or_else(|| inner.strip_prefix("RIP -")).or_else(|| inner.strip_prefix("rip-")).or_else(|| inner.strip_prefix("RIP-")) {
+        let trimmed = stripped.trim();
+        let sym_name = trimmed.trim_start_matches('$').to_lowercase();
+        let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
+        return Ok(dword_ptr(lbl));
+    }
 
     // Check for base + offset, e.g. `rax+0x10` or `rax-0x8` or `rbx + 0x190`
     if let Some((reg_str, off_str)) = inner.split_once('+') {
@@ -465,6 +490,31 @@ mod tests {
         assert!(!block.bytes.is_empty());
         // Verify float 4.0 bytes at the beginning: 00 00 80 40
         assert_eq!(&block.bytes[0..4], &[0x00, 0x00, 0x80, 0x40]);
+    }
+
+    #[test]
+    fn test_assemble_rip_relative_memory_operand() {
+        let mut symbols = HashMap::new();
+        symbols.insert("return_addr".to_string(), 0x140001020);
+
+        let code = r#"
+            mining_speed_const:
+            dd (float)4.0
+
+            mulss xmm1, [rip + mining_speed_const]
+            jmp $return_addr
+        "#;
+
+        let res = assemble_text(code, 0x140001000, &symbols);
+        assert!(res.is_ok(), "assemble error: {:?}", res.err());
+        let block = res.unwrap();
+        assert!(!block.bytes.is_empty());
+        // Verify decoded instructions contains RIP-relative memory references
+        // The first 4 bytes are the float constant `dd (float)4.0` (00 00 80 40).
+        // Disassemble the instructions starting after the constant at 0x140001004:
+        let disasm = trainlab_core::disasm::disassemble(0x140001004, &block.bytes[4..], None);
+        println!("Disasm lines:\n{}", disasm.join("\n"));
+        assert!(disasm.iter().any(|line| line.contains("mulss") && (line.contains("[rel") || line.contains("[rip") || line.contains("[140001000"))));
     }
 }
 
