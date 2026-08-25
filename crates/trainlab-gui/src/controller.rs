@@ -159,6 +159,11 @@ fn handle_inbound_event(session: &SharedSession, event: Event) {
                 s.log_activity("OVERLAY", format!("overlay visibility changed -> {visible}"));
             }
         }
+        Event::WindowCommand { command } => {
+            if let Ok(mut s) = session.lock() {
+                s.request_window_cmd(&command);
+            }
+        }
         _ => {}
     }
 }

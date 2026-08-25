@@ -12,7 +12,7 @@ pub static OUTBOUND_EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 // Queued raw events destined for egui
 static PENDING_EGUI_EVENTS: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
 
-// Navigation state: Active tab (0 = Cheats/Toggles, 1 = Memory/Pinned Values)
+// Navigation state: Active tab (0 = Cheats/Toggles, 1 = Memory/Pinned Values, 2 = Window Control)
 static ACTIVE_TAB: AtomicU64 = AtomicU64::new(0);
 
 // Selected item index in the current active tab
@@ -44,9 +44,12 @@ fn get_active_tab_item_count() -> usize {
     if tab == 0 {
         // Toggle / Button cheats
         cheats.iter().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").count().max(1)
-    } else {
+    } else if tab == 1 {
         // Value / Pinned memory cheats
         cheats.iter().filter(|c| c.kind_str == "value").count().max(1)
+    } else {
+        // Tab 2: Window actions (Show GUI, Hide GUI, Disconnect)
+        3
     }
 }
 
@@ -54,16 +57,16 @@ fn get_active_tab_item_count() -> usize {
 pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
     let mut events = Vec::new();
 
-    // 1. Tab Switching via Bumpers (LB / RB)
+    // 1. Tab Switching via Bumpers (LB / RB across 3 tabs: 0 -> 1 -> 2 -> 0)
     if (just_pressed & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0 {
         let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-        let new_tab = if cur_tab == 0 { 1 } else { 0 };
+        let new_tab = if cur_tab == 0 { 2 } else { cur_tab - 1 };
         ACTIVE_TAB.store(new_tab, Ordering::Relaxed);
         SELECTED_INDEX.store(0, Ordering::Relaxed);
     }
     if (just_pressed & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0 {
         let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-        let new_tab = if cur_tab == 1 { 0 } else { 1 };
+        let new_tab = (cur_tab + 1) % 3;
         ACTIVE_TAB.store(new_tab, Ordering::Relaxed);
         SELECTED_INDEX.store(0, Ordering::Relaxed);
     }
@@ -170,7 +173,7 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         }
     }
 
-    // 5. A Button (Cross / Enter) -> Toggle or Pin
+    // 5. A Button (Cross / Enter) -> Toggle, Pin, or Window Command
     if (just_pressed & XINPUT_GAMEPAD_A) != 0 {
         events.push(egui::Event::Key {
             key: egui::Key::Enter,
@@ -181,9 +184,9 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         });
 
         let sel = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
-        if let Ok(mut cheats) = CHEATS.lock() {
-            if cur_tab == 0 {
-                // Cheats / Toggles Tab
+        if cur_tab == 0 {
+            // Cheats / Toggles Tab
+            if let Ok(mut cheats) = CHEATS.lock() {
                 let mut toggles: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").collect();
                 if sel < toggles.len() {
                     let cheat = &mut toggles[sel];
@@ -197,8 +200,10 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
                     }
                     tracing::info!("Overlay toggled cheat #{} '{}' -> {}", id, cheat.label, enabled);
                 }
-            } else {
-                // Memory / Pinned Values Tab
+            }
+        } else if cur_tab == 1 {
+            // Memory / Pinned Values Tab
+            if let Ok(mut cheats) = CHEATS.lock() {
                 let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
                 if sel < val_cheats.len() {
                     let cheat = &mut val_cheats[sel];
@@ -212,6 +217,17 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
                     tracing::info!("Overlay toggled pin on memory item #{} '{}' -> {}", id, cheat.label, enabled);
                 }
             }
+        } else {
+            // Tab 2: Window Controls (0 = Show GUI, 1 = Hide GUI, 2 = Toggle GUI)
+            let cmd = match sel {
+                0 => "show",
+                1 => "hide",
+                _ => "show",
+            };
+            if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                out.push(Event::WindowCommand { command: cmd.to_string() });
+            }
+            tracing::info!("Overlay requested main window command: {}", cmd);
         }
     }
 
@@ -318,25 +334,29 @@ pub fn drain_outbound_events() -> Vec<Event> {
 /// Handle a mouse/touch click inside the in-game overlay bounds.
 pub fn handle_click(x: i32, y: i32) {
     let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-    // Tab header clicks (y: 80..115)
-    if y >= 80 && y <= 115 {
-        if x >= 35 && x <= 180 {
+    // Tab header clicks (y: 30..70)
+    if y >= 30 && y <= 75 {
+        if x >= 30 && x <= 140 {
             ACTIVE_TAB.store(0, Ordering::Relaxed);
             SELECTED_INDEX.store(0, Ordering::Relaxed);
             return;
-        } else if x >= 190 && x <= 335 {
+        } else if x >= 145 && x <= 255 {
             ACTIVE_TAB.store(1, Ordering::Relaxed);
+            SELECTED_INDEX.store(0, Ordering::Relaxed);
+            return;
+        } else if x >= 260 && x <= 370 {
+            ACTIVE_TAB.store(2, Ordering::Relaxed);
             SELECTED_INDEX.store(0, Ordering::Relaxed);
             return;
         }
     }
 
-    // List item clicks (y >= 160)
-    if x >= 30 && x <= 360 && y >= 160 {
-        let item_idx = ((y - 160) / 44) as usize;
+    // List item clicks (y >= 140)
+    if x >= 30 && x <= 380 && y >= 140 {
+        let item_idx = ((y - 140) / 48) as usize;
         SELECTED_INDEX.store(item_idx as u64, Ordering::Relaxed);
-        if let Ok(mut cheats) = CHEATS.lock() {
-            if cur_tab == 0 {
+        if cur_tab == 0 {
+            if let Ok(mut cheats) = CHEATS.lock() {
                 let mut toggles: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").collect();
                 if item_idx < toggles.len() {
                     let cheat = &mut toggles[item_idx];
@@ -347,7 +367,9 @@ pub fn handle_click(x: i32, y: i32) {
                         out.push(Event::CheatToggled { id, enabled });
                     }
                 }
-            } else {
+            }
+        } else if cur_tab == 1 {
+            if let Ok(mut cheats) = CHEATS.lock() {
                 let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
                 if item_idx < val_cheats.len() {
                     let cheat = &mut val_cheats[item_idx];
@@ -358,6 +380,15 @@ pub fn handle_click(x: i32, y: i32) {
                         out.push(Event::CheatToggled { id, enabled });
                     }
                 }
+            }
+        } else {
+            let cmd = match item_idx {
+                0 => "show",
+                1 => "hide",
+                _ => "show",
+            };
+            if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                out.push(Event::WindowCommand { command: cmd.to_string() });
             }
         }
     }
@@ -429,27 +460,38 @@ pub fn render_in_game_egui(
             .show(ctx, |ui| {
                 let mut active_tab = ACTIVE_TAB.load(Ordering::Relaxed);
 
-                // 1. Tab Selector with Bumper Indicators
+                // 1. Tab Selector with 3 Tabs (Cheats, Memory, Window)
                 ui.horizontal(|ui| {
                     let tab0_btn = if active_tab == 0 {
-                        egui::Button::new("🎮 [LB] Cheats").fill(egui::Color32::from_rgb(20, 90, 160))
+                        egui::Button::new("🎮 Cheats").fill(egui::Color32::from_rgb(20, 90, 160))
                     } else {
-                        egui::Button::new("[LB] Cheats").fill(egui::Color32::from_rgb(30, 35, 45))
+                        egui::Button::new("🎮 Cheats").fill(egui::Color32::from_rgb(30, 35, 45))
                     };
-                    if ui.add_sized([160.0, 30.0], tab0_btn).clicked() {
+                    if ui.add_sized([105.0, 28.0], tab0_btn).clicked() {
                         active_tab = 0;
                         ACTIVE_TAB.store(0, Ordering::Relaxed);
                         SELECTED_INDEX.store(0, Ordering::Relaxed);
                     }
 
                     let tab1_btn = if active_tab == 1 {
-                        egui::Button::new("🧠 [RB] Memory").fill(egui::Color32::from_rgb(20, 90, 160))
+                        egui::Button::new("🧠 Memory").fill(egui::Color32::from_rgb(20, 90, 160))
                     } else {
-                        egui::Button::new("[RB] Memory").fill(egui::Color32::from_rgb(30, 35, 45))
+                        egui::Button::new("🧠 Memory").fill(egui::Color32::from_rgb(30, 35, 45))
                     };
-                    if ui.add_sized([160.0, 30.0], tab1_btn).clicked() {
+                    if ui.add_sized([105.0, 28.0], tab1_btn).clicked() {
                         active_tab = 1;
                         ACTIVE_TAB.store(1, Ordering::Relaxed);
+                        SELECTED_INDEX.store(0, Ordering::Relaxed);
+                    }
+
+                    let tab2_btn = if active_tab == 2 {
+                        egui::Button::new("🖥 Window").fill(egui::Color32::from_rgb(20, 90, 160))
+                    } else {
+                        egui::Button::new("🖥 Window").fill(egui::Color32::from_rgb(30, 35, 45))
+                    };
+                    if ui.add_sized([105.0, 28.0], tab2_btn).clicked() {
+                        active_tab = 2;
+                        ACTIVE_TAB.store(2, Ordering::Relaxed);
                         SELECTED_INDEX.store(0, Ordering::Relaxed);
                     }
                 });
@@ -481,26 +523,19 @@ pub fn render_in_game_egui(
                                     .rounding(egui::Rounding::same(6.0))
                                     .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                                     .show(ui, |ui| {
-                                        if ui.checkbox(&mut cheat.enabled, &text).changed() {
-                                            let id = cheat.id;
-                                            let enabled = cheat.enabled;
-                                            if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                                                out.push(Event::CheatToggled { id, enabled });
-                                            }
-                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.label(text);
+                                        });
                                     });
                             } else {
-                                if ui.checkbox(&mut cheat.enabled, &text).changed() {
-                                    let id = cheat.id;
-                                    let enabled = cheat.enabled;
-                                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                                        out.push(Event::CheatToggled { id, enabled });
-                                    }
-                                }
+                                ui.horizontal(|ui| {
+                                    ui.label(text);
+                                });
                             }
+                            ui.separator();
                         }
                     }
-                } else {
+                } else if active_tab == 1 {
                     // TAB 1: Memory Locations & Value Pinning
                     ui.colored_label(egui::Color32::from_rgb(0, 210, 255), "● Tracked Memory & Value Pinning");
                     ui.label("• Left/Right: Adjust Value | A: Toggle Pin (📌/🔓)");
@@ -544,6 +579,45 @@ pub fn render_in_game_egui(
                             }
                             ui.separator();
                         }
+                    }
+                } else {
+                    // TAB 2: Window Actions
+                    ui.colored_label(egui::Color32::from_rgb(255, 180, 0), "● GUI Window Controls");
+                    ui.label("• LB/RB: Switch Tab | D-Pad: Move | A: Execute");
+                    ui.separator();
+
+                    let actions = [
+                        ("👁 Reveal / Show GUI Window", "Restore the standalone Trainlab GUI window"),
+                        ("🙈 Hide / Background GUI Window", "Minimize GUI to background for zero overhead"),
+                        ("🔄 Restore GUI to Front", "Bring GUI window to foreground focus"),
+                    ];
+
+                    for (idx, (title, desc)) in actions.iter().enumerate() {
+                        let is_selected = idx == selected_idx;
+                        let row_content = |ui: &mut egui::Ui| {
+                            ui.vertical(|ui| {
+                                ui.label(egui::RichText::new(*title).strong());
+                                ui.label(egui::RichText::new(*desc).color(egui::Color32::GRAY).small());
+                            });
+                        };
+
+                        if is_selected {
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
+                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 220, 255)))
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                                .show(ui, |ui| {
+                                    row_content(ui);
+                                });
+                        } else {
+                            egui::Frame::none()
+                                .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                                .show(ui, |ui| {
+                                    row_content(ui);
+                                });
+                        }
+                        ui.separator();
                     }
                 }
 

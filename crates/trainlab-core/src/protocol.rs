@@ -35,10 +35,10 @@ pub enum Event {
     SyncCheats { cheats: Vec<OverlayCheatDto> },
     /// Overlay visibility changed.
     OverlayVisibilityChanged { visible: bool },
-    /// Memory marker added/updated.
-    MarkerSet { name: String, address: u64, note: Option<String> },
     /// Activity log entry broadcast.
     ActivityLogged { message: String },
+    /// Remote request to show/hide the standalone GUI window ("show" / "hide" / "toggle").
+    WindowCommand { command: String },
 }
 
 /// Asynchronous push notification types emitted by the injected DLL.
