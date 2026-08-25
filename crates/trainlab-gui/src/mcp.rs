@@ -1383,16 +1383,15 @@ impl TrainlabMcpServer {
                     // (origin = target, since the cave payload is emitted relative to it for
                     // the RIP-relative constant slots) to produce the shellcode payload bytes.
                     let payload = if let Some(asm_src) = &pc.asm {
-                        let symbols: HashMap<String, u64> = {
-                            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
-                            s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
-                        };
+                        let symbols: HashMap<String, u64> = s
+                            .list_markers()
+                            .iter()
+                            .map(|m| (m.label.clone(), m.address))
+                            .collect();
                         let origin = target;
                         let block = crate::asm::assemble_text(asm_src, origin, &symbols)
                             .map_err(|e| err(format!("asm for cheat '{}' failed: {e}", pc.id)))?;
-                        if let Ok(mut s) = self.session.lock() {
-                            s.log_activity("PROFILE", format!("cheat '{}' assembled {} byte(s) from asm", pc.id, block.bytes.len()));
-                        }
+                        s.log_activity("PROFILE", format!("cheat '{}' assembled {} byte(s) from asm", pc.id, block.bytes.len()));
                         block.bytes
                     } else {
                         parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?
