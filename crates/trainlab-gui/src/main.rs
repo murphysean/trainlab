@@ -1447,6 +1447,27 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[cfg(windows)]
+fn is_trainer_focused() -> Option<bool> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    unsafe {
+        let fg_hwnd = GetForegroundWindow();
+        if fg_hwnd.is_null() {
+            return None;
+        }
+        let mut fg_pid: u32 = 0;
+        GetWindowThreadProcessId(fg_hwnd, &mut fg_pid);
+        let my_pid = GetCurrentProcessId();
+        Some(fg_pid == my_pid)
+    }
+}
+
+#[cfg(not(windows))]
+fn is_trainer_focused() -> Option<bool> {
+    None
+}
+
 impl eframe::App for TrainlabApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Keep UI active and responsive to background thread status updates (20 Hz repaint cadence)
@@ -1454,7 +1475,17 @@ impl eframe::App for TrainlabApp {
 
         // Check window OS focus state to ensure controller / navigation inputs
         // only affect the GUI when the trainer window is focused.
-        let is_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        // Prefer Win32 foreground PID check if available, falling back to egui viewport focus.
+        let is_focused = is_trainer_focused().unwrap_or_else(|| ctx.input(|i| i.viewport().focused.unwrap_or(true)));
+
+        // Sync focus/visibility state to injected DLL so XInput controller inputs
+        // are masked from the background game while the trainer is focused.
+        if self.connected {
+            let active_mask = is_focused && self.window_visible;
+            controller::emit_event_to_dll(&self.session, trainlab_core::protocol::Event::OverlayVisibilityChanged {
+                visible: active_mask,
+            });
+        }
 
         // Process remote window visibility commands from REST API / MCP / Web Dashboard
         if let Ok(mut s) = self.session.lock() {
