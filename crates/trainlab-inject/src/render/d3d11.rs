@@ -1,5 +1,6 @@
 //! Native Direct3D 11 backend renderer for `egui 0.27` using official Microsoft DirectX COM bindings.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;
 use windows::core::PCSTR;
@@ -38,6 +39,13 @@ type FnD3DCompile = unsafe extern "system" fn(
     *mut *mut c_void,
 ) -> i32;
 
+struct TextureEntry {
+    _texture: ID3D11Texture2D,
+    srv: ID3D11ShaderResourceView,
+    width: u32,
+    height: u32,
+}
+
 struct RendererState {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -54,7 +62,7 @@ struct RendererState {
     rasterizer_state: Option<ID3D11RasterizerState>,
     depth_stencil_state: Option<ID3D11DepthStencilState>,
     sampler_state: Option<ID3D11SamplerState>,
-    font_srv: Option<ID3D11ShaderResourceView>,
+    textures: HashMap<egui::TextureId, TextureEntry>,
 }
 
 static RENDERER: Mutex<Option<RendererState>> = Mutex::new(None);
@@ -129,7 +137,7 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                 rasterizer_state: None,
                 depth_stencil_state: None,
                 sampler_state: None,
-                font_srv: None,
+                textures: HashMap::new(),
             });
         }
 
@@ -407,8 +415,13 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
         if let Some((_egui_ctx, clipped_primitives, textures_delta)) =
             super::overlay::render_in_game_egui(1280.0, 800.0)
         {
-            // Upload font textures (both ImageData::Color and ImageData::Font coverage)
-            for (_id, delta) in &textures_delta.set {
+            // 6a. Delete freed textures
+            for id in &textures_delta.free {
+                state.textures.remove(id);
+            }
+
+            // 6b. Upload new / updated textures (with full sub-region and full-image update support)
+            for (id, delta) in &textures_delta.set {
                 let (pixels_rgba, width, height) = match &delta.image {
                     egui::ImageData::Color(c) => {
                         let rgba: Vec<u8> = c.pixels.iter().flat_map(|p| p.to_array()).collect();
@@ -423,49 +436,83 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                     }
                 };
 
-                let tex_desc = D3D11_TEXTURE2D_DESC {
-                    Width: width,
-                    Height: height,
-                    MipLevels: 1,
-                    ArraySize: 1,
-                    Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-                    SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
-                        Count: 1,
-                        Quality: 0,
-                    },
-                    Usage: D3D11_USAGE_DEFAULT,
-                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                    CPUAccessFlags: 0,
-                    MiscFlags: 0,
-                };
+                if let Some(pos) = delta.pos {
+                    // Partial atlas texture sub-region update
+                    if let Some(entry) = state.textures.get_mut(id) {
+                        let box_3d = windows::Win32::Graphics::Direct3D11::D3D11_BOX {
+                            left: pos[0] as u32,
+                            top: pos[1] as u32,
+                            front: 0,
+                            right: (pos[0] as u32) + width,
+                            bottom: (pos[1] as u32) + height,
+                            back: 1,
+                        };
+                        state.context.UpdateSubresource(
+                            &entry._texture,
+                            0,
+                            Some(&box_3d),
+                            pixels_rgba.as_ptr() as *const c_void,
+                            width * 4,
+                            0,
+                        );
+                    }
+                } else {
+                    // Full texture allocation / replacement
+                    let tex_desc = D3D11_TEXTURE2D_DESC {
+                        Width: width,
+                        Height: height,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                        SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0,
+                        },
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                    };
 
-                let subresource = D3D11_SUBRESOURCE_DATA {
-                    pSysMem: pixels_rgba.as_ptr() as *const c_void,
-                    SysMemPitch: width * 4,
-                    SysMemSlicePitch: 0,
-                };
+                    let subresource = D3D11_SUBRESOURCE_DATA {
+                        pSysMem: pixels_rgba.as_ptr() as *const c_void,
+                        SysMemPitch: width * 4,
+                        SysMemSlicePitch: 0,
+                    };
 
-                let mut tex = None;
-                if state.device.CreateTexture2D(&tex_desc, Some(&subresource), Some(&mut tex)).is_ok() {
-                    if let Some(tex) = tex {
-                        let mut srv = None;
-                        if state.device.CreateShaderResourceView(&tex, None, Some(&mut srv)).is_ok() {
-                            state.font_srv = srv;
+                    let mut tex = None;
+                    if state.device.CreateTexture2D(&tex_desc, Some(&subresource), Some(&mut tex)).is_ok() {
+                        if let Some(tex) = tex {
+                            let mut srv = None;
+                            if state.device.CreateShaderResourceView(&tex, None, Some(&mut srv)).is_ok() {
+                                if let Some(srv) = srv {
+                                    state.textures.insert(
+                                        *id,
+                                        TextureEntry {
+                                            _texture: tex,
+                                            srv,
+                                            width,
+                                            height,
+                                        },
+                                    );
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            if let Some(font_srv) = state.font_srv.as_ref() {
-                let srv_opt = [Some(font_srv.clone())];
-                state.context.PSSetShaderResources(0, Some(&srv_opt));
-            }
-
-            // 7. Render Meshes
+            // 7. Render Meshes with proper per-mesh texture binding
             for clipped_primitive in clipped_primitives {
                 if let egui::epaint::Primitive::Mesh(mesh) = clipped_primitive.primitive {
                     if mesh.indices.is_empty() || mesh.vertices.is_empty() {
                         continue;
+                    }
+
+                    // Bind matching texture for this mesh (e.g. font atlas or custom texture)
+                    if let Some(entry) = state.textures.get(&mesh.texture_id) {
+                        let srv_opt = [Some(entry.srv.clone())];
+                        state.context.PSSetShaderResources(0, Some(&srv_opt));
                     }
 
                     let vb_byte_size = mesh.vertices.len() * std::mem::size_of::<egui::epaint::Vertex>();

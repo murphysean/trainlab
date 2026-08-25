@@ -30,6 +30,7 @@ mod inject;
 mod mcp;
 mod profile;
 mod session;
+mod xinput_poll;
 
 
 
@@ -1223,8 +1224,27 @@ fn main() -> eframe::Result<()> {
     // game process externally for scan-family tools (see D7).
     let session: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(SessionState::new()));
 
+    // Detect launch environment: Gamescope / Steam Deck handheld mode vs Standard Desktop
+    let is_gamescope = std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok()
+        || std::env::var("SteamGamepadUI").is_ok()
+        || std::env::var("STEAM_DECK").is_ok()
+        || std::env::var("TRAINLAB_FULLSCREEN").map(|v| v == "1" || v == "true").unwrap_or(false);
+
+    let viewport_builder = egui::ViewportBuilder::default()
+        .with_title("trainlab")
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([800.0, 540.0]);
+
+    let viewport_builder = if is_gamescope {
+        // Dedicated display / Gamescope mode: expand edge-to-edge without letterboxing
+        viewport_builder.with_fullscreen(true).with_maximized(true)
+    } else {
+        // Desktop windowing mode: natural 1280x800 floating window
+        viewport_builder.with_maximized(false)
+    };
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 640.0]),
+        viewport: viewport_builder,
         ..Default::default()
     };
 
@@ -1378,6 +1398,33 @@ impl eframe::App for TrainlabApp {
         // Handle tab switching & controller navigation if the window is focused
         // and the user is NOT currently typing into a text field (ctx.wants_keyboard_input()).
         if is_focused && !ctx.wants_keyboard_input() {
+            // Check XInput Controller (LB / RB to cycle tabs, B to background)
+            if let Some(ctrl) = xinput_poll::poll_controller() {
+                if ctrl.tab_next {
+                    self.active_tab = match self.active_tab {
+                        ActiveTab::Cheats => ActiveTab::MemoryScan,
+                        ActiveTab::MemoryScan => ActiveTab::TaggedMarkers,
+                        ActiveTab::TaggedMarkers => ActiveTab::PointersInspection,
+                        ActiveTab::PointersInspection => ActiveTab::RunApplications,
+                        ActiveTab::RunApplications => ActiveTab::ActivityLog,
+                        ActiveTab::ActivityLog => ActiveTab::Cheats,
+                    };
+                } else if ctrl.tab_prev {
+                    self.active_tab = match self.active_tab {
+                        ActiveTab::Cheats => ActiveTab::ActivityLog,
+                        ActiveTab::MemoryScan => ActiveTab::Cheats,
+                        ActiveTab::TaggedMarkers => ActiveTab::MemoryScan,
+                        ActiveTab::PointersInspection => ActiveTab::TaggedMarkers,
+                        ActiveTab::RunApplications => ActiveTab::PointersInspection,
+                        ActiveTab::ActivityLog => ActiveTab::RunApplications,
+                    };
+                } else if ctrl.back_action {
+                    self.window_visible = false;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+
             ctx.input(|i| {
                 if i.key_pressed(egui::Key::Escape) {
                     self.window_visible = false;
