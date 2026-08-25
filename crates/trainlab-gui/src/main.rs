@@ -528,16 +528,23 @@ impl TrainlabApp {
         ui.horizontal(|ui| {
             if ui.button("⚡ Re-run Initialization").clicked() {
                 let profiles = profile::discover_profiles();
-                if let Some((file, p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
-                    // T-134: Run setup and init_commands independently — a profile may have both.
-                    // First run setup (run_setup=true), then run init_commands if present.
-                    match mcp::TrainlabMcpServer::with_session(self.session.clone()).load_profile_by_name(&file, true) {
-                        Ok(detail) => self.log(format!("re-populated cheats from profile '{file}': {detail}")),
-                        Err(e) => self.log(format!("re-run init FAILED: {e}")),
-                    }
-                    // Now run init_commands independently (load_profile_by_name already runs
-                    // init_commands, but if the user wants to re-run just init without setup,
-                    // they can use this path too).
+                if let Some((file, _p)) = profile::find_profile_for_game(&profiles, &self.game_name) {
+                    let session = self.session.clone();
+                    let file_name = file.clone();
+                    std::thread::spawn(move || {
+                        match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(&file_name, true) {
+                            Ok(detail) => {
+                                if let Ok(mut s) = session.lock() {
+                                    s.log_activity("UI", format!("re-populated cheats from profile '{file_name}': {detail}"));
+                                }
+                            }
+                            Err(e) => {
+                                if let Ok(mut s) = session.lock() {
+                                    s.log_activity("UI", format!("re-run init FAILED: {e}"));
+                                }
+                            }
+                        }
+                    });
                 }
             }
             if ui.button("Clear all").clicked() {
@@ -1442,6 +1449,9 @@ fn main() -> eframe::Result<()> {
 
 impl eframe::App for TrainlabApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keep UI active and responsive to background thread status updates (20 Hz repaint cadence)
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+
         // Check window OS focus state to ensure controller / navigation inputs
         // only affect the GUI when the trainer window is focused.
         let is_focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
