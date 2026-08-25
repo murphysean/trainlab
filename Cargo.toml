@@ -41,8 +41,8 @@ anyhow = "1"
 # GUI
 eframe = "0.27"
 egui = "0.27"
-# Disassembler (for the disassemble / addr_to_module tools)
-iced-x86 = "1"
+# Disassembler & Assembler (for disassemble, addr_to_module, and assemble_asm tools)
+iced-x86 = { version = "1", features = ["code_asm"] }
 
 [profile.release]
 opt-level = 3

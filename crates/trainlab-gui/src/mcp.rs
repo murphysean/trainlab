@@ -669,6 +669,17 @@ pub struct EmitRelativeJumpArgs {
     pub pad_to_len: Option<usize>,
 }
 
+/// Arguments for [`assemble_asm`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AssembleAsmArgs {
+    /// Assembly source code text. Supports mnemonics (mov, mulss, divss, jmp, xor, etc.)
+    /// and directives (dd (float)4.0, dd 100, dq 0x..., db 90 90), as well as named markers ($cave_const).
+    pub code: String,
+    /// Origin address (RIP) where this code will be placed (default 0x0 or target cave marker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
 /// `#[tool_router(server_handler)]` generates the `ServerHandler` impl.
 #[tool_router(server_handler)]
 impl TrainlabMcpServer {
@@ -2917,6 +2928,45 @@ impl TrainlabMcpServer {
             rmcp::model::ContentBlock::text(format!(
                 "relative jump from {from:#x} to {to:#x} (padded to {pad_len} bytes):\nhex: \"{hex_str}\""
             )),
+        ]))
+    }
+
+    /// Assemble human-readable x86-64 assembly text into machine code bytes (iced-x86).
+    /// Supports labels, directives (dd (float)4.0, dq, db), mnemonics (mov, mulss, divss, jmp, xor, etc.),
+    /// and named marker substitution ($cave_const, $return_addr).
+    #[tool(description = "Assemble x86-64 assembly source text into machine code bytes (iced-x86). Supports mnemonics (mov, mulss, divss, jmp, etc.), Cheat Engine directives (dd (float)4.0, dq, db), and named session markers ($cave_const). Returns encoded hex, byte length, and disassembled preview.")]
+    fn assemble_asm(
+        &self,
+        Parameters(args): Parameters<AssembleAsmArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut symbols = std::collections::HashMap::new();
+        if let Ok(s) = self.session.lock() {
+            for m in s.list_markers() {
+                symbols.insert(m.label.clone(), m.address);
+                symbols.insert(m.label.to_lowercase(), m.address);
+            }
+        }
+
+        let origin_rip = if let Some(orig) = &args.origin {
+            parse_addr(&self.session, orig)?
+        } else {
+            0
+        };
+
+        let assembled = crate::asm::assemble_text(&args.code, origin_rip, &symbols)
+            .map_err(err)?;
+
+        let disasm_lines = trainlab_core::disasm::disassemble(origin_rip, &assembled.bytes, Some(50));
+
+        let output = format!(
+            "assembled {} byte(s) (origin {origin_rip:#x}):\nhex: \"{}\"\n\ndisassembled:\n{}",
+            assembled.bytes.len(),
+            assembled.hex,
+            disasm_lines.join("\n")
+        );
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(output),
         ]))
     }
 

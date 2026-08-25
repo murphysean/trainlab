@@ -23,6 +23,7 @@ use trainlab_core::protocol::{Request, Response};
 use crate::session::{Cheat, CheatKind, SharedSession, SessionState};
 
 mod api;
+mod asm;
 mod event;
 mod controller;
 mod hotkeys;

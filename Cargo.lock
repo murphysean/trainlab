@@ -4416,6 +4416,7 @@ dependencies = [
  "egui",
  "embed-resource",
  "futures-util",
+ "iced-x86",
  "reqwest",
  "rmcp",
  "schemars",
