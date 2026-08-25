@@ -518,3 +518,85 @@ mod tests {
     }
 }
 
+
+/// Porting Cheat Engine auto-assembler scripts VERBATIM.
+///
+/// CE constant-hook scripts reference a constant slot via `[label]` where the `label:` may be
+/// defined BEFORE or AFTER the instruction that uses it. Our assembler must accept BOTH:
+///   - const-first  ("BWD"):  label: dd X   then   instr [rip + label]
+///   - instruction-first ("FWD"/CE-verbatim):  instr [rip + label]  then  label: dd X
+/// The constant lands at a different offset in each layout (bytes differ), but EACH must
+/// resolve `[rip + label]` to its constant slot with a correct relative displacement and must
+/// NOT emit an address-size (0x67) prefix (which indicates an unresolved label in iced-x86).
+#[cfg(test)]
+mod ce_verbatim_porting {
+    use super::*;
+
+    /// Byte-level checks that hold regardless of data/instruction order:
+    ///  - the constant bytes are present,
+    ///  - there is no 0x67 address-size prefix (unresolved label),
+    ///  - and, for the instruction-first case only, the disassembly shows a clean [rel] operand
+    ///    (when the instruction leads, disassembly is aligned so this is meaningful).
+    fn check(label: &str, hex: &str, const_bytes: &str, expect_clean_disasm: bool) {
+        assert!(hex.contains(const_bytes), "[{label}] missing constant {const_bytes}: {hex}");
+        assert!(!hex.starts_with("67"), "[{label}] 0x67 address-size prefix (label not resolved): {hex}");
+        if expect_clean_disasm {
+            let bytes: Vec<u8> = hex.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect();
+            let dis = trainlab_core::disasm::disassemble(0x140000000, &bytes, None);
+            assert!(dis.iter().any(|l| l.contains("[rel")), "[{label}] no [rel] operand:\n{}", dis.join("\n"));
+        }
+    }
+
+    fn both_orders(name: &str, label: &str, instr: &str, dd_line: &str, const_bytes: &str) {
+        // CE-verbatim: instruction references the constant label BEFORE its `dd` definition.
+        let fwd = assemble_text(
+            &format!("{instr}\n{label}:\n  {dd_line}"),
+            0x140000000, &HashMap::new(),
+        ).unwrap_or_else(|e| panic!("[{name}_fwd] failed: {e}"));
+        // const-first (our recommended layout).
+        let bwd = assemble_text(
+            &format!("{label}:\n  {dd_line}\n{instr}"),
+            0x140000000, &HashMap::new(),
+        ).unwrap_or_else(|e| panic!("[{name}_bwd] failed: {e}"));
+        check(&format!("{name}_fwd"), &fwd.hex, const_bytes, true);   // instruction first -> clean disasm
+        check(&format!("{name}_bwd"), &bwd.hex, const_bytes, false);  // data first -> skip disasm align check
+    }
+
+    #[test]
+    fn mining_speed_ce_verbatim() {
+        both_orders("mining_speed", "miningSpeedValue",
+            "divss xmm2, [rip + miningSpeedValue]\naddss xmm2, xmm0",
+            "dd (float)4.0", "00 00 80 40");
+    }
+    #[test]
+    fn xp_mult_ce_verbatim() {
+        both_orders("xp_mult", "xpMultValue",
+            "mulss xmm1, [rip + xpMultValue]", "dd (float)3.0", "00 00 40 40");
+    }
+    #[test]
+    fn one_hit_ce_verbatim() {
+        both_orders("one_hit", "oneHitValue",
+            "mov edx, [rip + oneHitValue]", "dd 99999", "9f 86 01 00");
+    }
+    #[test]
+    fn attack_speed_ce_verbatim() {
+        both_orders("attack_speed", "attackSpeedValue",
+            "mulss xmm1, [rip + attackSpeedValue]", "dd (float)20.0", "00 00 a0 41");
+    }
+    #[test]
+    fn instant_reload_ce_verbatim() {
+        both_orders("instant_reload", "reloadTimeValue",
+            "mov eax, [rip + reloadTimeValue]", "dd (float)0.1", "cd cc cc 3d");
+    }
+    #[test]
+    fn no_spread_ce_verbatim() {
+        both_orders("no_spread", "spreadValue",
+            "movss xmm0, [rip + spreadValue]\nmovss xmm1, [rip + spreadValue]",
+            "dd (float)1.0", "00 00 80 3f");
+    }
+    #[test]
+    fn freeze_droppod_single_instruction() {
+        let r = assemble_text("inc eax", 0x140000000, &HashMap::new()).unwrap();
+        assert_eq!(r.hex, "ff c0", "inc eax must be FF C0, got {}", r.hex);
+    }
+}

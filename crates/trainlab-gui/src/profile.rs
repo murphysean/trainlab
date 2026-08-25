@@ -102,6 +102,12 @@ pub struct ProfileCheat {
     /// For toggle cheats: shellcode payload (hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// For toggle cheats: optional Cheat-Engine-style assembly text. If present, this is
+    /// assembled (via the assemble_asm engine) into the shellcode payload bytes at profile load,
+    /// so you can author the cheat in readable asm instead of hand-encoded hex. Supports
+    /// `[rip + label]` constant slots, `dd (float)X` / `dd 100` / `dq ...` directives, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asm: Option<String>,
     /// For toggle cheats: jump style ("absolute" or "relative").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
@@ -325,6 +331,7 @@ mod tests {
                 target_ref: None,
                 hook: None,
                 payload: None,
+                asm: None,
                 jump: None,
                 mechanism: Some("cave".into()),
                 rate_hz: None,
@@ -358,5 +365,47 @@ mod tests {
         let profiles = vec![("Unrailed2.yaml".to_string(), p)];
         assert!(find_profile_for_game(&profiles, "unrailed2.EXE").is_some());
         assert!(find_profile_for_game(&profiles, "other.exe").is_none());
+    }
+
+    /// A toggle cheat may carry CE-style assembly text (`asm`) instead of (or in addition to)
+    /// pre-assembled hex (`payload`). Verify the `asm` field round-trips through YAML.
+    #[test]
+    fn asm_field_roundtrips_yaml() {
+        let p = GameProfile {
+            schema: GameProfile::SCHEMA_V1.into(),
+            game: "DRG Survivor.exe".into(),
+            name: "asm test".into(),
+            inject_dll: true,
+            version: "".into(),
+            setup: vec![],
+            init_commands: None,
+            cheats: vec![ProfileCheat {
+                id: "mining_speed".into(),
+                label: "Mining Speedhack (4x)".into(),
+                kind: "toggle".into(),
+                value_type: None,
+                address_ref: None,
+                target_ref: Some("mining_speed".into()),
+                hook: Some("override".into()),
+                payload: None,
+                asm: Some("miningSpeedValue:\n  dd (float)4.0\ndivss xmm2, [rip + miningSpeedValue]".into()),
+                jump: Some("relative".into()),
+                mechanism: None,
+                rate_hz: None,
+                value: None,
+                commands: None,
+                hotkey: None,
+                note: Some("mining speed test".into()),
+            }],
+        };
+        let yaml = p.to_yaml().expect("serialize");
+        let back = GameProfile::from_yaml(&yaml).expect("parse");
+        let c = &back.cheats[0];
+        assert_eq!(c.id, "mining_speed");
+        assert_eq!(c.kind, "toggle");
+        assert_eq!(c.jump.as_deref(), Some("relative"));
+        // The asm source must round-trip exactly.
+        let expected_asm = "miningSpeedValue:\n  dd (float)4.0\ndivss xmm2, [rip + miningSpeedValue]";
+        assert_eq!(c.asm.as_deref(), Some(expected_asm));
     }
 }

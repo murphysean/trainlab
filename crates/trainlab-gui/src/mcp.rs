@@ -17,6 +17,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use trainlab_core::protocol::{self, Request, Response};
 
+use std::collections::HashMap;
+
 use crate::session::{CheatKind, PendingKind, SharedSession};
 
 /// Where the injected DLL's fast channel listens.
@@ -1377,7 +1379,24 @@ impl TrainlabMcpServer {
                 }
                 "toggle" => {
                     let target = resolve_cheat_address(&resolved, pc)?;
-                    let payload = parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?;
+                    // If the cheat provides Cheat-Engine-style assembly text, assemble it now
+                    // (origin = target, since the cave payload is emitted relative to it for
+                    // the RIP-relative constant slots) to produce the shellcode payload bytes.
+                    let payload = if let Some(asm_src) = &pc.asm {
+                        let symbols: HashMap<String, u64> = {
+                            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                            s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
+                        };
+                        let origin = target;
+                        let block = crate::asm::assemble_text(asm_src, origin, &symbols)
+                            .map_err(|e| err(format!("asm for cheat '{}' failed: {e}", pc.id)))?;
+                        if let Ok(mut s) = self.session.lock() {
+                            s.log_activity("PROFILE", format!("cheat '{}' assembled {} byte(s) from asm", pc.id, block.bytes.len()));
+                        }
+                        block.bytes
+                    } else {
+                        parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?
+                    };
                     let jump_style = match pc.jump.as_deref().unwrap_or("absolute") {
                         "relative" => trainlab_core::cave_hook::JumpStyle::Relative,
                         _ => trainlab_core::cave_hook::JumpStyle::Absolute,
@@ -1527,6 +1546,7 @@ impl TrainlabMcpServer {
                     target_ref,
                     hook,
                     payload,
+                    asm: None,
                     jump: None,
                     mechanism: None,
                     rate_hz: None,
@@ -4250,6 +4270,7 @@ mod tests {
             target_ref: None,
             hook: None,
             payload: None,
+            asm: None,
             jump: None,
             mechanism: None,
             rate_hz: None,
