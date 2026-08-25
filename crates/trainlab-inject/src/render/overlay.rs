@@ -1,24 +1,43 @@
-//! Pure in-game cheat overlay model and D3D11 render state backup.
-//!
-//! Handles:
-//! 1. Cheat definition sync from GUI (toggles, values, buttons, pinned values).
-//! 2. Render State Backup & Restore for 100% graphics driver isolation.
-//! 3. On-frame value pinning execution.
-//! 4. In-overlay click interaction.
+//! In-game interactive overlay logic and input translation for `egui`.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use trainlab_core::protocol::OverlayCheatDto;
 
 pub static CHEATS: Mutex<Vec<OverlayCheatDto>> = Mutex::new(Vec::new());
+
+// Queued raw events destined for egui
 static PENDING_EGUI_EVENTS: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
 
-/// Push controller button events mapped to egui keyboard/navigation events.
-pub fn push_controller_buttons(just_pressed: u16) {
-    use super::xinput::*;
+// Selected item index for D-Pad / Analog navigation
+static SELECTED_INDEX: AtomicU64 = AtomicU64::new(0);
+
+// XInput Button Bitmasks
+pub const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
+pub const XINPUT_GAMEPAD_DPAD_DOWN: u16 = 0x0002;
+pub const XINPUT_GAMEPAD_DPAD_LEFT: u16 = 0x0004;
+pub const XINPUT_GAMEPAD_DPAD_RIGHT: u16 = 0x0008;
+pub const XINPUT_GAMEPAD_START: u16 = 0x0010;
+pub const XINPUT_GAMEPAD_BACK: u16 = 0x0020;
+pub const XINPUT_GAMEPAD_LEFT_THUMB: u16 = 0x0040;
+pub const XINPUT_GAMEPAD_RIGHT_THUMB: u16 = 0x0080;
+pub const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0100;
+pub const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0200;
+pub const XINPUT_GAMEPAD_A: u16 = 0x1000;
+pub const XINPUT_GAMEPAD_B: u16 = 0x2000;
+pub const XINPUT_GAMEPAD_X: u16 = 0x4000;
+pub const XINPUT_GAMEPAD_Y: u16 = 0x8000;
+
+/// Push controller button state changes and analog stick deflection into egui events.
+pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
     let mut events = Vec::new();
 
-    if (just_pressed & XINPUT_GAMEPAD_DPAD_UP) != 0 {
+    // D-Pad Up / Analog Stick Up
+    if (just_pressed & XINPUT_GAMEPAD_DPAD_UP) != 0 || thumb_ly > 20000 {
+        let cur = SELECTED_INDEX.load(Ordering::Relaxed);
+        if cur > 0 {
+            SELECTED_INDEX.store(cur - 1, Ordering::Relaxed);
+        }
         events.push(egui::Event::Key {
             key: egui::Key::ArrowUp,
             physical_key: None,
@@ -27,7 +46,11 @@ pub fn push_controller_buttons(just_pressed: u16) {
             modifiers: egui::Modifiers::NONE,
         });
     }
-    if (just_pressed & XINPUT_GAMEPAD_DPAD_DOWN) != 0 {
+
+    // D-Pad Down / Analog Stick Down
+    if (just_pressed & XINPUT_GAMEPAD_DPAD_DOWN) != 0 || thumb_ly < -20000 {
+        let cur = SELECTED_INDEX.load(Ordering::Relaxed);
+        SELECTED_INDEX.store(cur + 1, Ordering::Relaxed);
         events.push(egui::Event::Key {
             key: egui::Key::ArrowDown,
             physical_key: None,
@@ -36,7 +59,9 @@ pub fn push_controller_buttons(just_pressed: u16) {
             modifiers: egui::Modifiers::NONE,
         });
     }
-    if (just_pressed & XINPUT_GAMEPAD_DPAD_LEFT) != 0 {
+
+    // D-Pad Left / Analog Stick Left
+    if (just_pressed & XINPUT_GAMEPAD_DPAD_LEFT) != 0 || thumb_lx < -20000 {
         events.push(egui::Event::Key {
             key: egui::Key::ArrowLeft,
             physical_key: None,
@@ -45,7 +70,9 @@ pub fn push_controller_buttons(just_pressed: u16) {
             modifiers: egui::Modifiers::NONE,
         });
     }
-    if (just_pressed & XINPUT_GAMEPAD_DPAD_RIGHT) != 0 {
+
+    // D-Pad Right / Analog Stick Right
+    if (just_pressed & XINPUT_GAMEPAD_DPAD_RIGHT) != 0 || thumb_lx > 20000 {
         events.push(egui::Event::Key {
             key: egui::Key::ArrowRight,
             physical_key: None,
@@ -54,6 +81,8 @@ pub fn push_controller_buttons(just_pressed: u16) {
             modifiers: egui::Modifiers::NONE,
         });
     }
+
+    // A Button (Cross / Enter) -> Toggle selected item
     if (just_pressed & XINPUT_GAMEPAD_A) != 0 {
         events.push(egui::Event::Key {
             key: egui::Key::Enter,
@@ -62,7 +91,18 @@ pub fn push_controller_buttons(just_pressed: u16) {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
+
+        // Directly toggle the selected cheat in memory
+        let sel = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
+        if let Ok(mut cheats) = CHEATS.lock() {
+            if sel < cheats.len() {
+                cheats[sel].enabled = !cheats[sel].enabled;
+                tracing::info!("Toggled cheat '{}' via controller -> {}", cheats[sel].label, cheats[sel].enabled);
+            }
+        }
     }
+
+    // B Button (Circle / Esc) -> Dismiss overlay
     if (just_pressed & XINPUT_GAMEPAD_B) != 0 {
         events.push(egui::Event::Key {
             key: egui::Key::Escape,
@@ -71,7 +111,6 @@ pub fn push_controller_buttons(just_pressed: u16) {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        // Dismiss overlay on B button
         super::set_overlay_visible(false);
     }
 
@@ -79,6 +118,25 @@ pub fn push_controller_buttons(just_pressed: u16) {
         if let Ok(mut queue) = PENDING_EGUI_EVENTS.lock() {
             queue.extend(events);
         }
+    }
+}
+
+/// Push mouse move and pointer button events from Touchscreen / Trackpad / Mouse.
+pub fn push_pointer_event(x: f32, y: f32, pressed: Option<bool>) {
+    let mut events = Vec::new();
+    events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
+
+    if let Some(down) = pressed {
+        events.push(egui::Event::PointerButton {
+            pos: egui::pos2(x, y),
+            button: egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+
+    if let Ok(mut queue) = PENDING_EGUI_EVENTS.lock() {
+        queue.extend(events);
     }
 }
 
@@ -98,18 +156,15 @@ pub fn sync_cheats(cheats: Vec<OverlayCheatDto>) {
     }
 }
 
-/// Handle a mouse click inside the in-game overlay bounds.
+/// Handle a mouse/touch click inside the in-game overlay bounds.
 pub fn handle_click(x: i32, y: i32) {
     if let Ok(mut cheats) = CHEATS.lock() {
-        // Overlay menu default position: top-left (x: 20..350, y: 20..30 + 30 * count)
-        if x >= 20 && x <= 350 && y >= 20 {
-            let item_idx = ((y - 50) / 30) as usize;
+        if x >= 30 && x <= 370 && y >= 70 {
+            let item_idx = ((y - 70) / 36) as usize;
             if item_idx < cheats.len() {
                 let cheat = &mut cheats[item_idx];
-                if cheat.kind_str == "toggle" {
-                    cheat.enabled = !cheat.enabled;
-                    tracing::info!("Toggled cheat '{}' -> {}", cheat.label, cheat.enabled);
-                }
+                cheat.enabled = !cheat.enabled;
+                tracing::info!("Touch click toggled cheat '{}' -> {}", cheat.label, cheat.enabled);
             }
         }
     }
@@ -132,8 +187,8 @@ pub fn execute_pinning_cadence() {
 
 // In-game persistent egui state
 static EGUI_CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
-static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static TEST_CHECKBOX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TEST_CHECKBOX: AtomicBool = AtomicBool::new(true);
 
 /// Render the in-game egui frame and return output shapes/primitives.
 pub fn render_in_game_egui(
@@ -144,9 +199,17 @@ pub fn render_in_game_egui(
         let mut lock = EGUI_CTX.lock().ok()?;
         if lock.is_none() {
             let new_ctx = egui::Context::default();
-            // Configure dark gaming theme and high readability fonts
             let mut visuals = egui::Visuals::dark();
-            visuals.window_rounding = egui::Rounding::same(8.0);
+            visuals.window_rounding = egui::Rounding::same(10.0);
+            visuals.window_fill = egui::Color32::from_rgba_premultiplied(12, 16, 24, 210);
+            visuals.panel_fill = egui::Color32::from_rgba_premultiplied(16, 22, 34, 180);
+            visuals.window_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgba_premultiplied(30, 160, 240, 200));
+            visuals.window_shadow = egui::epaint::Shadow {
+                offset: egui::vec2(0.0, 8.0),
+                blur: 16.0,
+                spread: 0.0,
+                color: egui::Color32::from_black_alpha(160),
+            };
             new_ctx.set_visuals(visuals);
             *lock = Some(new_ctx);
         }
@@ -166,7 +229,8 @@ pub fn render_in_game_egui(
     let full_output = ctx.run(raw_input, |ctx| {
         egui::Window::new("🎮 Trainlab In-Game Overlay")
             .fixed_pos(egui::pos2(30.0, 30.0))
-            .fixed_size(egui::vec2(340.0, 420.0))
+            .fixed_size(egui::vec2(340.0, 440.0))
+            .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_premultiplied(12, 16, 24, 205)))
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -174,37 +238,59 @@ pub fn render_in_game_egui(
                 ui.colored_label(egui::Color32::LIGHT_GREEN, "● Active & Hooked into Frame Presentation");
                 ui.separator();
 
-                ui.label("🎮 Steam Deck Controller Controls:");
-                ui.label("• D-Pad Up / Down: Move Focus");
-                ui.label("• A button (Cross / Enter): Toggle / Select");
-                ui.label("• B button (Circle / Esc): Close Overlay");
-                ui.label("• Select + Start: Toggle Overlay");
+                ui.label("🎮 Controls:");
+                ui.label("• D-Pad / Left Stick: Select cheat");
+                ui.label("• A Button / Touch: Toggle cheat");
+                ui.label("• B Button / Select+Start: Close overlay");
 
                 ui.separator();
-                ui.heading("Interactive Widget Test:");
+                ui.heading("Active Cheats:");
 
-                let mut counter = TEST_COUNTER.load(Ordering::Relaxed);
-                ui.horizontal(|ui| {
-                    ui.label(format!("Counter: {counter}"));
-                    if ui.button("➕ Increment").clicked() {
-                        counter += 1;
-                        TEST_COUNTER.store(counter, Ordering::Relaxed);
+                let selected_idx = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
+                let mut cheats = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
+
+                if cheats.is_empty() {
+                    ui.label("No profile cheats loaded yet.");
+                    ui.add_space(8.0);
+                    ui.label("Interactive Widget Test:");
+                    let mut counter = TEST_COUNTER.load(Ordering::Relaxed);
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Counter: {counter}"));
+                        if ui.button("➕ Increment").clicked() {
+                            counter += 1;
+                            TEST_COUNTER.store(counter, Ordering::Relaxed);
+                        }
+                    });
+                } else {
+                    for (i, cheat) in cheats.iter_mut().enumerate() {
+                        let is_selected = i == selected_idx;
+                        let text = format!("{} {}", if cheat.enabled { "🟢" } else { "⚪" }, cheat.label);
+
+                        let response = if is_selected {
+                            // Highlight selected item with glowing background frame
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 90))
+                                .stroke(egui::Stroke::new(1.5, egui::Color32::from_rgb(0, 200, 255)))
+                                .rounding(egui::Rounding::same(6.0))
+                                .show(ui, |ui| {
+                                    ui.checkbox(&mut cheat.enabled, &text)
+                                })
+                                .inner
+                        } else {
+                            ui.checkbox(&mut cheat.enabled, &text)
+                        };
+
+                        if response.changed() {
+                            if let Ok(mut lock) = CHEATS.lock() {
+                                if i < lock.len() {
+                                    lock[i].enabled = cheat.enabled;
+                                }
+                            }
+                        }
                     }
-                });
-
-                let mut chk = TEST_CHECKBOX.load(Ordering::Relaxed);
-                if ui.checkbox(&mut chk, "Enable Pinning Cadence").changed() {
-                    TEST_CHECKBOX.store(chk, Ordering::Relaxed);
                 }
 
-                ui.separator();
-                let cheats = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
-                ui.label(format!("Loaded Cheats: {}", cheats.len()));
-                for c in &cheats {
-                    ui.label(format!("• {} ({})", c.label, c.kind_str));
-                }
-
-                ui.add_space(10.0);
+                ui.add_space(15.0);
                 if ui.button("❌ Close Overlay (or press B)").clicked() {
                     super::set_overlay_visible(false);
                 }

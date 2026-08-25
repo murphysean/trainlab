@@ -45,27 +45,29 @@ pub unsafe extern "system" fn hooked_wndproc(
 
     let overlay_active = super::STATE.overlay_visible.load(Ordering::Relaxed);
 
-    // 2. Track mouse position & clicks
+    // 2. Track mouse position & clicks for egui
     match msg {
         WM_MOUSEMOVE => {
-            let x = (lparam & 0xFFFF) as i16 as i32;
-            let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
-            MOUSE_X.store(x, Ordering::Relaxed);
-            MOUSE_Y.store(y, Ordering::Relaxed);
+            let x = (lparam & 0xFFFF) as i16 as f32;
+            let y = ((lparam >> 16) & 0xFFFF) as i16 as f32;
+            if overlay_active {
+                super::overlay::push_pointer_event(x, y, None);
+            }
         }
         WM_LBUTTONDOWN => {
-            MOUSE_DOWN.store(true, Ordering::Relaxed);
+            let x = (lparam & 0xFFFF) as i16 as f32;
+            let y = ((lparam >> 16) & 0xFFFF) as i16 as f32;
             if overlay_active {
-                // If overlay is open and user clicks it, handle click inside overlay
-                let x = (lparam & 0xFFFF) as i16 as i32;
-                let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
-                super::overlay::handle_click(x, y);
+                super::overlay::push_pointer_event(x, y, Some(true));
+                super::overlay::handle_click(x as i32, y as i32);
                 return 0; // Block game from receiving the click
             }
         }
         WM_LBUTTONUP => {
-            MOUSE_DOWN.store(false, Ordering::Relaxed);
+            let x = (lparam & 0xFFFF) as i16 as f32;
+            let y = ((lparam >> 16) & 0xFFFF) as i16 as f32;
             if overlay_active {
+                super::overlay::push_pointer_event(x, y, Some(false));
                 return 0;
             }
         }

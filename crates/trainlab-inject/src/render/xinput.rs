@@ -98,12 +98,15 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
 
         let overlay_active = super::STATE.overlay_visible.load(Ordering::Relaxed);
         if overlay_active {
-            // Overlay is ACTIVE: Translate buttons into egui keyboard navigation events
+            // Overlay is ACTIVE: Translate buttons & sticks into egui navigation events
             let prev = PREV_BUTTONS.swap(buttons, Ordering::Relaxed);
             let just_pressed = buttons & !prev;
 
+            let thumb_ly = unsafe { (*state).Gamepad.sThumbLY };
+            let thumb_lx = unsafe { (*state).Gamepad.sThumbLX };
+
             // Route to egui event queue
-            super::overlay::push_controller_buttons(just_pressed);
+            super::overlay::push_controller_input(just_pressed, thumb_ly, thumb_lx);
 
             // MASK OUT game buttons so game receives ZERO input while overlay is open
             unsafe {
