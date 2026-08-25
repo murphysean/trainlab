@@ -1281,6 +1281,36 @@ fn main() -> eframe::Result<()> {
                             // Always request a repaint to keep UI live
                             event_ctx.request_repaint();
 
+                            // Forward relevant session mutations as protocol::Event to the DLL
+                            match &evt {
+                                crate::event::SessionEvent::CheatUpdated { id, enabled, value, .. } => {
+                                    if let Some(en) = enabled {
+                                        controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::CheatToggled { id: *id, enabled: *en });
+                                    }
+                                    if let Some(val_str) = value {
+                                        let bytes = if let Ok(n) = val_str.parse::<i64>() {
+                                            Some(n.to_le_bytes().to_vec())
+                                        } else {
+                                            None
+                                        };
+                                        controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::CheatValueChanged {
+                                            id: *id,
+                                            value_str: val_str.clone(),
+                                            pinned_bytes: bytes,
+                                        });
+                                    }
+                                }
+                                crate::event::SessionEvent::ProfileLoaded { .. } => {
+                                    let cheats_dto = if let Ok(s) = event_session.lock() {
+                                        s.export_overlay_cheats()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::SyncCheats { cheats: cheats_dto });
+                                }
+                                _ => {}
+                            }
+
                             // Handle window visibility directly via Win32 so it works
                             // even when the window is backgrounded / hidden.
                             #[cfg(windows)]

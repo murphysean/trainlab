@@ -1,40 +1,26 @@
 //! In-game interactive overlay logic and input translation for `egui`.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use trainlab_core::protocol::OverlayCheatDto;
+use trainlab_core::protocol::{Event, OverlayCheatDto};
 
 pub static CHEATS: Mutex<Vec<OverlayCheatDto>> = Mutex::new(Vec::new());
+
+// Outbound event queue (events generated inside the overlay to be broadcasted over IPC)
+pub static OUTBOUND_EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 
 // Queued raw events destined for egui
 static PENDING_EGUI_EVENTS: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
 
-// Navigation state: Active tab (0 = Cheats, 1 = Memory Pins)
+// Navigation state: Active tab (0 = Cheats/Toggles, 1 = Memory/Pinned Values)
 static ACTIVE_TAB: AtomicU64 = AtomicU64::new(0);
 
 // Selected item index in the current active tab
 static SELECTED_INDEX: AtomicU64 = AtomicU64::new(0);
 
-// Stick debounce / trigger state (prevents hyper-speed repeating on analog sticks)
+// Stick debounce / trigger state
 static STICK_TRIGGERED_Y: AtomicBool = AtomicBool::new(false);
 static STICK_TRIGGERED_X: AtomicBool = AtomicBool::new(false);
-
-// Interactive Mock Cheats Tab
-static TEST_GOD_MODE: AtomicBool = AtomicBool::new(true);
-static TEST_INFINITE_AMMO: AtomicBool = AtomicBool::new(false);
-static TEST_NO_RELOAD: AtomicBool = AtomicBool::new(true);
-static TEST_INFINITE_STAMINA: AtomicBool = AtomicBool::new(false);
-static TEST_SPEED_BOOST: AtomicBool = AtomicBool::new(false);
-
-// Interactive Mock Memory / Pinned Values Tab
-static TEST_HEALTH_VAL: AtomicI64 = AtomicI64::new(100);
-static TEST_HEALTH_PIN: AtomicBool = AtomicBool::new(true);
-static TEST_AMMO_VAL: AtomicI64 = AtomicI64::new(32);
-static TEST_AMMO_PIN: AtomicBool = AtomicBool::new(true);
-static TEST_SAMPLES_VAL: AtomicI64 = AtomicI64::new(500);
-static TEST_SAMPLES_PIN: AtomicBool = AtomicBool::new(false);
-static TEST_MEDKITS_VAL: AtomicI64 = AtomicI64::new(4);
-static TEST_MEDKITS_PIN: AtomicBool = AtomicBool::new(true);
 
 // XInput Button Bitmasks
 pub const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
@@ -52,11 +38,15 @@ pub const XINPUT_GAMEPAD_B: u16 = 0x2000;
 pub const XINPUT_GAMEPAD_X: u16 = 0x4000;
 pub const XINPUT_GAMEPAD_Y: u16 = 0x8000;
 
-fn get_tab_item_count(tab: u64) -> u64 {
-    match tab {
-        0 => 5, // Cheats: God mode, Ammo, No Reload, Stamina, Speed
-        1 => 4, // Memory: Health, Ammo, Samples, Medkits
-        _ => 5,
+fn get_active_tab_item_count() -> usize {
+    let tab = ACTIVE_TAB.load(Ordering::Relaxed);
+    let cheats = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
+    if tab == 0 {
+        // Toggle / Button cheats
+        cheats.iter().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").count().max(1)
+    } else {
+        // Value / Pinned memory cheats
+        cheats.iter().filter(|c| c.kind_str == "value").count().max(1)
     }
 }
 
@@ -78,7 +68,7 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         SELECTED_INDEX.store(0, Ordering::Relaxed);
     }
 
-    // 2. Analog Stick Debouncing (Only trigger step when stick enters deadzone threshold)
+    // 2. Analog Stick Debouncing
     let stick_up = thumb_ly > 22000;
     let stick_down = thumb_ly < -22000;
     let stick_neutral_y = thumb_ly.abs() < 12000;
@@ -117,8 +107,7 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         }
     }
 
-    let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-    let item_count = get_tab_item_count(cur_tab);
+    let item_count = get_active_tab_item_count() as u64;
 
     // 3. Move Selection Up / Down
     if move_up {
@@ -126,7 +115,7 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         if cur > 0 {
             SELECTED_INDEX.store(cur - 1, Ordering::Relaxed);
         } else {
-            SELECTED_INDEX.store(item_count - 1, Ordering::Relaxed);
+            SELECTED_INDEX.store(item_count.saturating_sub(1), Ordering::Relaxed);
         }
         events.push(egui::Event::Key {
             key: egui::Key::ArrowUp,
@@ -153,29 +142,30 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         });
     }
 
-    // 4. Left / Right for Value Adjustment in Memory Tab
-    if cur_tab == 1 {
-        let sel = SELECTED_INDEX.load(Ordering::Relaxed);
-        let delta: i64 = if move_right { 10 } else if move_left { -10 } else { 0 };
-        if delta != 0 {
-            match sel {
-                0 => {
-                    let v = (TEST_HEALTH_VAL.load(Ordering::Relaxed) + delta).max(0);
-                    TEST_HEALTH_VAL.store(v, Ordering::Relaxed);
+    let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
+
+    // 4. Left / Right Value Adjustment in Memory Tab
+    if cur_tab == 1 && (move_left || move_right) {
+        let sel = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
+        let delta: i64 = if move_right { 10 } else { -10 };
+        if let Ok(mut cheats) = CHEATS.lock() {
+            let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
+            if sel < val_cheats.len() {
+                let cheat = &mut val_cheats[sel];
+                let current: i64 = cheat.current_value.as_deref().unwrap_or("0").parse().unwrap_or(0);
+                let new_val = (current + delta).max(0);
+                let new_str = new_val.to_string();
+                cheat.current_value = Some(new_str.clone());
+                cheat.pinned_bytes = Some(new_val.to_le_bytes().to_vec());
+
+                // Broadcast Event::CheatValueChanged
+                if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                    out.push(Event::CheatValueChanged {
+                        id: cheat.id,
+                        value_str: new_str,
+                        pinned_bytes: cheat.pinned_bytes.clone(),
+                    });
                 }
-                1 => {
-                    let v = (TEST_AMMO_VAL.load(Ordering::Relaxed) + delta).max(0);
-                    TEST_AMMO_VAL.store(v, Ordering::Relaxed);
-                }
-                2 => {
-                    let v = (TEST_SAMPLES_VAL.load(Ordering::Relaxed) + delta).max(0);
-                    TEST_SAMPLES_VAL.store(v, Ordering::Relaxed);
-                }
-                3 => {
-                    let v = (TEST_MEDKITS_VAL.load(Ordering::Relaxed) + (delta / 10)).max(0);
-                    TEST_MEDKITS_VAL.store(v, Ordering::Relaxed);
-                }
-                _ => {}
             }
         }
     }
@@ -190,25 +180,37 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
             modifiers: egui::Modifiers::NONE,
         });
 
-        let sel = SELECTED_INDEX.load(Ordering::Relaxed);
-        if cur_tab == 0 {
-            // Cheats Tab
-            match sel {
-                0 => TEST_GOD_MODE.store(!TEST_GOD_MODE.load(Ordering::Relaxed), Ordering::Relaxed),
-                1 => TEST_INFINITE_AMMO.store(!TEST_INFINITE_AMMO.load(Ordering::Relaxed), Ordering::Relaxed),
-                2 => TEST_NO_RELOAD.store(!TEST_NO_RELOAD.load(Ordering::Relaxed), Ordering::Relaxed),
-                3 => TEST_INFINITE_STAMINA.store(!TEST_INFINITE_STAMINA.load(Ordering::Relaxed), Ordering::Relaxed),
-                4 => TEST_SPEED_BOOST.store(!TEST_SPEED_BOOST.load(Ordering::Relaxed), Ordering::Relaxed),
-                _ => {}
-            }
-        } else {
-            // Memory Tab -> Toggle Pin state on A
-            match sel {
-                0 => TEST_HEALTH_PIN.store(!TEST_HEALTH_PIN.load(Ordering::Relaxed), Ordering::Relaxed),
-                1 => TEST_AMMO_PIN.store(!TEST_AMMO_PIN.load(Ordering::Relaxed), Ordering::Relaxed),
-                2 => TEST_SAMPLES_PIN.store(!TEST_SAMPLES_PIN.load(Ordering::Relaxed), Ordering::Relaxed),
-                3 => TEST_MEDKITS_PIN.store(!TEST_MEDKITS_PIN.load(Ordering::Relaxed), Ordering::Relaxed),
-                _ => {}
+        let sel = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
+        if let Ok(mut cheats) = CHEATS.lock() {
+            if cur_tab == 0 {
+                // Cheats / Toggles Tab
+                let mut toggles: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").collect();
+                if sel < toggles.len() {
+                    let cheat = &mut toggles[sel];
+                    cheat.enabled = !cheat.enabled;
+                    let id = cheat.id;
+                    let enabled = cheat.enabled;
+
+                    // Emit Event::CheatToggled
+                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                        out.push(Event::CheatToggled { id, enabled });
+                    }
+                    tracing::info!("Overlay toggled cheat #{} '{}' -> {}", id, cheat.label, enabled);
+                }
+            } else {
+                // Memory / Pinned Values Tab
+                let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
+                if sel < val_cheats.len() {
+                    let cheat = &mut val_cheats[sel];
+                    cheat.enabled = !cheat.enabled;
+                    let id = cheat.id;
+                    let enabled = cheat.enabled;
+
+                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                        out.push(Event::CheatToggled { id, enabled });
+                    }
+                    tracing::info!("Overlay toggled pin on memory item #{} '{}' -> {}", id, cheat.label, enabled);
+                }
             }
         }
     }
@@ -260,10 +262,56 @@ pub fn drain_egui_events() -> Vec<egui::Event> {
     }
 }
 
-/// Update the active cheat list displayed by the overlay.
-pub fn sync_cheats(cheats: Vec<OverlayCheatDto>) {
-    if let Ok(mut lock) = CHEATS.lock() {
-        *lock = cheats;
+/// Apply a discrete Event arriving from the IPC Event Bus.
+pub fn apply_event(event: Event) {
+    match event {
+        Event::CheatAdded { cheat } => {
+            if let Ok(mut lock) = CHEATS.lock() {
+                if let Some(existing) = lock.iter_mut().find(|c| c.id == cheat.id) {
+                    *existing = cheat;
+                } else {
+                    lock.push(cheat);
+                }
+            }
+        }
+        Event::CheatToggled { id, enabled } => {
+            if let Ok(mut lock) = CHEATS.lock() {
+                if let Some(cheat) = lock.iter_mut().find(|c| c.id == id) {
+                    cheat.enabled = enabled;
+                }
+            }
+        }
+        Event::CheatValueChanged { id, value_str, pinned_bytes } => {
+            if let Ok(mut lock) = CHEATS.lock() {
+                if let Some(cheat) = lock.iter_mut().find(|c| c.id == id) {
+                    cheat.current_value = Some(value_str);
+                    cheat.pinned_bytes = pinned_bytes;
+                }
+            }
+        }
+        Event::CheatRemoved { id } => {
+            if let Ok(mut lock) = CHEATS.lock() {
+                lock.retain(|c| c.id != id);
+            }
+        }
+        Event::SyncCheats { cheats } => {
+            if let Ok(mut lock) = CHEATS.lock() {
+                *lock = cheats;
+            }
+        }
+        Event::OverlayVisibilityChanged { visible } => {
+            super::set_overlay_visible(visible);
+        }
+        _ => {}
+    }
+}
+
+/// Take all pending outbound events generated inside the overlay to send over IPC.
+pub fn drain_outbound_events() -> Vec<Event> {
+    if let Ok(mut lock) = OUTBOUND_EVENTS.lock() {
+        std::mem::take(&mut *lock)
+    } else {
+        Vec::new()
     }
 }
 
@@ -285,24 +333,31 @@ pub fn handle_click(x: i32, y: i32) {
 
     // List item clicks (y >= 160)
     if x >= 30 && x <= 360 && y >= 160 {
-        let item_idx = ((y - 160) / 38) as u64;
-        SELECTED_INDEX.store(item_idx, Ordering::Relaxed);
-        if cur_tab == 0 {
-            match item_idx {
-                0 => TEST_GOD_MODE.store(!TEST_GOD_MODE.load(Ordering::Relaxed), Ordering::Relaxed),
-                1 => TEST_INFINITE_AMMO.store(!TEST_INFINITE_AMMO.load(Ordering::Relaxed), Ordering::Relaxed),
-                2 => TEST_NO_RELOAD.store(!TEST_NO_RELOAD.load(Ordering::Relaxed), Ordering::Relaxed),
-                3 => TEST_INFINITE_STAMINA.store(!TEST_INFINITE_STAMINA.load(Ordering::Relaxed), Ordering::Relaxed),
-                4 => TEST_SPEED_BOOST.store(!TEST_SPEED_BOOST.load(Ordering::Relaxed), Ordering::Relaxed),
-                _ => {}
-            }
-        } else {
-            match item_idx {
-                0 => TEST_HEALTH_PIN.store(!TEST_HEALTH_PIN.load(Ordering::Relaxed), Ordering::Relaxed),
-                1 => TEST_AMMO_PIN.store(!TEST_AMMO_PIN.load(Ordering::Relaxed), Ordering::Relaxed),
-                2 => TEST_SAMPLES_PIN.store(!TEST_SAMPLES_PIN.load(Ordering::Relaxed), Ordering::Relaxed),
-                3 => TEST_MEDKITS_PIN.store(!TEST_MEDKITS_PIN.load(Ordering::Relaxed), Ordering::Relaxed),
-                _ => {}
+        let item_idx = ((y - 160) / 44) as usize;
+        SELECTED_INDEX.store(item_idx as u64, Ordering::Relaxed);
+        if let Ok(mut cheats) = CHEATS.lock() {
+            if cur_tab == 0 {
+                let mut toggles: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").collect();
+                if item_idx < toggles.len() {
+                    let cheat = &mut toggles[item_idx];
+                    cheat.enabled = !cheat.enabled;
+                    let id = cheat.id;
+                    let enabled = cheat.enabled;
+                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                        out.push(Event::CheatToggled { id, enabled });
+                    }
+                }
+            } else {
+                let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
+                if item_idx < val_cheats.len() {
+                    let cheat = &mut val_cheats[item_idx];
+                    cheat.enabled = !cheat.enabled;
+                    let id = cheat.id;
+                    let enabled = cheat.enabled;
+                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                        out.push(Event::CheatToggled { id, enabled });
+                    }
+                }
             }
         }
     }
@@ -313,10 +368,12 @@ pub fn execute_pinning_cadence() {
     if let Ok(cheats) = CHEATS.lock() {
         let mem = trainlab_core::memory::SelfProcess;
         for c in cheats.iter() {
-            if let Some(pinned_bytes) = &c.pinned_bytes {
-                if c.address != 0 && !pinned_bytes.is_empty() {
-                    use trainlab_core::memory::ProcessMemory;
-                    let _ = mem.write(c.address, pinned_bytes);
+            if c.enabled {
+                if let Some(pinned_bytes) = &c.pinned_bytes {
+                    if c.address != 0 && !pinned_bytes.is_empty() {
+                        use trainlab_core::memory::ProcessMemory;
+                        let _ = mem.write(c.address, pinned_bytes);
+                    }
                 }
             }
         }
@@ -399,6 +456,7 @@ pub fn render_in_game_egui(
 
                 ui.separator();
                 let selected_idx = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
+                let mut cheats = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
 
                 if active_tab == 0 {
                     // TAB 0: Cheats & Toggles
@@ -406,47 +464,38 @@ pub fn render_in_game_egui(
                     ui.label("• LB/RB: Switch Tab | D-Pad: Move | A: Toggle");
                     ui.separator();
 
-                    let items = [
-                        (0, "🛡️ God Mode / Invulnerability", TEST_GOD_MODE.load(Ordering::Relaxed)),
-                        (1, "🔫 Infinite Ammo", TEST_INFINITE_AMMO.load(Ordering::Relaxed)),
-                        (2, "⚡ No Reload / Instant Fire", TEST_NO_RELOAD.load(Ordering::Relaxed)),
-                        (3, "🏃 Infinite Stamina", TEST_INFINITE_STAMINA.load(Ordering::Relaxed)),
-                        (4, "🚀 2x Movement Speed", TEST_SPEED_BOOST.load(Ordering::Relaxed)),
-                    ];
+                    let mut toggle_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").collect();
 
-                    for (idx, label, enabled) in items {
-                        let is_selected = idx == selected_idx;
-                        let text = format!("{} {}", if enabled { "🟢" } else { "⚪" }, label);
+                    if toggle_cheats.is_empty() {
+                        ui.colored_label(egui::Color32::GRAY, "No toggle cheats registered yet.");
+                        ui.label("Add cheats in trainlab-gui, load a profile, or use an AI agent.");
+                    } else {
+                        for (idx, cheat) in toggle_cheats.iter_mut().enumerate() {
+                            let is_selected = idx == selected_idx;
+                            let text = format!("{} {}", if cheat.enabled { "🟢" } else { "⚪" }, cheat.label);
 
-                        if is_selected {
-                            egui::Frame::none()
-                                .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
-                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 220, 255)))
-                                .rounding(egui::Rounding::same(6.0))
-                                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
-                                .show(ui, |ui| {
-                                    let mut val = enabled;
-                                    if ui.checkbox(&mut val, &text).changed() {
-                                        match idx {
-                                            0 => TEST_GOD_MODE.store(val, Ordering::Relaxed),
-                                            1 => TEST_INFINITE_AMMO.store(val, Ordering::Relaxed),
-                                            2 => TEST_NO_RELOAD.store(val, Ordering::Relaxed),
-                                            3 => TEST_INFINITE_STAMINA.store(val, Ordering::Relaxed),
-                                            4 => TEST_SPEED_BOOST.store(val, Ordering::Relaxed),
-                                            _ => {}
+                            if is_selected {
+                                egui::Frame::none()
+                                    .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
+                                    .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 220, 255)))
+                                    .rounding(egui::Rounding::same(6.0))
+                                    .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                                    .show(ui, |ui| {
+                                        if ui.checkbox(&mut cheat.enabled, &text).changed() {
+                                            let id = cheat.id;
+                                            let enabled = cheat.enabled;
+                                            if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                                                out.push(Event::CheatToggled { id, enabled });
+                                            }
                                         }
+                                    });
+                            } else {
+                                if ui.checkbox(&mut cheat.enabled, &text).changed() {
+                                    let id = cheat.id;
+                                    let enabled = cheat.enabled;
+                                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                                        out.push(Event::CheatToggled { id, enabled });
                                     }
-                                });
-                        } else {
-                            let mut val = enabled;
-                            if ui.checkbox(&mut val, &text).changed() {
-                                match idx {
-                                    0 => TEST_GOD_MODE.store(val, Ordering::Relaxed),
-                                    1 => TEST_INFINITE_AMMO.store(val, Ordering::Relaxed),
-                                    2 => TEST_NO_RELOAD.store(val, Ordering::Relaxed),
-                                    3 => TEST_INFINITE_STAMINA.store(val, Ordering::Relaxed),
-                                    4 => TEST_SPEED_BOOST.store(val, Ordering::Relaxed),
-                                    _ => {}
                                 }
                             }
                         }
@@ -457,43 +506,44 @@ pub fn render_in_game_egui(
                     ui.label("• Left/Right: Adjust Value | A: Toggle Pin (📌/🔓)");
                     ui.separator();
 
-                    let mem_items = [
-                        (0, "Health", "0x1428A4010", TEST_HEALTH_VAL.load(Ordering::Relaxed), TEST_HEALTH_PIN.load(Ordering::Relaxed)),
-                        (1, "Primary Ammo", "0x1428A4018", TEST_AMMO_VAL.load(Ordering::Relaxed), TEST_AMMO_PIN.load(Ordering::Relaxed)),
-                        (2, "Rare Samples", "0x1428A4020", TEST_SAMPLES_VAL.load(Ordering::Relaxed), TEST_SAMPLES_PIN.load(Ordering::Relaxed)),
-                        (3, "Stim Packs", "0x1428A4028", TEST_MEDKITS_VAL.load(Ordering::Relaxed), TEST_MEDKITS_PIN.load(Ordering::Relaxed)),
-                    ];
+                    let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
 
-                    for (idx, name, addr_str, val, pinned) in mem_items {
-                        let is_selected = idx == selected_idx;
-                        let pin_icon = if pinned { "📌 PINNED" } else { "🔓 Unpinned" };
-                        let pin_color = if pinned { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY };
+                    if val_cheats.is_empty() {
+                        ui.colored_label(egui::Color32::GRAY, "No memory items registered yet.");
+                        ui.label("Add value cheats in trainlab-gui or run a memory scan.");
+                    } else {
+                        for (idx, cheat) in val_cheats.iter_mut().enumerate() {
+                            let is_selected = idx == selected_idx;
+                            let pin_icon = if cheat.enabled { "📌 PINNED" } else { "🔓 Unpinned" };
+                            let pin_color = if cheat.enabled { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY };
+                            let val_display = cheat.current_value.as_deref().unwrap_or("?");
 
-                        let row_content = |ui: &mut egui::Ui| {
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.label(format!("{} [{}]", name, addr_str));
-                                    ui.colored_label(pin_color, pin_icon);
+                            let row_content = |ui: &mut egui::Ui| {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(format!("{} [{:#x}]", cheat.label, cheat.address));
+                                        ui.colored_label(pin_color, pin_icon);
+                                    });
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.heading(val_display);
+                                    });
                                 });
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.heading(format!("{val}"));
-                                });
-                            });
-                        };
+                            };
 
-                        if is_selected {
-                            egui::Frame::none()
-                                .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
-                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 220, 255)))
-                                .rounding(egui::Rounding::same(6.0))
-                                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
-                                .show(ui, |ui| {
-                                    row_content(ui);
-                                });
-                        } else {
-                            row_content(ui);
+                            if is_selected {
+                                egui::Frame::none()
+                                    .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
+                                    .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 220, 255)))
+                                    .rounding(egui::Rounding::same(6.0))
+                                    .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                                    .show(ui, |ui| {
+                                        row_content(ui);
+                                    });
+                            } else {
+                                row_content(ui);
+                            }
+                            ui.separator();
                         }
-                        ui.separator();
                     }
                 }
 

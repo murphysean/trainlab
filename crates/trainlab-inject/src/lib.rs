@@ -153,7 +153,21 @@ fn handle_connection(mut stream: TcpStream) {
                         }
                     }
                 }
+                Message::Event(event) => {
+                    render::overlay::apply_event(event);
+                }
                 _ => {}
+            }
+
+            // Flush any outbound events produced by the overlay to the connected client
+            let outbound = render::overlay::drain_outbound_events();
+            for evt in outbound {
+                let evt_msg = Message::Event(evt);
+                if let Ok(out) = protocol::encode(&evt_msg) {
+                    if stream.write_all(&out).is_err() {
+                        break;
+                    }
+                }
             }
             continue;
         }
@@ -443,7 +457,7 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
         }
         Request::SyncCheats { cheats } => {
             let count = cheats.len();
-            render::overlay::sync_cheats(cheats);
+            render::overlay::apply_event(trainlab_core::protocol::Event::SyncCheats { cheats });
             Response::CheatsSynced { count }
         }
     }

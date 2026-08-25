@@ -298,8 +298,8 @@ impl SessionState {
         Ok(pid)
     }
     /// Set the game process PID that scan-family tools target.
-    pub fn set_game_pid(&mut self, pid: u32) {
-        self.game_pid = Some(pid);
+    pub fn set_game_pid(&mut self, pid: Option<u32>) {
+        self.game_pid = pid;
     }
 
     /// Get the game process PID.

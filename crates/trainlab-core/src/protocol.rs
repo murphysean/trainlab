@@ -14,8 +14,31 @@ pub enum Message {
     Request { id: u64, req: Request },
     /// Response returned from DLL to GUI/Client matching the request's sequence ID.
     Response { id: u64, resp: Response },
-    /// Asynchronous notification pushed from DLL to GUI (e.g. overlay button press, game state event).
+    /// Asynchronous event broadcasted across the event bus.
+    Event(Event),
+    /// Legacy/Asynchronous notification pushed from DLL to GUI.
     Notification(Notification),
+}
+
+/// Granular discrete events broadcasted between DLL, Desktop GUI, and Web/Agent interfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Event {
+    /// A new cheat was registered in the session.
+    CheatAdded { cheat: OverlayCheatDto },
+    /// A cheat's toggle state changed.
+    CheatToggled { id: u64, enabled: bool },
+    /// A cheat's value or pinned target changed.
+    CheatValueChanged { id: u64, value_str: String, pinned_bytes: Option<Vec<u8>> },
+    /// A cheat was removed from the session.
+    CheatRemoved { id: u64 },
+    /// Full snapshot sync of all active cheats.
+    SyncCheats { cheats: Vec<OverlayCheatDto> },
+    /// Overlay visibility changed.
+    OverlayVisibilityChanged { visible: bool },
+    /// Memory marker added/updated.
+    MarkerSet { name: String, address: u64, note: Option<String> },
+    /// Activity log entry broadcast.
+    ActivityLogged { message: String },
 }
 
 /// Asynchronous push notification types emitted by the injected DLL.
