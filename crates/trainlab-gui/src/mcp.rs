@@ -3429,6 +3429,15 @@ fn parse_addr(session: &SharedSession, s: &str) -> Result<u64, ErrorData> {
 /// (e.g. "wood_ptr"), or a module/marker expression with offsets (e.g. "game.exe+0x1b42e9"
 /// or "player_ptr+0x48").
 pub(crate) fn parse_addr_expr(session: &SharedSession, input: &str) -> Result<u64, ErrorData> {
+    parse_addr_expr_with_mem(session, input, None)
+}
+
+/// Parse an address expression with an optional custom memory reader (useful for testing & offline resolution).
+pub(crate) fn parse_addr_expr_with_mem(
+    session: &SharedSession,
+    input: &str,
+    custom_mem: Option<&dyn trainlab_core::memory::ProcessMemory>,
+) -> Result<u64, ErrorData> {
     let input = input.trim();
 
     // 0. Handle top-level addition/subtraction where a bracketed term is involved, e.g. `[base + 0x10] + 0x20`
@@ -3458,7 +3467,7 @@ pub(crate) fn parse_addr_expr(session: &SharedSession, input: &str) -> Result<u6
 
     if let Some(idx) = split_idx {
         let (base_part, off_part) = (&input[..idx], &input[idx + 1..]);
-        let base = parse_addr_expr(session, base_part)?;
+        let base = parse_addr_expr_with_mem(session, base_part, custom_mem)?;
         let off = parse_addr_str(off_part.trim()).map_err(|e| err(e))?;
         return Ok(if is_add {
             base.wrapping_add(off)
@@ -3470,15 +3479,23 @@ pub(crate) fn parse_addr_expr(session: &SharedSession, input: &str) -> Result<u6
     // 1. Check for nested bracket dereference expression: `[ <inner_expr> ]`
     if input.starts_with('[') && input.ends_with(']') {
         let inner = &input[1..input.len() - 1].trim();
-        let ptr_addr = parse_addr_expr(session, inner)?;
+        let ptr_addr = parse_addr_expr_with_mem(session, inner, custom_mem)?;
         
-        // Read 8-byte pointer from game memory
-        let proc = game_process(session)?;
-        let data = proc.read(ptr_addr, 8).map_err(|e| {
-            err(format!(
-                "failed to dereference pointer at {ptr_addr:#x} (from '{input}'): {e}"
-            ))
-        })?;
+        // Read 8-byte pointer from game memory or custom mem
+        let data = if let Some(mem) = custom_mem {
+            mem.read(ptr_addr, 8).map_err(|e| {
+                err(format!(
+                    "failed to dereference pointer at {ptr_addr:#x} (from '{input}'): {e}"
+                ))
+            })?
+        } else {
+            let proc = game_process(session)?;
+            proc.read(ptr_addr, 8).map_err(|e| {
+                err(format!(
+                    "failed to dereference pointer at {ptr_addr:#x} (from '{input}'): {e}"
+                ))
+            })?
+        };
         if data.len() < 8 {
             return Err(err(format!(
                 "short read dereferencing pointer at {ptr_addr:#x} (from '{input}')"
@@ -4328,6 +4345,7 @@ async fn serve_session_log() -> impl axum::response::IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trainlab_core::memory::ProcessMemory;
     use rmcp::model::CallToolRequestParams;
     use rmcp::service::ServiceExt;
     use rmcp::transport::StreamableHttpClientTransport;
@@ -4615,6 +4633,45 @@ mod tests {
         assert_eq!(parse_addr_expr(&s, "$wood_ptr + 0x48").unwrap(), 0x0e890048);
         assert_eq!(parse_addr_expr(&s, "$wood_ptr - 0x10").unwrap(), 0x0e88fff0);
         assert_eq!(parse_addr_expr(&s, "($wood_ptr + 0x48) + 0x10").unwrap_err().code, rmcp::model::ErrorCode(-32603));
+    }
+
+    #[test]
+    fn test_nested_bracket_pointer_dereference_chain() {
+        let s = SharedSession::default();
+        {
+            let mut session = s.lock().unwrap();
+            session.set_marker("player_base", 0x1000, None).unwrap();
+        }
+
+        // Setup mock memory:
+        // [0x1000 + 0x08] = 0x1008 -> points to 0x2000
+        // [0x2000 + 0x10] = 0x2010 -> points to 0x3000
+        // [0x3000 + 0x14] = target address 0x3014 (holding float 4.0 = 0x40800000)
+        let mut data = vec![0u8; 0x4000];
+        let ptr1: u64 = 0x2000;
+        let ptr2: u64 = 0x3000;
+        data[0x1008..0x1010].copy_from_slice(&ptr1.to_le_bytes());
+        data[0x2010..0x2018].copy_from_slice(&ptr2.to_le_bytes());
+        data[0x3014..0x3018].copy_from_slice(&4.0f32.to_le_bytes());
+
+        let fake_mem = FakeMem { data };
+
+        // Test 1-level dereference: [$player_base + 0x08] => 0x2000
+        let res1 = parse_addr_expr_with_mem(&s, "[$player_base + 0x08]", Some(&fake_mem)).unwrap();
+        assert_eq!(res1, 0x2000);
+
+        // Test 2-level dereference: [[$player_base + 0x08] + 0x10] => 0x3000
+        let res2 = parse_addr_expr_with_mem(&s, "[[$player_base + 0x08] + 0x10]", Some(&fake_mem)).unwrap();
+        assert_eq!(res2, 0x3000);
+
+        // Test 3-level dereference + final field offset: [[[$player_base + 0x08] + 0x10] + 0x14]
+        // This calculates base ptr dereference plus offset 0x14 -> 0x3014
+        let res3 = parse_addr_expr_with_mem(&s, "[[$player_base + 0x08] + 0x10] + 0x14", Some(&fake_mem)).unwrap();
+        assert_eq!(res3, 0x3014);
+
+        // Verify reading final value from the resolved address in fake memory
+        let final_val = fake_mem.read(res3, 4).unwrap();
+        assert_eq!(f32::from_le_bytes(final_val.try_into().unwrap()), 4.0);
     }
 
     #[test]

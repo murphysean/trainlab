@@ -118,7 +118,10 @@ pub fn get_status() -> (String, bool, bool, u64, bool, String, u64, Vec<String>)
     let frame_count = STATE.frame_count.load(Ordering::Relaxed);
     let combo_count = STATE.combo_press_count.load(Ordering::Relaxed);
     let overlay_visible = STATE.overlay_visible.load(Ordering::Relaxed);
+    #[cfg(windows)]
     let input_hook = xinput::get_active_input_hook();
+    #[cfg(not(windows))]
+    let input_hook = "none (unsupported on non-windows)".to_string();
     let overlays = STATE.detected_overlays.lock().map(|s| s.clone()).unwrap_or_default();
 
     (api, present_hooked, wndproc_hooked, frame_count, overlay_visible, input_hook, combo_count, overlays)
