@@ -19,7 +19,13 @@ pub fn find_game(exe_name: &str) -> Option<u32> {
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 
-    let target = exe_name.to_lowercase();
+    let target_clean = std::path::Path::new(exe_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(exe_name)
+        .trim()
+        .to_lowercase();
+
     // SAFETY: snapshot handle is a valid HANDLE; we close it on all paths.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
@@ -36,7 +42,7 @@ pub fn find_game(exe_name: &str) -> Option<u32> {
             // szExeFile is a null-terminated UTF-16 string.
             let name = String::from_utf16_lossy(&entry.szExeFile[..]);
             let name = name.trim_end_matches('\0').to_lowercase();
-            if name == target {
+            if name == target_clean {
                 found = Some(entry.th32ProcessID);
                 break;
             }
@@ -188,10 +194,13 @@ pub fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
     let path_bytes = path.as_bytes_with_nul();
     let path_len = path_bytes.len();
 
+    use windows_sys::Win32::Foundation::GetLastError;
+
     // SAFETY: OpenProcess with valid access rights and PID.
     let process: HANDLE = unsafe { OpenProcess(PROCESS_ALL_ACCESS, 0, pid) };
     if process.is_null() {
-        return Err(format!("OpenProcess failed (pid {pid})"));
+        let err = unsafe { GetLastError() };
+        return Err(format!("OpenProcess failed (pid {pid}, winerr {err})"));
     }
 
     // SAFETY: VirtualAllocEx with a valid process handle and size.
@@ -205,9 +214,10 @@ pub fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
         )
     };
     if remote_addr.is_null() {
+        let err = unsafe { GetLastError() };
         // SAFETY: process is a valid handle.
         unsafe { CloseHandle(process) };
-        return Err("VirtualAllocEx failed".into());
+        return Err(format!("VirtualAllocEx failed (pid {pid}, size {path_len}, winerr {err})"));
     }
 
     // SAFETY: WriteProcessMemory writes path_bytes into the target's memory.
@@ -221,13 +231,14 @@ pub fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
             &mut written,
         )
     };
-    if ok == 0 {
+    if ok == 0 || written != path_len {
+        let err = unsafe { GetLastError() };
         // SAFETY: valid handles/addresses.
         unsafe {
             VirtualFreeEx(process, remote_addr, 0, MEM_RELEASE);
             CloseHandle(process);
         }
-        return Err("WriteProcessMemory failed".into());
+        return Err(format!("WriteProcessMemory failed (pid {pid}, addr {remote_addr:p}, len {path_len}, written {written}, winerr {err})"));
     }
 
     // Resolve LoadLibraryA's address in kernel32 (same in every process).
