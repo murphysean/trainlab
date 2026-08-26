@@ -432,6 +432,11 @@ impl SessionState {
         self.markers.remove(label.trim())
     }
 
+    /// Clear all markers.
+    pub fn clear_markers(&mut self) {
+        self.markers.clear();
+    }
+
     /// Record a mutation and return its undo id.
     #[allow(dead_code)] // used once mutating tools exist (T-030+)
     pub fn record_undo(&mut self, address: u64, original_bytes: Vec<u8>, description: String) -> u64 {

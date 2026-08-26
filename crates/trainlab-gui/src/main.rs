@@ -1627,9 +1627,14 @@ impl eframe::App for TrainlabApp {
                     if ui.button("Disconnect").clicked() {
                         if let Ok(mut s) = self.session.lock() {
                             s.set_connected(false);
+                            s.set_game_pid(None);
+                            s.clear_cheats();
+                            s.clear_markers();
                         }
                         self.connected = false;
                         self.status = "disconnected".into();
+                        self.refresh_game_candidates();
+                        self.auto_match_profile();
                     }
                 }
 
@@ -2019,13 +2024,27 @@ impl TrainlabApp {
         ui.add_space(15.0);
 
         let tracked = self.session.lock().map(|s| s.list_tracked_apps()).unwrap_or_default();
+        let profiles = profile::discover_profiles();
+
         ui.group(|ui| {
-            ui.heading(format!("Tracked Session Binaries & Processes ({})", tracked.len()));
+            ui.horizontal(|ui| {
+                ui.heading(format!("Tracked Session Binaries & Processes ({})", tracked.len()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("🔄 Scan Running Processes").clicked() {
+                        self.refresh_game_candidates();
+                    }
+                });
+            });
             ui.label("Binaries discovered during process scans or launched in this session:");
             ui.add_space(5.0);
 
             if tracked.is_empty() {
-                ui.colored_label(egui::Color32::GRAY, "No tracked binaries in session. Click 'Scan running processes' on the attach screen.");
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::GRAY, "No tracked binaries in session.");
+                    if ui.button("Scan running processes now").clicked() {
+                        self.refresh_game_candidates();
+                    }
+                });
             } else {
                 egui::ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
                     for app in &tracked {
@@ -2050,6 +2069,34 @@ impl TrainlabApp {
                 });
             }
         });
+
+        if !profiles.is_empty() {
+            ui.add_space(15.0);
+            ui.group(|ui| {
+                ui.heading(format!("Game Profiles Known to Trainlab ({})", profiles.len()));
+                ui.label("Games with configured YAML cheat tables ready to launch & attach:");
+                ui.add_space(5.0);
+
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for (file, prof) in &profiles {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("🎮 {}", prof.name));
+                            ui.colored_label(egui::Color32::LIGHT_BLUE, format!("({})", prof.game));
+                            ui.monospace(file);
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let game_exe = prof.game.clone();
+                                if ui.button("🚀 Launch Game").clicked() {
+                                    if let Ok(mut s) = self.session.lock() {
+                                        let _ = s.launch_application(&game_exe, &[]);
+                                    }
+                                }
+                            });
+                        });
+                    }
+                });
+            });
+        }
     }
 }
 
