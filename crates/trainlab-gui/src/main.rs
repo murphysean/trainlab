@@ -98,6 +98,11 @@ struct TrainlabApp {
     scan_val_max: String,
     scan_val_type: trainlab_core::scan::ValueType,
     scan_op_mode: ScanOpMode,
+    // Pointer Playground state
+    playground_expr: String,
+    playground_type: trainlab_core::scan::ValueType,
+    playground_write_val: String,
+    playground_cheat_label: String,
     // Run Applications state
     custom_app_path: String,
     custom_app_args: String,
@@ -177,6 +182,10 @@ impl TrainlabApp {
             scan_val_max: "".into(),
             scan_val_type: trainlab_core::scan::ValueType::I32,
             scan_op_mode: ScanOpMode::Exact,
+            playground_expr: "".into(),
+            playground_type: trainlab_core::scan::ValueType::I32,
+            playground_write_val: "".into(),
+            playground_cheat_label: "".into(),
             custom_app_path: "".into(),
             custom_app_args: "".into(),
             active_tab: ActiveTab::Cheats,
@@ -603,18 +612,32 @@ impl TrainlabApp {
         for cheat in &cheats {
             ui.horizontal(|ui| {
                 match &cheat.kind {
-                    CheatKind::Value { address, value_type } => {
+                    CheatKind::Value { address, value_type, address_expr } => {
+                        // Dynamically re-evaluate address expression if present (e.g. nested pointer dereference)
+                        let target_addr = if let Some(expr) = address_expr {
+                            mcp::parse_addr_expr(&self.session, expr).unwrap_or(*address)
+                        } else {
+                            *address
+                        };
+
                         // Live-read the current value (debounced cache).
-                        let current = self
-                            .read_cached(*address, value_type.size())
-                            .map(|d| format_value(&d, *value_type))
-                            .unwrap_or_else(|| "?".into());
+                        let current = if target_addr != 0 {
+                            self.read_cached(target_addr, value_type.size())
+                                .map(|d| format_value(&d, *value_type))
+                                .unwrap_or_else(|| "?".into())
+                        } else {
+                            "? (null ptr)".into()
+                        };
 
                         ui.label(&cheat.label);
                         if let Some(n) = &cheat.note {
                             ui.label(format!("({n})"));
                         }
-                        ui.label(format!("@ {address:#x}"));
+                        if let Some(expr) = address_expr {
+                            ui.monospace(format!("{expr} -> {target_addr:#x}"));
+                        } else {
+                            ui.label(format!("@ {target_addr:#x}"));
+                        }
                         ui.label(format!("now: {current}"));
 
                         // Editable field (persisted per cheat id).
@@ -625,40 +648,113 @@ impl TrainlabApp {
                         ui.text_edit_singleline(field);
 
                         if ui.button("Apply").clicked() {
-                            // The user is the human confirmation: write directly.
-                            let field_val = field.clone();
-                            let data = parse_value_bytes(&field_val, *value_type);
-                            match data {
-                                Ok(bytes) => {
-                                    let r = self.request(&Request::Write {
-                                        address: *address,
-                                        data: bytes,
-                                    });
-                                    match r {
-                                        Some(Response::Write { bytes_written }) => {
-                                            self.log(format!(
-                                                "cheat '{}' set to {} ({bytes_written} bytes)",
-                                                cheat.label, field_val
-                                            ));
-                                            // T-151: Emit CheatUpdated so SSE dashboard reflects the new value.
-                                            if let Ok(s) = self.session.lock() {
-                                                s.event_bus().emit(crate::event::SessionEvent::CheatUpdated {
-                                                    id: cheat.id,
-                                                    label: cheat.label.clone(),
-                                                    enabled: None,
-                                                    value: Some(field_val.clone()),
-                                                });
+                            if target_addr != 0 {
+                                let field_val = field.clone();
+                                let data = parse_value_bytes(&field_val, *value_type);
+                                match data {
+                                    Ok(bytes) => {
+                                        let r = self.request(&Request::Write {
+                                            address: target_addr,
+                                            data: bytes,
+                                        });
+                                        match r {
+                                            Some(Response::Write { bytes_written }) => {
+                                                self.log(format!(
+                                                    "cheat '{}' set to {} ({bytes_written} bytes)",
+                                                    cheat.label, field_val
+                                                ));
+                                                // Emit CheatUpdated so SSE dashboard reflects the new value.
+                                                if let Ok(s) = self.session.lock() {
+                                                    s.event_bus().emit(crate::event::SessionEvent::CheatUpdated {
+                                                        id: cheat.id,
+                                                        label: cheat.label.clone(),
+                                                        enabled: None,
+                                                        value: Some(field_val.clone()),
+                                                    });
+                                                }
                                             }
+                                            _ => self.log(format!(
+                                                "cheat '{}' write failed",
+                                                cheat.label
+                                            )),
                                         }
-                                        _ => self.log(format!(
-                                            "cheat '{}' write failed",
-                                            cheat.label
-                                        )),
                                     }
+                                    Err(e) => self.log(format!("bad value for '{}': {e}", cheat.label)),
                                 }
-                                Err(e) => self.log(format!("bad value for '{}': {e}", cheat.label)),
+                            } else {
+                                self.log(format!("cannot apply cheat '{}': pointer chain resolved to null", cheat.label));
                             }
                         }
+                    }
+                    CheatKind::Struct { base_address, base_expr, fields } => {
+                        let base_addr = if !base_expr.is_empty() {
+                            mcp::parse_addr_expr(&self.session, base_expr).unwrap_or(*base_address)
+                        } else {
+                            *base_address
+                        };
+
+                        ui.vertical(|ui| {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.heading(format!("📦 {}", cheat.label));
+                                    if !base_expr.is_empty() {
+                                        ui.monospace(format!("({base_expr} -> {base_addr:#x})"));
+                                    } else {
+                                        ui.monospace(format!("(@ {base_addr:#x})"));
+                                    }
+                                    if let Some(n) = &cheat.note {
+                                        ui.label(format!("({n})"));
+                                    }
+                                });
+                                ui.separator();
+
+                                for (idx, field_def) in fields.iter().enumerate() {
+                                    let field_expr = if field_def.offset_expr.starts_with('[') {
+                                        // If already bracketed, evaluate directly
+                                        field_def.offset_expr.clone()
+                                    } else if base_addr != 0 {
+                                        format!("{base_addr:#x} + {}", field_def.offset_expr)
+                                    } else {
+                                        format!("{base_expr} + {}", field_def.offset_expr)
+                                    };
+
+                                    let field_target = mcp::parse_addr_expr(&self.session, &field_expr).unwrap_or(0);
+                                    let current = if field_target != 0 {
+                                        self.read_cached(field_target, field_def.value_type.size())
+                                            .map(|d| format_value(&d, field_def.value_type))
+                                            .unwrap_or_else(|| "?".into())
+                                    } else {
+                                        "?".into()
+                                    };
+
+                                    let field_key = cheat.id * 1000 + idx as u64;
+                                    let mut edit_val = self.cheat_values.get(&field_key).cloned().unwrap_or_else(|| current.clone());
+                                    let mut do_write = false;
+
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("• {}:", field_def.label));
+                                        ui.monospace(format!("@ {field_target:#x}"));
+                                        ui.label(format!("now: {current}"));
+                                        let text_edit = ui.add(egui::TextEdit::singleline(&mut edit_val).desired_width(70.0));
+                                        if text_edit.changed() {
+                                            self.cheat_values.insert(field_key, edit_val.clone());
+                                        }
+                                        if ui.button("Apply").clicked() {
+                                            do_write = true;
+                                        }
+                                    });
+
+                                    if do_write && field_target != 0 {
+                                        if let Ok(bytes) = parse_value_bytes(&edit_val, field_def.value_type) {
+                                            let r = self.request(&Request::Write { address: field_target, data: bytes });
+                                            if let Some(Response::Write { bytes_written }) = r {
+                                                self.log(format!("struct field '{}.{}' set to {edit_val} ({bytes_written} bytes)", cheat.label, field_def.label));
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        });
                     }
                     CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
                         let mut on = *enabled;
@@ -961,12 +1057,17 @@ impl TrainlabApp {
                     self.log(format!("hotkey button '{}' failed: {e}", label));
                 }
             }
-            CheatKind::Value { address, value_type } => {
+            CheatKind::Value { address, value_type, address_expr } => {
+                let target_addr = if let Some(expr) = address_expr {
+                    mcp::parse_addr_expr(&self.session, &expr).unwrap_or(address)
+                } else {
+                    address
+                };
                 // For value cheats, re-apply the value currently in the edit box if present.
                 if let Some(val_str) = self.cheat_values.get(&cheat_id).cloned() {
                     if let Ok(bytes) = parse_value_bytes(&val_str, value_type) {
                         let r = self.request(&Request::Write {
-                            address,
+                            address: target_addr,
                             data: bytes,
                         });
                         match r {
@@ -977,6 +1078,14 @@ impl TrainlabApp {
                         }
                     }
                 }
+            }
+            CheatKind::Struct { base_address, base_expr, fields } => {
+                let base_addr = if !base_expr.is_empty() {
+                    mcp::parse_addr_expr(&self.session, &base_expr).unwrap_or(base_address)
+                } else {
+                    base_address
+                };
+                self.log(format!("hotkey triggered struct '{}' (@ {base_addr:#x}): {} field(s)", label, fields.len()));
             }
         }
     }
@@ -1284,6 +1393,7 @@ impl TrainlabApp {
                                                 crate::session::CheatKind::Value {
                                                     address: *addr,
                                                     value_type: vt,
+                                                    address_expr: Some(format!("{addr:#x}")),
                                                 },
                                                 None,
                                                 Some("Added from search UI".into()),
@@ -1860,7 +1970,106 @@ impl eframe::App for TrainlabApp {
                             self.show_session_panel(ui);
                         }
                         ActiveTab::PointersInspection => {
-                            ui.heading("Pointers & Offsets (Memory Inspection)");
+                            ui.heading("🎯 Pointer Chains & Memory Inspection Playground");
+                            ui.label("Evaluate arbitrary nested pointer expressions (e.g. '[[[$player_base + 0x08] + 0x10] + 0x14]'), test live reads/writes, and export directly to Cheats.");
+                            ui.add_space(5.0);
+
+                            ui.group(|ui| {
+                                ui.heading("🔬 Live Pointer Expression Tester");
+                                ui.horizontal(|ui| {
+                                    ui.label("Expression:");
+                                    ui.add(egui::TextEdit::singleline(&mut self.playground_expr).hint_text("e.g. [[[$player_base + 0x08] + 0x10] + 0x14]").desired_width(280.0));
+
+                                    ui.label("Type:");
+                                    egui::ComboBox::from_id_source("playground_vt")
+                                        .selected_text(format!("{:?}", self.playground_type))
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.playground_type, trainlab_core::scan::ValueType::I32, "i32");
+                                            ui.selectable_value(&mut self.playground_type, trainlab_core::scan::ValueType::U32, "u32");
+                                            ui.selectable_value(&mut self.playground_type, trainlab_core::scan::ValueType::F32, "f32");
+                                            ui.selectable_value(&mut self.playground_type, trainlab_core::scan::ValueType::I64, "i64");
+                                            ui.selectable_value(&mut self.playground_type, trainlab_core::scan::ValueType::U64, "u64");
+                                            ui.selectable_value(&mut self.playground_type, trainlab_core::scan::ValueType::F64, "f64");
+                                            ui.selectable_value(&mut self.playground_type, trainlab_core::scan::ValueType::Ptr, "ptr");
+                                        });
+                                });
+
+                                let expr_clean = self.playground_expr.trim().to_string();
+                                if !expr_clean.is_empty() {
+                                    let eval_res = mcp::parse_addr_expr(&self.session, &expr_clean);
+                                    match eval_res {
+                                        Ok(target_addr) => {
+                                            let live_val = if target_addr != 0 {
+                                                self.read_cached(target_addr, self.playground_type.size())
+                                                    .map(|d| format_value(&d, self.playground_type))
+                                                    .unwrap_or_else(|| "?".into())
+                                            } else {
+                                                "? (null ptr)".into()
+                                            };
+
+                                            ui.horizontal(|ui| {
+                                                ui.colored_label(egui::Color32::GREEN, "✔ Resolved Address:");
+                                                ui.monospace(format!("{target_addr:#018x}"));
+                                                ui.label(format!("Live Value: {live_val}"));
+                                            });
+
+                                            let mut do_write = false;
+                                            let mut do_popout = false;
+
+                                            ui.horizontal(|ui| {
+                                                ui.label("Write Value:");
+                                                ui.add(egui::TextEdit::singleline(&mut self.playground_write_val).desired_width(90.0));
+                                                if ui.button("Write Now").clicked() {
+                                                    do_write = true;
+                                                }
+
+                                                ui.separator();
+                                                ui.label("Cheat Label:");
+                                                ui.add(egui::TextEdit::singleline(&mut self.playground_cheat_label).hint_text("e.g. Player Health").desired_width(120.0));
+                                                if ui.button("➕ Pop Out to Cheats Tab").clicked() {
+                                                    do_popout = true;
+                                                }
+                                            });
+
+                                            if do_write && target_addr != 0 {
+                                                if let Ok(bytes) = parse_value_bytes(&self.playground_write_val, self.playground_type) {
+                                                    let r = self.request(&Request::Write { address: target_addr, data: bytes });
+                                                    if let Some(Response::Write { bytes_written }) = r {
+                                                        self.log(format!("wrote {} to {target_addr:#x} ({bytes_written} bytes)", self.playground_write_val));
+                                                    }
+                                                }
+                                            }
+
+                                            if do_popout {
+                                                let lbl = if !self.playground_cheat_label.trim().is_empty() {
+                                                    self.playground_cheat_label.trim().to_string()
+                                                } else {
+                                                    format!("Value @ {expr_clean}")
+                                                };
+                                                if let Ok(mut s) = self.session.lock() {
+                                                    let cheat_id = s.add_cheat(
+                                                        &lbl,
+                                                        crate::session::CheatKind::Value {
+                                                            address: target_addr,
+                                                            value_type: self.playground_type,
+                                                            address_expr: Some(expr_clean.clone()),
+                                                        },
+                                                        None,
+                                                        Some(&format!("Exported from Playground ({expr_clean})")),
+                                                    );
+                                                    s.log_activity("UI", format!("created pointer cheat '{lbl}' (id {cheat_id})"));
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            ui.colored_label(egui::Color32::RED, format!("❌ Evaluation error: {:?}", e.message));
+                                        }
+                                    }
+                                }
+                            });
+
+                            ui.separator();
+                            ui.heading("Raw Memory Operations");
                             ui.horizontal(|ui| {
                                 if ui.button("Read").clicked() {
                                     let ops: Vec<(usize, u64, usize)> = self

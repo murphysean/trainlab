@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use serde::{Deserialize, Serialize};
 
 /// A labeled address the agent persists across turns (D7).
 #[derive(Debug, Clone)]
@@ -41,6 +42,17 @@ pub struct Cheat {
     pub note: Option<String>,
 }
 
+/// A field inside a clustered struct cheat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructField {
+    /// Field name / label (e.g. "Health", "Shield", "Mining Speed").
+    pub label: String,
+    /// Offset expression relative to base or nested bracket expression (e.g. "0x08", "[+0x10] + 0x14").
+    pub offset_expr: String,
+    /// Value type of this field (i32, f32, etc.).
+    pub value_type: trainlab_core::scan::ValueType,
+}
+
 /// The kind of a cheat.
 #[derive(Debug, Clone)]
 pub enum CheatKind {
@@ -50,6 +62,17 @@ pub enum CheatKind {
         address: u64,
         /// The value type (i32, f32, etc.).
         value_type: trainlab_core::scan::ValueType,
+        /// Optional symbolic expression (e.g. "[[[$player_base+0x8]+0x10]+0x14]").
+        address_expr: Option<String>,
+    },
+    /// A clustered struct cheat holding multiple typed fields anchored to a base address/marker.
+    Struct {
+        /// Base address of the struct instance.
+        base_address: u64,
+        /// Base marker expression (e.g. "$player_base").
+        base_expr: String,
+        /// The fields within this struct.
+        fields: Vec<StructField>,
     },
     /// A code-cave hook the user can toggle on/off (dynamic install/uninstall).
     Toggle {
@@ -663,6 +686,7 @@ impl SessionState {
             .map(|c| {
                 let (address, kind_str, enabled) = match &c.kind {
                     CheatKind::Value { address, .. } => (*address, "value".to_string(), false),
+                    CheatKind::Struct { base_address, .. } => (*base_address, "struct".to_string(), false),
                     CheatKind::Toggle { target, enabled, .. } => (*target, "toggle".to_string(), *enabled),
                     CheatKind::Patch { target, enabled, .. } => (*target, "toggle".to_string(), *enabled),
                     CheatKind::Button { .. } => (0, "button".to_string(), false),
@@ -844,6 +868,7 @@ mod tests {
             CheatKind::Value {
                 address: 0x100,
                 value_type: ValueType::I32,
+                address_expr: None,
             },
             None,
             Some("wood stock"),

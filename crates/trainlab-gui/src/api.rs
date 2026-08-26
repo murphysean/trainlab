@@ -243,6 +243,7 @@ async fn get_cheats(State(state): State<ApiState>) -> Result<Json<Vec<CheatDto>>
             crate::session::CheatKind::Patch { enabled, .. } => ("patch".to_string(), Some(*enabled), None),
             crate::session::CheatKind::Button { .. } => ("button".to_string(), None, None),
             crate::session::CheatKind::Value { value_type, .. } => ("value".to_string(), None, Some(format!("{value_type:?}"))),
+            crate::session::CheatKind::Struct { fields, .. } => ("struct".to_string(), None, Some(format!("{} field(s)", fields.len()))),
         };
         CheatDto {
             id: c.id,

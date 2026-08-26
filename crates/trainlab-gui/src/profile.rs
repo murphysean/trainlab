@@ -129,6 +129,12 @@ pub struct ProfileCheat {
     /// For value cheats: a known/initial value to populate (e.g. "400").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// For struct cheats: base address or marker expression (e.g. "$player_base").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// For struct cheats: the list of child fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<crate::session::StructField>>,
     /// For button cheats: a sequence of commands to execute when pressed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<ProfileCommand>>,
@@ -348,6 +354,8 @@ mod tests {
                 mechanism: Some("cave".into()),
                 rate_hz: None,
                 value: Some("400".into()),
+                base: None,
+                fields: None,
                 commands: None,
                 hotkey: None,
                 note: Some("wood stock".into()),
@@ -411,6 +419,8 @@ mod tests {
                 mechanism: None,
                 rate_hz: None,
                 value: None,
+                base: None,
+                fields: None,
                 commands: None,
                 hotkey: None,
                 note: Some("mining speed test".into()),

@@ -850,7 +850,8 @@ impl TrainlabMcpServer {
                     .address
                     .as_deref()
                     .ok_or_else(|| err("value cheat requires 'address'"))?;
-                let address = parse_addr(&self.session, address)?;
+                let address_expr_str = args.address.clone();
+                let address = parse_addr(&self.session, args.address.as_deref().unwrap())?;
                 let vt = args
                     .value_type
                     .as_deref()
@@ -868,6 +869,7 @@ impl TrainlabMcpServer {
                 CheatKind::Value {
                     address,
                     value_type,
+                    address_expr: address_expr_str,
                 }
             }
             "toggle" => {
@@ -973,8 +975,15 @@ impl TrainlabMcpServer {
             .iter()
             .map(|c| {
                 let kind = match &c.kind {
-                    CheatKind::Value { address, value_type } => {
-                        format!("value {value_type:?} @ {address:#x}")
+                    CheatKind::Value { address, value_type, address_expr } => {
+                        if let Some(expr) = address_expr {
+                            format!("value {value_type:?} @ {expr} ({address:#x})")
+                        } else {
+                            format!("value {value_type:?} @ {address:#x}")
+                        }
+                    }
+                    CheatKind::Struct { base_address, base_expr, fields } => {
+                        format!("struct ({base_expr} @ {base_address:#x}) [{} field(s)]", fields.len())
                     }
                     CheatKind::Toggle { target, enabled, .. } => {
                         format!("toggle @ {target:#x} ({})", if *enabled { "on" } else { "off" })
@@ -1045,7 +1054,14 @@ impl TrainlabMcpServer {
                 .get_cheat(args.id)
                 .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
             match &c.kind {
-                CheatKind::Value { address, value_type } => (*address, *value_type),
+                CheatKind::Value { address, value_type, address_expr } => {
+                    let target = if let Some(expr) = address_expr {
+                        parse_addr_expr(&self.session, expr).unwrap_or(*address)
+                    } else {
+                        *address
+                    };
+                    (target, *value_type)
+                }
                 _ => {
                     return Err(err(format!("cheat {} is not a value cheat", args.id)))
                 }
@@ -1058,19 +1074,22 @@ impl TrainlabMcpServer {
             .session
             .lock()
             .map_err(|_| err("session lock poisoned"))?;
-        let pid = s.stage_op(
+        let op_id = s.stage_op_with_cheat(
             address,
-            PendingKind::Write { data: data.clone() },
+            crate::session::PendingKind::Write { data: data.clone() },
             format!(
-                "set cheat '{}' to {} at {:#x}",
-                args.id, args.value, address
+                "write {} ({value_type:?}) @ {address:#018x}",
+                args.value,
             ),
+            Some(args.id),
         );
+        s.log_activity("MCP", format!("staged write value for cheat {} (op_id {op_id})", args.id));
         drop(s);
+        self.request_repaint();
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(format!(
-                "staged cheat value write (pending id {pid}) at {:#x}. Call 'confirm_op' to apply.",
-                address
+                "staged write op #{op_id}: set cheat {} value to '{}' @ {address:#018x}. Apply with 'confirm_op' (id {op_id}) or discard with 'reject_op' (id {op_id}).",
+                args.id, args.value
             )),
         ]))
     }
@@ -1396,6 +1415,17 @@ impl TrainlabMcpServer {
                     crate::session::CheatKind::Value {
                         address,
                         value_type: vt,
+                        address_expr: pc.address_ref.clone(),
+                    }
+                }
+                "struct" => {
+                    let base_expr = pc.base.clone().or_else(|| pc.address_ref.clone()).unwrap_or_default();
+                    let base_address = resolve_cheat_address(&resolved, pc).unwrap_or(0);
+                    let fields = pc.fields.clone().unwrap_or_default();
+                    crate::session::CheatKind::Struct {
+                        base_address,
+                        base_expr,
+                        fields,
                     }
                 }
                 "toggle" => {
@@ -1537,9 +1567,12 @@ impl TrainlabMcpServer {
         let profile_cheats: Vec<ProfileCheat> = cheats
             .iter()
             .map(|c| {
-                let (kind, value_type, address_ref, target_ref, hook, payload) = match &c.kind {
-                    crate::session::CheatKind::Value { address, value_type } => {
-                        ("value".to_string(), Some(format!("{value_type:?}").to_lowercase()), Some(format!("{address:#x}")), None, None, None)
+                let (kind, value_type, address_ref, target_ref, hook, payload, base, fields) = match &c.kind {
+                    crate::session::CheatKind::Value { address, value_type, address_expr } => {
+                        ("value".to_string(), Some(format!("{value_type:?}").to_lowercase()), address_expr.clone().or_else(|| Some(format!("{address:#x}"))), None, None, None, None, None)
+                    }
+                    crate::session::CheatKind::Struct { base_address: _, base_expr, fields } => {
+                        ("struct".to_string(), None, None, None, None, None, Some(base_expr.clone()), Some(fields.clone()))
                     }
                     crate::session::CheatKind::Toggle { target, hook, .. } => {
                         let (hk, pl) = match hook {
@@ -1550,13 +1583,13 @@ impl TrainlabMcpServer {
                                 ("override".to_string(), Some(hex_encode(payload)))
                             }
                         };
-                        ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl)
+                        ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl, None, None)
                     }
-                    crate::session::CheatKind::Patch { target, patch_bytes, original_bytes, cave_ref, .. } => {
-                        ("patch".to_string(), None, None, Some(format!("{target:#x}")), cave_ref.clone(), Some(hex_encode(patch_bytes)))
+                    crate::session::CheatKind::Patch { target, patch_bytes, original_bytes: _, cave_ref, .. } => {
+                        ("patch".to_string(), None, None, Some(format!("{target:#x}")), cave_ref.clone(), Some(hex_encode(patch_bytes)), None, None)
                     }
-                    CheatKind::Button { commands } => {
-                        ("button".to_string(), None, None, None, None, None)
+                    CheatKind::Button { .. } => {
+                        ("button".to_string(), None, None, None, None, None, None, None)
                     }
                 };
                 ProfileCheat {
@@ -1573,6 +1606,8 @@ impl TrainlabMcpServer {
                     mechanism: None,
                     rate_hz: None,
                     value: None,
+                    base,
+                    fields,
                     commands: match &c.kind {
                         CheatKind::Button { commands } => Some(commands.clone()),
                         _ => None,
@@ -3396,16 +3431,61 @@ fn parse_addr(session: &SharedSession, s: &str) -> Result<u64, ErrorData> {
 pub(crate) fn parse_addr_expr(session: &SharedSession, input: &str) -> Result<u64, ErrorData> {
     let input = input.trim();
 
-    // 1. Check for `+` or `-` offset expression: <base> + <offset>
-    if let Some((base_part, off_part)) = input.split_once('+') {
-        let base = parse_addr_expr(session, base_part)?;
-        let off = parse_addr_str(off_part.trim()).map_err(|e| err(e))?;
-        return Ok(base.wrapping_add(off));
+    // 0. Handle top-level addition/subtraction where a bracketed term is involved, e.g. `[base + 0x10] + 0x20`
+    // We only split on '+' or '-' if it is OUTSIDE of any enclosing square brackets.
+    let mut bracket_depth = 0;
+    let mut split_idx = None;
+    let mut is_add = true;
+
+    for (i, c) in input.char_indices().rev() {
+        match c {
+            ']' => bracket_depth += 1,
+            '[' => bracket_depth -= 1,
+            '+' if bracket_depth == 0 => {
+                split_idx = Some(i);
+                is_add = true;
+                break;
+            }
+            '-' if bracket_depth == 0 && i > 0 => {
+                // Ensure '-' is not a unary negative or part of a hex token
+                split_idx = Some(i);
+                is_add = false;
+                break;
+            }
+            _ => {}
+        }
     }
-    if let Some((base_part, off_part)) = input.split_once('-') {
+
+    if let Some(idx) = split_idx {
+        let (base_part, off_part) = (&input[..idx], &input[idx + 1..]);
         let base = parse_addr_expr(session, base_part)?;
         let off = parse_addr_str(off_part.trim()).map_err(|e| err(e))?;
-        return Ok(base.wrapping_sub(off));
+        return Ok(if is_add {
+            base.wrapping_add(off)
+        } else {
+            base.wrapping_sub(off)
+        });
+    }
+
+    // 1. Check for nested bracket dereference expression: `[ <inner_expr> ]`
+    if input.starts_with('[') && input.ends_with(']') {
+        let inner = &input[1..input.len() - 1].trim();
+        let ptr_addr = parse_addr_expr(session, inner)?;
+        
+        // Read 8-byte pointer from game memory
+        let proc = game_process(session)?;
+        let data = proc.read(ptr_addr, 8).map_err(|e| {
+            err(format!(
+                "failed to dereference pointer at {ptr_addr:#x} (from '{input}'): {e}"
+            ))
+        })?;
+        if data.len() < 8 {
+            return Err(err(format!(
+                "short read dereferencing pointer at {ptr_addr:#x} (from '{input}')"
+            )));
+        }
+        let target_ptr = u64::from_le_bytes(data[..8].try_into().unwrap());
+        return Ok(target_ptr);
     }
 
     // 2. Try raw address string (0x hex or decimal)
@@ -4300,6 +4380,8 @@ mod tests {
             mechanism: None,
             rate_hz: None,
             value: None,
+            base: None,
+            fields: None,
             commands: None,
             hotkey: None,
             note: None,
@@ -4481,11 +4563,25 @@ mod tests {
     }
 
     #[test]
-    fn write_value_encodes_typed_values() {
+    fn parse_hex_bytes_accepts_spaced_and_unspaced() {
+        assert_eq!(parse_hex_bytes("00 80 ac 43").unwrap(), vec![0x00, 0x80, 0xac, 0x43]);
+        assert_eq!(parse_hex_bytes("0080ac43").unwrap(), vec![0x00, 0x80, 0xac, 0x43]);
+        assert_eq!(parse_hex_bytes("  00  80  ac  43  ").unwrap(), vec![0x00, 0x80, 0xac, 0x43]);
+        assert_eq!(parse_hex_bytes("").unwrap(), Vec::<u8>::new());
+        assert!(parse_hex_bytes("00 80 zzz").is_err());
+    }
+
+    #[test]
+    fn parse_value_bytes_all_types() {
         // i32
         assert_eq!(
-            parse_value_bytes("99990", trainlab_core::scan::ValueType::I32).unwrap(),
-            99990i32.to_le_bytes().to_vec()
+            parse_value_bytes("14790", trainlab_core::scan::ValueType::I32).unwrap(),
+            14790i32.to_le_bytes().to_vec()
+        );
+        // f32
+        assert_eq!(
+            parse_value_bytes("14790.0", trainlab_core::scan::ValueType::F32).unwrap(),
+            14790.0f32.to_le_bytes().to_vec()
         );
         // f64
         assert_eq!(
@@ -4518,6 +4614,7 @@ mod tests {
         assert_eq!(parse_addr_expr(&s, "wood_ptr + 0x48").unwrap(), 0x0e890048);
         assert_eq!(parse_addr_expr(&s, "$wood_ptr + 0x48").unwrap(), 0x0e890048);
         assert_eq!(parse_addr_expr(&s, "$wood_ptr - 0x10").unwrap(), 0x0e88fff0);
+        assert_eq!(parse_addr_expr(&s, "($wood_ptr + 0x48) + 0x10").unwrap_err().code, rmcp::model::ErrorCode(-32603));
     }
 
     #[test]
