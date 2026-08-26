@@ -32,16 +32,6 @@ pub fn assemble_text(
     let mut referenced_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut total_instructions = 0usize;
 
-    // Pre-create labels for any known external session symbols
-    for sym_name in symbols.keys() {
-        let name = sym_name.trim().trim_start_matches('$').to_lowercase();
-        if !labels_map.contains_key(&name) {
-            let lbl = a.create_label();
-            labels_map.insert(name.clone(), lbl);
-        }
-        defined_labels.insert(name);
-    }
-
     let lines: Vec<&str> = asm_code.lines().collect();
 
     // First pass: scan for all defined labels `label_name:`
@@ -108,7 +98,18 @@ pub fn assemble_text(
         }
     }
 
-    let assembled = a.assemble(origin_rip).map_err(|e| format!("assemble error: {e}"))?;
+    // In iced_x86 CodeAssembler, a label set at the very end of the code stream
+    // without any trailing instruction or byte causes "Unused label".
+    // If the last emitted element was a label, emit a 0-byte slice / nop or let it assemble.
+    let assembled = match a.assemble(origin_rip) {
+        Ok(bytes) => bytes,
+        Err(e) if e.to_string().contains("Unused label") => {
+            // Emitting a nop or zero-byte at the end allows terminal labels like `.replay:` to bind
+            let _ = a.nop();
+            a.assemble(origin_rip).map_err(|e| format!("assemble error: {e}"))?
+        }
+        Err(e) => return Err(format!("assemble error: {e}")),
+    };
     let hex = assembled.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
 
     Ok(AssembledBlock {
@@ -317,18 +318,126 @@ fn parse_and_emit_instruction(
                 } else {
                     return Err(format!("unknown source operand for mov: {}", args[1]));
                 }
+            } else if let Ok(dst) = parse_gpr8(args[0]) {
+                if let Ok(src) = parse_gpr8(args[1]) {
+                    a.mov(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                    a.mov(dst, mem).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.mov(dst, imm as u32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for mov: {}", args[1]));
+                }
             } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.mov(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr32(args[1]) {
                     a.mov(dst_mem, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr8(args[1]) {
+                    a.mov(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
-                    a.mov(dst_mem, imm as u32).map_err(|e| e.to_string())?;
+                    let mem_lower = args[0].to_lowercase();
+                    if mem_lower.contains("byte") {
+                        a.mov(dst_mem, imm as u32).map_err(|e| e.to_string())?;
+                    } else if mem_lower.contains("qword") {
+                        a.mov(dst_mem, imm as i32).map_err(|e| e.to_string())?;
+                    } else {
+                        a.mov(dst_mem, imm as u32).map_err(|e| e.to_string())?;
+                    }
                 } else {
                     return Err(format!("unknown source operand for mov to mem: {}", args[1]));
                 }
             } else {
                 return Err(format!("unsupported mov operands: {}, {}", args[0], args[1]));
+            }
+        }
+        "cmp" => {
+            if args.len() != 2 { return Err("cmp requires 2 operands".into()); }
+            if let Ok(dst) = parse_gpr64(args[0]) {
+                if let Ok(src) = parse_gpr64(args[1]) {
+                    a.cmp(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                    a.cmp(dst, mem).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.cmp(dst, imm as i32).map_err(|e| e.to_string())?;
+                }
+            } else if let Ok(dst) = parse_gpr32(args[0]) {
+                if let Ok(src) = parse_gpr32(args[1]) {
+                    a.cmp(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                    a.cmp(dst, mem).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.cmp(dst, imm as i32).map_err(|e| e.to_string())?;
+                }
+            } else if let Ok(dst) = parse_gpr8(args[0]) {
+                if let Ok(src) = parse_gpr8(args[1]) {
+                    a.cmp(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                    a.cmp(dst, mem).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.cmp(dst, imm as u32).map_err(|e| e.to_string())?;
+                }
+            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+                if let Ok(src) = parse_gpr64(args[1]) {
+                    a.cmp(dst_mem, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr32(args[1]) {
+                    a.cmp(dst_mem, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr8(args[1]) {
+                    a.cmp(dst_mem, src).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    let mem_lower = args[0].to_lowercase();
+                    if mem_lower.contains("byte") {
+                        a.cmp(dst_mem, imm as u32).map_err(|e| e.to_string())?;
+                    } else if mem_lower.contains("qword") {
+                        a.cmp(dst_mem, imm as i32).map_err(|e| e.to_string())?;
+                    } else {
+                        a.cmp(dst_mem, imm as i32).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+        "je" | "jz" | "jne" | "jnz" | "jg" | "jge" | "jl" | "jle" | "ja" | "jae" | "jb" | "jbe" | "js" | "jns" => {
+            if args.len() != 1 { return Err(format!("{mnemonic} requires 1 operand")); }
+            let target = args[0];
+            let name = target.trim().trim_start_matches('$').to_lowercase();
+            referenced_labels.insert(name.clone());
+            let lbl = labels.entry(name).or_insert_with(|| a.create_label()).clone();
+            match mnemonic.as_str() {
+                "je" | "jz" => { a.je(lbl).map_err(|e| e.to_string())?; }
+                "jne" | "jnz" => { a.jne(lbl).map_err(|e| e.to_string())?; }
+                "jg" => { a.jg(lbl).map_err(|e| e.to_string())?; }
+                "jge" => { a.jge(lbl).map_err(|e| e.to_string())?; }
+                "jl" => { a.jl(lbl).map_err(|e| e.to_string())?; }
+                "jle" => { a.jle(lbl).map_err(|e| e.to_string())?; }
+                "ja" => { a.ja(lbl).map_err(|e| e.to_string())?; }
+                "jae" => { a.jae(lbl).map_err(|e| e.to_string())?; }
+                "jb" => { a.jb(lbl).map_err(|e| e.to_string())?; }
+                "jbe" => { a.jbe(lbl).map_err(|e| e.to_string())?; }
+                "js" => { a.js(lbl).map_err(|e| e.to_string())?; }
+                "jns" => { a.jns(lbl).map_err(|e| e.to_string())?; }
+                _ => {}
+            }
+        }
+        "test" => {
+            if args.len() != 2 { return Err("test requires 2 operands".into()); }
+            if let Ok(dst) = parse_gpr64(args[0]) {
+                if let Ok(src) = parse_gpr64(args[1]) {
+                    a.test(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.test(dst, imm as i32).map_err(|e| e.to_string())?;
+                }
+            } else if let Ok(dst) = parse_gpr32(args[0]) {
+                if let Ok(src) = parse_gpr32(args[1]) {
+                    a.test(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.test(dst, imm as i32).map_err(|e| e.to_string())?;
+                }
+            } else if let Ok(dst) = parse_gpr8(args[0]) {
+                if let Ok(src) = parse_gpr8(args[1]) {
+                    a.test(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.test(dst, imm as u32).map_err(|e| e.to_string())?;
+                }
             }
         }
         "xor" | "xorps" => {
@@ -341,6 +450,9 @@ fn parse_and_emit_instruction(
                 a.xor(dst, src).map_err(|e| e.to_string())?;
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 let src = parse_gpr32(args[1])?;
+                a.xor(dst, src).map_err(|e| e.to_string())?;
+            } else if let Ok(dst) = parse_gpr8(args[0]) {
+                let src = parse_gpr8(args[1])?;
                 a.xor(dst, src).map_err(|e| e.to_string())?;
             }
         }
@@ -431,6 +543,18 @@ fn parse_gpr32(s: &str) -> Result<iced_x86::code_asm::AsmRegister32, String> {
     }
 }
 
+fn parse_gpr8(s: &str) -> Result<iced_x86::code_asm::AsmRegister8, String> {
+    use iced_x86::code_asm::*;
+    match s.trim().to_lowercase().as_str() {
+        "al" => Ok(al), "cl" => Ok(cl), "dl" => Ok(dl), "bl" => Ok(bl),
+        "ah" => Ok(ah), "ch" => Ok(ch), "dh" => Ok(dh), "bh" => Ok(bh),
+        "spl" => Ok(spl), "bpl" => Ok(bpl), "sil" => Ok(sil), "dil" => Ok(dil),
+        "r8b" => Ok(r8b), "r9b" => Ok(r9b), "r10b" => Ok(r10b), "r11b" => Ok(r11b),
+        "r12b" => Ok(r12b), "r13b" => Ok(r13b), "r14b" => Ok(r14b), "r15b" => Ok(r15b),
+        other => Err(format!("not an 8-bit register: '{other}'")),
+    }
+}
+
 fn parse_mem(
     s: &str,
     symbols: &HashMap<String, u64>,
@@ -442,7 +566,12 @@ fn parse_mem(
     use iced_x86::code_asm::*;
 
     let s = s.trim();
-    let inner = if let Some(stripped) = s.strip_prefix("dword ptr [").or_else(|| s.strip_prefix("DWORD PTR [")).or_else(|| s.strip_prefix("qword ptr [")).or_else(|| s.strip_prefix("QWORD PTR [")).or_else(|| s.strip_prefix('[')) {
+    let s_lower = s.to_lowercase();
+    let is_byte = s_lower.starts_with("byte ptr [") || s_lower.starts_with("byte [");
+    let is_word = s_lower.starts_with("word ptr [") || s_lower.starts_with("word [");
+    let is_qword = s_lower.starts_with("qword ptr [") || s_lower.starts_with("qword [");
+
+    let inner = if let Some(stripped) = s.strip_prefix("dword ptr [").or_else(|| s.strip_prefix("DWORD PTR [")).or_else(|| s.strip_prefix("dword [")).or_else(|| s.strip_prefix("DWORD [")).or_else(|| s.strip_prefix("qword ptr [")).or_else(|| s.strip_prefix("QWORD PTR [")).or_else(|| s.strip_prefix("qword [")).or_else(|| s.strip_prefix("QWORD [")).or_else(|| s.strip_prefix("word ptr [")).or_else(|| s.strip_prefix("WORD PTR [")).or_else(|| s.strip_prefix("word [")).or_else(|| s.strip_prefix("WORD [")).or_else(|| s.strip_prefix("byte ptr [")).or_else(|| s.strip_prefix("BYTE PTR [")).or_else(|| s.strip_prefix("byte [")).or_else(|| s.strip_prefix("BYTE [")).or_else(|| s.strip_prefix('[')) {
         stripped.strip_suffix(']').ok_or_else(|| format!("unclosed bracket in '{s}'"))?
     } else {
         return Err(format!("expected memory operand with brackets '[...]', got '{s}'"));
@@ -450,50 +579,62 @@ fn parse_mem(
 
     let inner = inner.trim();
 
+    let wrap_mem = |mem: iced_x86::code_asm::AsmMemoryOperand| -> iced_x86::code_asm::AsmMemoryOperand {
+        if is_byte {
+            byte_ptr(mem)
+        } else if is_word {
+            word_ptr(mem)
+        } else if is_qword {
+            qword_ptr(mem)
+        } else {
+            dword_ptr(mem)
+        }
+    };
+
     // Check for RIP-relative addressing: `[rip + ...]` or `[rip - ...]`
     if let Some(stripped) = inner.strip_prefix("rip +").or_else(|| inner.strip_prefix("RIP +")).or_else(|| inner.strip_prefix("rip+")).or_else(|| inner.strip_prefix("RIP+")) {
         let trimmed = stripped.trim();
         if let Ok(disp) = parse_u64_expr(trimmed, symbols) {
             let target_addr = origin_rip.wrapping_add(disp);
-            return Ok(dword_ptr(target_addr));
+            return Ok(wrap_mem(dword_ptr(target_addr)));
         }
         let sym_name = trimmed.trim_start_matches('$').to_lowercase();
         referenced_labels.insert(sym_name.clone());
         let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
-        return Ok(dword_ptr(lbl));
+        return Ok(wrap_mem(dword_ptr(lbl)));
     }
     if let Some(stripped) = inner.strip_prefix("rip -").or_else(|| inner.strip_prefix("RIP -")).or_else(|| inner.strip_prefix("rip-")).or_else(|| inner.strip_prefix("RIP-")) {
         let trimmed = stripped.trim();
         if let Ok(disp) = parse_u64_expr(trimmed, symbols) {
             let target_addr = origin_rip.wrapping_sub(disp);
-            return Ok(dword_ptr(target_addr));
+            return Ok(wrap_mem(dword_ptr(target_addr)));
         }
         let sym_name = trimmed.trim_start_matches('$').to_lowercase();
         referenced_labels.insert(sym_name.clone());
         let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
-        return Ok(dword_ptr(lbl));
+        return Ok(wrap_mem(dword_ptr(lbl)));
     }
 
     // Check for base + offset, e.g. `rax+0x10` or `rax-0x8` or `rbx + 0x190`
     if let Some((reg_str, off_str)) = inner.split_once('+') {
         let reg = parse_gpr64(reg_str.trim())?;
         let off = parse_u64_expr(off_str.trim(), symbols)? as i32;
-        return Ok(dword_ptr(reg + off));
+        return Ok(wrap_mem(dword_ptr(reg + off)));
     }
     if let Some((reg_str, off_str)) = inner.split_once('-') {
         let reg = parse_gpr64(reg_str.trim())?;
         let off = parse_u64_expr(off_str.trim(), symbols)? as i32;
-        return Ok(dword_ptr(reg - off));
+        return Ok(wrap_mem(dword_ptr(reg - off)));
     }
 
     // Plain register, e.g. `[rax]`
     if let Ok(reg) = parse_gpr64(inner) {
-        return Ok(dword_ptr(reg));
+        return Ok(wrap_mem(dword_ptr(reg)));
     }
 
     // Check for symbol / marker expression e.g. `$cave_val` or `0x1400100`
     if let Ok(addr) = parse_u64_expr(inner, symbols) {
-        return Ok(dword_ptr(addr));
+        return Ok(wrap_mem(dword_ptr(addr)));
     }
 
     Err(format!("unsupported memory operand syntax: '{s}'"))
@@ -647,5 +788,41 @@ mod ce_verbatim_porting {
         assert!(r.is_err(), "expected unresolved label error, but succeeded with hex: {:?}", r.unwrap().hex);
         let err_msg = r.unwrap_err();
         assert!(err_msg.contains("unresolved label or marker 'miningspeedvaltypo'"), "unexpected error msg: {err_msg}");
+    }
+
+    #[test]
+    fn test_cmp_je_and_memory_immediates() {
+        let code = r#"
+            cmp byte ptr [rip + flag], 0
+            je skip
+            push rax
+            mov rax, [rdi+0x280]
+            mov dword ptr [rax+0x14], 0x40800000
+            mov byte ptr [rip + flag], 0
+            pop rax
+            skip:
+            jmp replay
+            flag:
+              db 0
+            replay:
+        "#;
+        let r = assemble_text(code, 0x140000000, &HashMap::new());
+        assert!(r.is_ok(), "failed to assemble cmp/je payload: {:?}", r.err());
+        let block = r.unwrap();
+        assert!(!block.bytes.is_empty());
+    }
+
+    #[test]
+    fn test_mov_dword_immediate_mem() {
+        let code = r#"
+            push rax
+            mov rax, [rdi+0x280]
+            mov dword [rax+0x14], 0x40800000
+            pop rax
+        "#;
+        let r = assemble_text(code, 0x140000000, &HashMap::new());
+        assert!(r.is_ok(), "failed to assemble mov dword payload: {:?}", r.err());
+        let block = r.unwrap();
+        assert!(!block.bytes.is_empty());
     }
 }
