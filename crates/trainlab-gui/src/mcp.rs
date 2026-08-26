@@ -569,6 +569,9 @@ pub struct AddCheatArgs {
     /// For toggle cheats: the shellcode payload (hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// For toggle cheats: optional assembly source text (e.g. Cheat-Engine-style ASM with [rip + label] constants).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asm: Option<String>,
     /// For toggle cheats: jump style ("absolute" or "relative").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
@@ -873,7 +876,21 @@ impl TrainlabMcpServer {
                     .as_deref()
                     .ok_or_else(|| err("toggle cheat requires 'target'"))?;
                 let target = parse_addr(&self.session, target)?;
-                let payload = parse_hex_bytes(args.payload.as_deref().unwrap_or(""))?;
+                let payload = if let Some(asm_src) = &args.asm {
+                    let symbols: std::collections::HashMap<String, u64> = {
+                        let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                        s.list_markers()
+                            .into_iter()
+                            .map(|m| (m.label.clone(), m.address))
+                            .collect()
+                    };
+                    let origin = target;
+                    let block = crate::asm::assemble_text(asm_src, origin, &symbols)
+                        .map_err(|e| err(format!("asm assembly failed: {e}")))?;
+                    block.bytes
+                } else {
+                    parse_hex_bytes(args.payload.as_deref().unwrap_or(""))?
+                };
                 let jump_style = match args.jump.as_deref().unwrap_or("absolute").to_lowercase().as_str() {
                     "relative" | "short" => trainlab_core::cave_hook::JumpStyle::Relative,
                     _ => trainlab_core::cave_hook::JumpStyle::Absolute,
