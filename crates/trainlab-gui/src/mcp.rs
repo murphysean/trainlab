@@ -874,9 +874,13 @@ impl TrainlabMcpServer {
                     .ok_or_else(|| err("toggle cheat requires 'target'"))?;
                 let target = parse_addr(&self.session, target)?;
                 let payload = parse_hex_bytes(args.payload.as_deref().unwrap_or(""))?;
+                let jump_style = match args.jump.as_deref().unwrap_or("absolute").to_lowercase().as_str() {
+                    "relative" | "short" => trainlab_core::cave_hook::JumpStyle::Relative,
+                    _ => trainlab_core::cave_hook::JumpStyle::Absolute,
+                };
                 let hook = match args.hook.as_deref().unwrap_or("trampoline") {
-                    "trampoline" => CaveHook::Trampoline { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
-                    "override" => CaveHook::Override { payload, jump: trainlab_core::cave_hook::JumpStyle::Absolute },
+                    "trampoline" => CaveHook::Trampoline { payload, jump: jump_style },
+                    "override" => CaveHook::Override { payload, jump: jump_style },
                     other => return Err(err(format!("unknown hook '{other}'"))),
                 };
                 CheatKind::Toggle {
