@@ -317,6 +317,9 @@ mod tests {
             name: "Unrailed 2 resources".into(),
             inject_dll: true,
             version: "1.0.0".into(),
+            game_version: None,
+            date: None,
+            author: None,
             setup: vec![
                 SetupStep::AobScan {
                     name: "god_mode_ret".into(),
@@ -367,6 +370,9 @@ mod tests {
             name: "x".into(),
             inject_dll: true,
             version: "".into(),
+            game_version: None,
+            date: None,
+            author: None,
             setup: vec![],
             init_commands: None,
             cheats: vec![],
@@ -386,6 +392,9 @@ mod tests {
             name: "asm test".into(),
             inject_dll: true,
             version: "".into(),
+            game_version: None,
+            date: None,
+            author: None,
             setup: vec![],
             init_commands: None,
             cheats: vec![ProfileCheat {

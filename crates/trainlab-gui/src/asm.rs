@@ -453,6 +453,10 @@ fn parse_mem(
     // Check for RIP-relative addressing: `[rip + ...]` or `[rip - ...]`
     if let Some(stripped) = inner.strip_prefix("rip +").or_else(|| inner.strip_prefix("RIP +")).or_else(|| inner.strip_prefix("rip+")).or_else(|| inner.strip_prefix("RIP+")) {
         let trimmed = stripped.trim();
+        if let Ok(disp) = parse_u64_expr(trimmed, symbols) {
+            let target_addr = origin_rip.wrapping_add(disp);
+            return Ok(dword_ptr(target_addr));
+        }
         let sym_name = trimmed.trim_start_matches('$').to_lowercase();
         referenced_labels.insert(sym_name.clone());
         let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
@@ -460,6 +464,10 @@ fn parse_mem(
     }
     if let Some(stripped) = inner.strip_prefix("rip -").or_else(|| inner.strip_prefix("RIP -")).or_else(|| inner.strip_prefix("rip-")).or_else(|| inner.strip_prefix("RIP-")) {
         let trimmed = stripped.trim();
+        if let Ok(disp) = parse_u64_expr(trimmed, symbols) {
+            let target_addr = origin_rip.wrapping_sub(disp);
+            return Ok(dword_ptr(target_addr));
+        }
         let sym_name = trimmed.trim_start_matches('$').to_lowercase();
         referenced_labels.insert(sym_name.clone());
         let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
