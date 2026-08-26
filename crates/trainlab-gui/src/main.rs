@@ -206,7 +206,7 @@ impl TrainlabApp {
         self.game_candidates = inject::find_game_candidates();
         if let Ok(mut s) = self.session.lock() {
             for proc in &self.game_candidates {
-                s.record_tracked_app(&proc.name, Some(proc.pid), None);
+                s.record_tracked_app(&proc.name, Some(proc.pid), proc.path.as_deref());
             }
         }
         self.log(format!(
@@ -252,6 +252,8 @@ impl TrainlabApp {
             match controller::find_inject_connect(&session) {
                 Ok(version) => {
                     if let Ok(mut s) = session.lock() {
+                        let attached_pid = s.game_pid();
+                        s.record_tracked_app(&game_name, attached_pid, None);
                         s.log_activity("UI", format!("connected, inject v{version} — awaiting DLL graphics & engine readiness..."));
                     }
 
@@ -982,6 +984,11 @@ impl TrainlabApp {
     /// Auto-discover running game processes and match against YAML cheat profiles.
     fn auto_match_profile(&mut self) {
         self.game_candidates = inject::find_game_candidates();
+        if let Ok(mut s) = self.session.lock() {
+            for proc in &self.game_candidates {
+                s.record_tracked_app(&proc.name, Some(proc.pid), proc.path.as_deref());
+            }
+        }
         let profiles = profile::discover_profiles();
         if profiles.is_empty() {
             return;

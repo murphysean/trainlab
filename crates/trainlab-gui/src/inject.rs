@@ -57,11 +57,12 @@ pub fn find_game(exe_name: &str) -> Option<u32> {
 pub struct ProcessInfo {
     pub name: String,
     pub pid: u32,
+    pub path: Option<String>,
 }
 
 /// Enumerate all running processes via `CreateToolhelp32Snapshot`.
 ///
-/// Returns a list of `(name, pid)` for every process in the snapshot. This is
+/// Returns a list of `(name, pid, path)` for every process in the snapshot. This is
 /// the raw API; use [`find_game_candidates`] to narrow to likely games.
 #[cfg(windows)]
 pub fn list_processes() -> Vec<ProcessInfo> {
@@ -70,6 +71,7 @@ pub fn list_processes() -> Vec<ProcessInfo> {
         TH32CS_SNAPPROCESS,
     };
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
 
     let mut out = Vec::new();
     // SAFETY: snapshot handle is a valid HANDLE; we close it on all paths.
@@ -86,9 +88,24 @@ pub fn list_processes() -> Vec<ProcessInfo> {
         loop {
             let name = String::from_utf16_lossy(&entry.szExeFile[..]);
             let name = name.trim_end_matches('\0').to_string();
+
+            // Try to resolve full image path via QueryFullProcessImageNameW
+            let mut full_path = None;
+            let proc_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID) };
+            if !proc_handle.is_null() {
+                let mut path_buf = [0u16; 1024];
+                let mut size = path_buf.len() as u32;
+                if unsafe { QueryFullProcessImageNameW(proc_handle, 0, path_buf.as_mut_ptr(), &mut size) } != 0 {
+                    let path_str = String::from_utf16_lossy(&path_buf[..size as usize]);
+                    full_path = Some(path_str);
+                }
+                unsafe { CloseHandle(proc_handle); }
+            }
+
             out.push(ProcessInfo {
                 name,
                 pid: entry.th32ProcessID,
+                path: full_path,
             });
             // SAFETY: entry is a valid pointer; loop until Process32NextW fails.
             if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
