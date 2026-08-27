@@ -237,6 +237,109 @@ pub struct ProfileSaveArgs {
     pub file: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageWriteArgs {
+    pub address: String,
+    pub data: Option<String>,
+    pub value: Option<String>,
+    pub value_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallCaveArgs {
+    pub target: String,
+    pub hook: String,
+    pub payload: String,
+    #[serde(default = "default_absolute")]
+    pub jump: String,
+    pub marker: Option<String>,
+}
+
+fn default_absolute() -> String {
+    "absolute".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssembleAsmArgs {
+    pub code: String,
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocCodeCaveArgs {
+    pub name: String,
+    pub size: Option<usize>,
+    pub payload: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmitRelativeJumpArgs {
+    pub from: String,
+    pub to: String,
+    pub pad_to_len: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureGateSpec {
+    pub reg: String,
+    pub cmp: String,
+    pub value_type: Option<String>,
+    pub value: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureRegArgs {
+    pub target: String,
+    pub reg: String,
+    pub value_type: String,
+    pub capacity: usize,
+    pub stop_on_match: bool,
+    pub gate: Option<CaptureGateSpec>,
+    pub jump: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadCapturesArgs {
+    pub id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UninstallCaptureArgs {
+    pub id: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchWritesArgs {
+    pub address: String,
+    pub len: Option<usize>,
+    pub one_shot: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BreakOnCodeArgs {
+    pub address: String,
+    pub one_shot: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetOverlayVisibleArgs {
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpConfirmArgs {
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoArgs {
+    #[serde(default)]
+    pub id: u64,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1563,11 +1666,393 @@ pub fn execute_save_profile(
     ))
 }
 
+/// Calculate relative jump bytes (E9 rel32) from patch site to target/cave, padded with NOPs up to pad_to_len.
+pub fn execute_emit_relative_jump(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: Option<&dyn ProcessMemory>,
+    args: EmitRelativeJumpArgs,
+) -> Result<ToolResult, ToolError> {
+    let from = eval_addr_expr(session, &args.from, mem)?;
+    let to = eval_addr_expr(session, &args.to, mem)?;
+    let pad_len = args.pad_to_len.unwrap_or(5).max(5);
+
+    // RIP at the end of the 5-byte E9 instruction is (from + 5)
+    let rel_i64 = (to as i64) - (from as i64 + 5);
+    if rel_i64 < (i32::MIN as i64) || rel_i64 > (i32::MAX as i64) {
+        return Err(err(format!(
+            "relative jump distance ({rel_i64} bytes) exceeds 32-bit ±2GB range between {from:#x} and {to:#x}"
+        )));
+    }
+    let rel_i32 = rel_i64 as i32;
+    let mut bytes = vec![0xE9u8];
+    bytes.extend_from_slice(&rel_i32.to_le_bytes());
+
+    while bytes.len() < pad_len {
+        bytes.push(0x90); // NOP padding
+    }
+
+    let hex_str = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let text = format!(
+        "relative jump from {from:#x} to {to:#x} (padded to {pad_len} bytes):\nhex: \"{hex_str}\""
+    );
+
+    Ok(ToolResult::with_data(
+        text,
+        serde_json::json!({
+            "from": from,
+            "to": to,
+            "pad_len": pad_len,
+            "hex": hex_str,
+            "bytes": bytes,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Assemble human-readable x86-64 assembly source into machine code bytes (iced-x86).
+pub fn execute_assemble_asm(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: Option<&dyn ProcessMemory>,
+    args: AssembleAsmArgs,
+) -> Result<ToolResult, ToolError> {
+    let mut symbols = std::collections::HashMap::new();
+    if let Ok(s) = session.lock() {
+        for m in s.list_markers() {
+            symbols.insert(m.label.clone(), m.address);
+            symbols.insert(m.label.to_lowercase(), m.address);
+        }
+    }
+
+    let origin_rip = if let Some(orig) = &args.origin {
+        eval_addr_expr(session, orig, mem)?
+    } else {
+        0
+    };
+
+    let assembled = crate::asm::assemble_text(&args.code, origin_rip, &symbols)
+        .map_err(err)?;
+
+    let disasm_lines = crate::disasm::disassemble(origin_rip, &assembled.bytes, Some(50));
+
+    let output = format!(
+        "assembled {} byte(s) (origin {origin_rip:#x}):\nhex: \"{}\"\n\ndisassembled:\n{}",
+        assembled.bytes.len(),
+        assembled.hex,
+        disasm_lines.join("\n")
+    );
+
+    Ok(ToolResult::with_data(
+        output,
+        serde_json::json!({
+            "bytes": assembled.bytes,
+            "hex": assembled.hex,
+            "instruction_count": assembled.instruction_count,
+            "origin": origin_rip,
+            "disassembly": disasm_lines,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// List all staged (pending) mutations awaiting confirmation.
+pub fn execute_list_pending(
+    session: &SharedSession,
+    ctx: &ClientContext,
+) -> Result<ToolResult, ToolError> {
+    let s = session
+        .lock()
+        .map_err(|_| err("session lock poisoned"))?;
+    let pending = s.list_pending();
+    if pending.is_empty() {
+        return Ok(ToolResult::with_data(
+            "(no pending mutations)".to_string(),
+            serde_json::json!({
+                "pending": [],
+                "client_id": ctx.id,
+            }),
+        ));
+    }
+    let mut lines = vec![format!("{} pending mutation(s) awaiting confirmation:", pending.len())];
+    for op in &pending {
+        lines.push(format!("  [{}] {}", op.id, op.preview));
+    }
+    let text = lines.join("\n");
+    let json_items: Vec<_> = pending.iter().map(|p| serde_json::json!({
+        "id": p.id,
+        "address": p.address,
+        "preview": p.preview,
+        "cheat_id": p.cheat_id,
+    })).collect();
+
+    Ok(ToolResult::with_data(
+        text,
+        serde_json::json!({
+            "pending": json_items,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Discard a staged mutation by id without applying it.
+pub fn execute_reject_op(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    args: OpConfirmArgs,
+) -> Result<ToolResult, ToolError> {
+    let op = {
+        let mut s = session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
+        s.take_pending(args.id)
+    };
+    match op {
+        Some(op) => {
+            if let Ok(mut s) = session.lock() {
+                s.log_activity(&ctx.id, format!("rejected pending op {} ({})", op.id, op.preview));
+            }
+            Ok(ToolResult::with_data(
+                format!("rejected pending op {} ({})", op.id, op.preview),
+                serde_json::json!({
+                    "id": op.id,
+                    "preview": op.preview,
+                    "client_id": ctx.id,
+                }),
+            ))
+        }
+        None => Err(err(format!(
+            "no pending op {}. Stage one with 'write'/'install_cave'/'undo' first.",
+            args.id
+        ))),
+    }
+}
+
+/// Stage a write to game memory for confirmation (D8 gate).
+pub fn execute_stage_write(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: Option<&dyn ProcessMemory>,
+    args: StageWriteArgs,
+) -> Result<ToolResult, ToolError> {
+    use crate::session::PendingKind;
+    let address = eval_addr_expr(session, &args.address, mem)?;
+    let (data, desc) = match (args.data.as_deref(), args.value.as_deref()) {
+        (Some(hex_str), None) => {
+            let bytes = crate::expr::parse_hex_bytes(hex_str).map_err(err)?;
+            if bytes.is_empty() {
+                return Err(err("write data cannot be empty"));
+            }
+            let desc = format!(
+                "write {} byte(s) at {:#x}: {}",
+                bytes.len(),
+                address,
+                bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            );
+            (bytes, desc)
+        }
+        (None, Some(val_str)) => {
+            let vt_str = args.value_type.as_deref().unwrap_or_else(|| {
+                if val_str.trim().starts_with("0x") || val_str.trim().starts_with("0X") {
+                    "ptr"
+                } else {
+                    "i32"
+                }
+            });
+            let value_type = crate::expr::parse_value_type(vt_str).map_err(err)?;
+            let bytes = crate::expr::parse_value_bytes(val_str, value_type).map_err(err)?;
+            if bytes.is_empty() {
+                return Err(err("write value cannot be empty"));
+            }
+            let desc = format!(
+                "write value '{}' ({}) at {:#x}: {}",
+                val_str,
+                vt_str,
+                address,
+                bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+            );
+            (bytes, desc)
+        }
+        (Some(_), Some(_)) => {
+            return Err(err("specify either 'data' (raw hex) or 'value' (typed value), but not both"));
+        }
+        (None, None) => {
+            return Err(err("must specify either 'data' (raw hex) or 'value' (typed value)"));
+        }
+    };
+
+    let mut s = session
+        .lock()
+        .map_err(|_| err("session lock poisoned"))?;
+    let id = s.stage_op(
+        address,
+        PendingKind::Write { data: data.clone() },
+        desc,
+    );
+    s.log_activity(&ctx.id, format!("staged write (pending id {id}): {} byte(s) at {:#x}", data.len(), address));
+    drop(s);
+
+    Ok(ToolResult::with_data(
+        format!(
+            "staged write (pending id {id}): {} byte(s) at {:#x}. Call 'confirm_op' to apply or 'reject_op' to discard.",
+            data.len(),
+            address
+        ),
+        serde_json::json!({
+            "pending_id": id,
+            "address": address,
+            "bytes_count": data.len(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Stage a code-cave hook install for confirmation (D8 gate).
+pub fn execute_stage_install_cave(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: Option<&dyn ProcessMemory>,
+    args: InstallCaveArgs,
+) -> Result<ToolResult, ToolError> {
+    use crate::cave_hook::{CaveHook, JumpStyle};
+    use crate::session::PendingKind;
+    let target = eval_addr_expr(session, &args.target, mem)?;
+    let payload = crate::expr::parse_hex_bytes(&args.payload).map_err(err)?;
+    let jump = match args.jump.to_lowercase().as_str() {
+        "absolute" => JumpStyle::Absolute,
+        "relative" | "short" => JumpStyle::Relative,
+        other => return Err(err(format!("unknown jump style '{other}' (expected 'absolute' or 'relative')"))),
+    };
+    let hook = match args.hook.as_str() {
+        "trampoline" => CaveHook::Trampoline { payload: payload.clone(), jump },
+        "override" => CaveHook::Override { payload: payload.clone(), jump },
+        other => return Err(err(format!("unknown hook kind '{other}' (expected 'trampoline' or 'override')"))),
+    };
+    let kind_desc = match &hook {
+        CaveHook::Trampoline { .. } => "trampoline",
+        CaveHook::Override { .. } => "override",
+    };
+
+    let mut s = session
+        .lock()
+        .map_err(|_| err("session lock poisoned"))?;
+    let id = s.stage_op(
+        target,
+        PendingKind::InstallCave { hook, marker: args.marker.clone() },
+        format!(
+            "install {kind_desc} cave at {:#x}, payload={} byte(s){}",
+            target,
+            payload.len(),
+            if let Some(m) = &args.marker { format!(" (marker: '{m}')") } else { String::new() }
+        ),
+    );
+    s.log_activity(&ctx.id, format!("staged {kind_desc} cave install (pending id {id}) at {:#x}", target));
+    drop(s);
+
+    Ok(ToolResult::with_data(
+        format!(
+            "staged {kind_desc} cave install (pending id {id}) at {:#x}. Call 'confirm_op' to apply or 'reject_op' to discard.",
+            target
+        ),
+        serde_json::json!({
+            "pending_id": id,
+            "target": target,
+            "kind": kind_desc,
+            "payload_len": payload.len(),
+            "marker": args.marker,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Stage an undo mutation for confirmation (D8 gate).
+pub fn execute_stage_undo(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    args: UndoArgs,
+) -> Result<ToolResult, ToolError> {
+    use crate::session::PendingKind;
+    let entry = {
+        let s = session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
+        if args.id != 0 {
+            s.get_undo(args.id).cloned()
+        } else {
+            s.peek_undo_last().cloned()
+        }
+    };
+    let Some(e) = entry else {
+        return Err(err("nothing to undo"));
+    };
+
+    let mut s = session
+        .lock()
+        .map_err(|_| err("session lock poisoned"))?;
+    let id = s.stage_op(
+        e.address,
+        PendingKind::Undo {
+            original_bytes: e.original_bytes.clone(),
+        },
+        format!(
+            "undo #{}: {} at {:#x} (restore {} byte(s))",
+            e.id,
+            e.description,
+            e.address,
+            e.original_bytes.len()
+        ),
+    );
+    s.log_activity(&ctx.id, format!("staged undo (pending id {id}) for undo #{}", e.id));
+    drop(s);
+
+    Ok(ToolResult::with_data(
+        format!(
+            "staged undo (pending id {id}) for undo #{}. Call 'confirm_op' to apply or 'reject_op' to discard.",
+            e.id
+        ),
+        serde_json::json!({
+            "pending_id": id,
+            "undo_id": e.id,
+            "address": e.address,
+            "bytes_len": e.original_bytes.len(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::{ClientKind, SessionState};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_execute_emit_relative_jump_and_assemble_asm() {
+        let session = Arc::new(Mutex::new(SessionState::new()));
+        let binding = session.lock().unwrap();
+        let bus = binding.event_bus();
+        let ctx = ClientContext::new("test-asm-ctx", ClientKind::Internal, bus);
+        drop(binding);
+
+        // 1. Test relative jump calculation
+        let jmp_res = execute_emit_relative_jump(&session, &ctx, None, EmitRelativeJumpArgs {
+            from: "0x140000000".into(),
+            to: "0x140001000".into(),
+            pad_to_len: Some(7),
+        }).unwrap();
+        assert!(jmp_res.message.contains("relative jump from 0x140000000 to 0x140001000"));
+        assert!(jmp_res.message.contains("padded to 7 bytes"));
+
+        // 2. Test assemble asm with named marker
+        session.lock().unwrap().set_marker("cave_target", 0x140002000, None).unwrap();
+
+        let asm_res = execute_assemble_asm(&session, &ctx, None, AssembleAsmArgs {
+            code: "mov rax, 0x1234\njmp $cave_target".into(),
+            origin: Some("0x140000000".into()),
+        }).unwrap();
+        assert!(asm_res.message.contains("assembled"));
+        assert!(asm_res.message.contains("disassembled"));
+    }
 
     struct MockMem {
         data: Vec<u8>,
@@ -1812,5 +2297,35 @@ mod tests {
 
         let m_rem = execute_remove_marker(&session, &ctx, RemoveMarkerArgs { label: "gold_addr".into() }).unwrap();
         assert!(m_rem.message.contains("removed marker '$gold_addr'"));
+    }
+
+    #[test]
+    fn test_execute_staging_and_pending_ops() {
+        let session = Arc::new(Mutex::new(SessionState::new()));
+        let binding = session.lock().unwrap();
+        let bus = binding.event_bus();
+        let ctx = ClientContext::new("test-stage-ctx", ClientKind::Internal, bus);
+        drop(binding);
+
+        // 1. Stage a write
+        let s_w = execute_stage_write(&session, &ctx, None, StageWriteArgs {
+            address: "0x140001000".into(),
+            data: Some("90 90 90 90".into()),
+            value: None,
+            value_type: None,
+        }).unwrap();
+        assert!(s_w.message.contains("staged write (pending id 0)"));
+
+        // 2. List pending
+        let l_p = execute_list_pending(&session, &ctx).unwrap();
+        assert!(l_p.message.contains("[0] write 4 byte(s) at 0x140001000"));
+
+        // 3. Reject pending op 0
+        let r_p = execute_reject_op(&session, &ctx, OpConfirmArgs { id: 0 }).unwrap();
+        assert!(r_p.message.contains("rejected pending op 0"));
+
+        // 4. Verify pending list is empty
+        let l_p2 = execute_list_pending(&session, &ctx).unwrap();
+        assert!(l_p2.message.contains("(no pending mutations)"));
     }
 }

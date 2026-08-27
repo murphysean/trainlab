@@ -2305,299 +2305,51 @@ impl TrainlabMcpServer {
     }
 
     /// Stage a write to game memory for human confirmation (D8).
-    ///
-    /// Accepts EITHER raw hex bytes (`data="00 80 ac 43"`) OR a typed value
-    /// (`value="0xe890000"`, `value_type="ptr"` or `"i32"`/`"f32"`/etc.) so you
-    /// never have to hand-encode little-endian hex bytes. Stages the write; apply
-    /// with `confirm_op` or discard with `reject_op`.
     #[tool(description = "Stage a write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Returns a pending op id; apply with 'confirm_op' or discard with 'reject_op'. Nothing is written until confirmed.")]
     pub(crate) fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&self.session, &args.address)?;
-        let (data, desc) = match (args.data.as_deref(), args.value.as_deref()) {
-            (Some(hex_str), None) => {
-                let bytes = parse_hex_bytes(hex_str)?;
-                if bytes.is_empty() {
-                    return Err(err("write data cannot be empty"));
-                }
-                let desc = format!(
-                    "write {} byte(s) at {:#x}: {}",
-                    bytes.len(),
-                    address,
-                    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
-                );
-                (bytes, desc)
-            }
-            (None, Some(val_str)) => {
-                let vt_str = args.value_type.as_deref().unwrap_or_else(|| {
-                    if val_str.trim().starts_with("0x") || val_str.trim().starts_with("0X") {
-                        "ptr"
-                    } else {
-                        "i32"
-                    }
-                });
-                let value_type = parse_value_type(vt_str)?;
-                let bytes = parse_value_bytes(val_str, value_type)?;
-                if bytes.is_empty() {
-                    return Err(err("write value cannot be empty"));
-                }
-                let desc = format!(
-                    "write value '{}' ({}) at {:#x}: {}",
-                    val_str,
-                    vt_str,
-                    address,
-                    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
-                );
-                (bytes, desc)
-            }
-            (Some(_), Some(_)) => {
-                return Err(err("specify either 'data' (raw hex) or 'value' (typed value), but not both"));
-            }
-            (None, None) => {
-                return Err(err("must specify either 'data' (raw hex) or 'value' (typed value)"));
-            }
-        };
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_stage_write(&self.session, &ctx, None, trainlab_core::tools::StageWriteArgs {
+            address: args.address,
+            data: args.data,
+            value: args.value,
+            value_type: args.value_type,
+        }).map_err(|e| err(e.message))?;
 
-        // Stage it; nothing is written until confirmed. Original bytes are
-        // snapshotted only when the op is confirmed (see confirm_op).
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let id = s.stage_op(
-            address,
-            PendingKind::Write { data: data.clone() },
-            desc,
-        );
-        drop(s);
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "staged write (pending id {id}): {} byte(s) at {:#x}. Call 'confirm_op' to apply or 'reject_op' to discard.",
-                data.len(),
-                address
-            )),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
     /// Stage a code-cave hook install for human confirmation (D8).
-    ///
-    /// This *stages* the install and returns a pending op id + preview; it does
-    /// **not** patch anything yet. Confirm with `confirm_op`, or discard with
-    /// `reject_op`.
     #[tool(description = "Stage a code cave hook install. Kinds: 1) 'trampoline' (DEFAULT): runs your custom payload, automatically disassembles and replays stolen instructions in the cave, then jumps back — original game logic is preserved (empty payload = transparent no-op). 2) 'override': runs payload and jumps back, skipping stolen instructions. Example payload: '48 c7 83 90 01 00 00 00 00 90 00' (mov dword ptr [rbx+0x190], 9000). Apply with 'confirm_op'.")]
     fn install_cave(
         &self,
         Parameters(args): Parameters<InstallCaveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        use trainlab_core::cave_hook::{CaveHook, JumpStyle};
-        let target = parse_addr(&self.session, &args.target)?;
-        let payload = parse_hex_bytes(&args.payload)?;
-        let jump = match args.jump.to_lowercase().as_str() {
-            "absolute" => JumpStyle::Absolute,
-            "relative" | "short" => JumpStyle::Relative,
-            other => return Err(err(format!("unknown jump style '{other}' (expected 'absolute' or 'relative')"))),
-        };
-        let hook = match args.hook.as_str() {
-            "trampoline" => CaveHook::Trampoline { payload: payload.clone(), jump },
-            "override" => CaveHook::Override { payload: payload.clone(), jump },
-            other => return Err(err(format!("unknown hook kind '{other}' (expected 'trampoline' or 'override')"))),
-        };
-        let kind_desc = match &hook {
-            CaveHook::Trampoline { .. } => "trampoline",
-            CaveHook::Override { .. } => "override",
-        };
-        // Stage it; nothing is patched until confirmed.
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let id = s.stage_op(
-            target,
-            PendingKind::InstallCave { hook, marker: args.marker.clone() },
-            format!(
-                "install {kind_desc} cave at {:#x}, payload={} byte(s){}",
-                target,
-                payload.len(),
-                if let Some(m) = &args.marker { format!(" (marker: '{m}')") } else { String::new() }
-            ),
-        );
-        drop(s);
-        Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "staged {kind_desc} cave install (pending id {id}) at {:#x}. Call 'confirm_op' to apply or 'reject_op' to discard.",
-                target
-            )),
-        ]))
-    }
-
-    /// Allocate an executable memory cave with optional payload and register it as a named marker.
-    /// This supports the upfront-allocation / zero-alloc toggle architecture for games like DRG: Survivor.
-    #[tool(description = "Allocate an executable memory cave block in the game process, optionally write initial payload shellcode/constants, and record it as a named marker (e.g. 'cave_god_mode'). Returns the allocated cave address.")]
-    fn alloc_code_cave(
-        &self,
-        Parameters(args): Parameters<AllocCodeCaveArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let size = args.size.unwrap_or(1024).max(64);
-        let resp = crate::controller::request(
-            &self.session,
-            &Request::Allocate { size, executable: true },
-        )
-        .map_err(err)?;
-        match resp {
-            Response::Allocate { address } => {
-                let mut payload_written = 0usize;
-                if let Some(pl_hex) = &args.payload {
-                    let bytes = parse_hex_bytes(pl_hex)?;
-                    if !bytes.is_empty() {
-                        let w_resp = crate::controller::request(
-                            &self.session,
-                            &Request::Write { address, data: bytes.clone() },
-                        )
-                        .map_err(err)?;
-                        match w_resp {
-                            Response::Write { bytes_written } => {
-                                payload_written = bytes_written;
-                            }
-                            Response::Error { message } => return Err(err(message)),
-                            _ => return Err(err("unexpected write response")),
-                        }
-                    }
-                }
-                let note = args.note.clone().unwrap_or_else(|| format!("Pre-allocated code cave ({size} bytes)"));
-                if let Ok(mut s) = self.session.lock() {
-                    let _ = s.set_marker(&args.name, address, Some(&note));
-                    s.log_activity("CAVE", format!("allocated code cave '${}' at {address:#x} ({size} bytes, {payload_written} payload bytes)", args.name));
-                }
-                self.request_repaint();
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(format!(
-                        "allocated code cave at {address:#x} (marker '${}', {size} bytes, {payload_written} bytes payload written)",
-                        args.name
-                    )),
-                ]))
-            }
-            Response::Error { message } => Err(err(message)),
-            other => Err(err(format!("unexpected response: {other:?}"))),
-        }
-    }
-
-    /// Calculate a relative jump (5-byte E9 rel32) from a patch site to a destination (or cave marker)
-    /// and optionally pad with 0x90 (NOP) bytes to match a target instruction length (e.g. 7 bytes).
-    #[tool(description = "Calculate relative jump bytes (E9 <rel32>) from 'from' to 'to' (or named cave marker), padded with NOPs up to 'pad_to_len'. Returns the exact hex string to use in patch_bytes.")]
-    fn emit_relative_jump(
-        &self,
-        Parameters(args): Parameters<EmitRelativeJumpArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let from = parse_addr(&self.session, &args.from)?;
-        let to = parse_addr(&self.session, &args.to)?;
-        let pad_len = args.pad_to_len.unwrap_or(5).max(5);
-
-        // RIP at the end of the 5-byte E9 instruction is (from + 5)
-        let rel_i64 = (to as i64) - (from as i64 + 5);
-        if rel_i64 < (i32::MIN as i64) || rel_i64 > (i32::MAX as i64) {
-            return Err(err(format!(
-                "relative jump distance ({rel_i64} bytes) exceeds 32-bit ±2GB range between {from:#x} and {to:#x}"
-            )));
-        }
-        let rel_i32 = rel_i64 as i32;
-        let mut bytes = vec![0xE9u8];
-        bytes.extend_from_slice(&rel_i32.to_le_bytes());
-
-        while bytes.len() < pad_len {
-            bytes.push(0x90); // NOP padding
-        }
-
-        let hex_str = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-        Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "relative jump from {from:#x} to {to:#x} (padded to {pad_len} bytes):\nhex: \"{hex_str}\""
-            )),
-        ]))
-    }
-
-    /// Assemble human-readable x86-64 assembly text into machine code bytes (iced-x86).
-    /// Supports labels, directives (dd (float)4.0, dq, db), mnemonics (mov, mulss, divss, jmp, xor, etc.),
-    /// and named marker substitution ($cave_const, $return_addr).
-    #[tool(description = "Assemble x86-64 assembly source text into machine code bytes (iced-x86). Supports mnemonics (mov, mulss, divss, jmp, etc.), Cheat Engine directives (dd (float)4.0, dq, db), and named session markers ($cave_const). Returns encoded hex, byte length, and disassembled preview.")]
-    fn assemble_asm(
-        &self,
-        Parameters(args): Parameters<AssembleAsmArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let mut symbols = std::collections::HashMap::new();
-        if let Ok(s) = self.session.lock() {
-            for m in s.list_markers() {
-                symbols.insert(m.label.clone(), m.address);
-                symbols.insert(m.label.to_lowercase(), m.address);
-            }
-        }
-
-        let origin_rip = if let Some(orig) = &args.origin {
-            parse_addr(&self.session, orig)?
-        } else {
-            0
-        };
-
-        let assembled = crate::asm::assemble_text(&args.code, origin_rip, &symbols)
-            .map_err(err)?;
-
-        let disasm_lines = trainlab_core::disasm::disassemble(origin_rip, &assembled.bytes, Some(50));
-
-        let output = format!(
-            "assembled {} byte(s) (origin {origin_rip:#x}):\nhex: \"{}\"\n\ndisassembled:\n{}",
-            assembled.bytes.len(),
-            assembled.hex,
-            disasm_lines.join("\n")
-        );
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_stage_install_cave(&self.session, &ctx, None, trainlab_core::tools::InstallCaveArgs {
+            target: args.target,
+            hook: args.hook,
+            payload: args.payload,
+            jump: args.jump,
+            marker: args.marker,
+        }).map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(output),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
     /// Stage an undo for human confirmation (D8).
-    ///
-    /// This *stages* the revert and returns a pending op id + preview; it does
-    /// **not** modify memory yet. Confirm with `confirm_op`, or discard with
-    /// `reject_op`.
     #[tool(description = "Stage an undo of a write/cave mutation by id (or the most recent if omitted): restores the original bytes. Returns a pending op id; apply it with 'confirm_op' or discard with 'reject_op'. Nothing is reverted until confirmed.")]
     fn undo(&self, Parameters(args): Parameters<UndoArgs>) -> Result<CallToolResult, ErrorData> {
-        let entry = {
-            let s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            if args.id != 0 {
-                s.get_undo(args.id).cloned()
-            } else {
-                s.peek_undo_last().cloned()
-            }
-        };
-        let Some(e) = entry else {
-            return Err(err("nothing to undo"));
-        };
-        // Stage it; nothing is reverted until confirmed.
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let id = s.stage_op(
-            e.address,
-            PendingKind::Undo {
-                original_bytes: e.original_bytes.clone(),
-            },
-            format!(
-                "undo #{}: {} at {:#x} (restore {} byte(s))",
-                e.id,
-                e.description,
-                e.address,
-                e.original_bytes.len()
-            ),
-        );
-        drop(s);
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_stage_undo(&self.session, &ctx, trainlab_core::tools::UndoArgs {
+            id: args.id,
+        }).map_err(|e| err(e.message))?;
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "staged undo (pending id {id}) for undo #{}. Call 'confirm_op' to apply or 'reject_op' to discard.",
-                e.id
-            )),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
@@ -2770,47 +2522,24 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<OpConfirmArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let op = {
-            let mut s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            s.take_pending(args.id)
-        };
-        match op {
-            Some(op) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format!(
-                    "rejected pending op {} ({})",
-                    op.id,
-                    op.preview
-                )),
-            ])),
-            None => Err(err(format!(
-                "no pending op {}. Stage one with 'write'/'install_cave'/'undo' first.",
-                args.id
-            ))),
-        }
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_reject_op(&self.session, &ctx, trainlab_core::tools::OpConfirmArgs { id: args.id })
+            .map_err(|e| err(e.message))?;
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 
     /// List all staged (pending) mutations awaiting confirmation.
     #[tool(description = "List all staged (pending) mutations awaiting human confirmation, with their ids and previews.")]
     fn list_pending(&self) -> Result<CallToolResult, ErrorData> {
-        let s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let pending = s.list_pending();
-        if pending.is_empty() {
-            return Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text("(no pending mutations)"),
-            ]));
-        }
-        let lines: Vec<String> = pending
-            .iter()
-            .map(|p| format!("[{}] {} {}", p.id, p.kind.kind_text(), p.preview))
-            .collect();
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_list_pending(&self.session, &ctx)
+            .map_err(|e| err(e.message))?;
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(lines.join("\n")),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
