@@ -39,7 +39,7 @@ impl ModuleInfo {
 /// `modules` is a list of loaded modules (see [`enumerate_windows`] or, on
 /// non-Windows, a caller-provided list). Returns the first module whose range
 /// contains `addr`.
-pub fn find_module<'a>(modules: &'a [ModuleInfo], addr: u64) -> Option<&'a ModuleInfo> {
+pub fn find_module(modules: &[ModuleInfo], addr: u64) -> Option<&ModuleInfo> {
     modules.iter().find(|m| m.contains(addr))
 }
 
@@ -108,11 +108,10 @@ pub fn resolve(
     modules: Option<&[ModuleInfo]>,
     regions: &[Region],
 ) -> String {
-    if let Some(ms) = modules {
-        if let Some(m) = find_module(ms, addr) {
+    if let Some(ms) = modules
+        && let Some(m) = find_module(ms, addr) {
             return m.format_offset(addr);
         }
-    }
     // Fall back to a region.
     for r in regions {
         if addr >= r.start && addr < r.end {

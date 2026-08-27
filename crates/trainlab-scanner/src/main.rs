@@ -132,7 +132,7 @@ fn main() -> Result<()> {
 #[cfg(unix)]
 fn cmd_wine_list() -> Result<()> {
     use trainlab_core::wine::is_wine_process;
-    println!("{:<8}  {:<24}  {}", "PID", "NAME", "WINE?");
+    println!("{:<8}  {:<24}  WINE?", "PID", "NAME");
     for p in process::list() {
         let wine = if is_wine_process(p.pid) { "yes" } else { "" };
         println!("{:<8}  {:<24}  {}", p.pid, p.name, wine);
@@ -155,7 +155,7 @@ fn cmd_wine_check(pid: i32) -> Result<()> {
 fn cmd_wine_regions(pid: i32) -> Result<()> {
     use trainlab_core::wine::{regions_of_kind, tag_regions, RegionKind};
     let tagged = tag_regions(pid).context("failed to read /proc/pid/maps")?;
-    println!("{:<18} {:<18}  {:<4}  {:<8}  {}", "START", "END", "PERMS", "KIND", "NAME");
+    println!("{:<18} {:<18}  {:<4}  {:<8}  NAME", "START", "END", "PERMS", "KIND");
     for t in &tagged {
         if !t.region.readable {
             continue;
@@ -186,7 +186,7 @@ fn cmd_wine_regions(pid: i32) -> Result<()> {
 #[cfg(unix)]
 fn cmd_list() -> Result<()> {
     let procs = process::list();
-    println!("{:<8}  {}", "PID", "NAME");
+    println!("{:<8}  NAME", "PID");
     for p in procs {
         println!("{:<8}  {}", p.pid, p.name);
     }
@@ -197,7 +197,7 @@ fn cmd_list() -> Result<()> {
 fn cmd_regions(pid: i32) -> Result<()> {
     let proc = LinuxProcess::new(pid);
     let regions = proc.regions().context("failed to read regions")?;
-    println!("{:<18} {:<18}  {:<4}  {}", "START", "END", "PERMS", "NAME");
+    println!("{:<18} {:<18}  {:<4}  NAME", "START", "END", "PERMS");
     for r in regions {
         if !r.readable {
             continue;
@@ -431,7 +431,7 @@ fn parse_hex(s: &str) -> Result<Vec<u8>> {
     let s = s.trim();
     let s = s.strip_prefix("0x").unwrap_or(s);
     let s = s.replace(' ', "");
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         bail!("hex string must have even length");
     }
     let mut out = Vec::with_capacity(s.len() / 2);
@@ -441,9 +441,6 @@ fn parse_hex(s: &str) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
-
-#[cfg(unix)]
-
 
 #[cfg(unix)]
 fn hexdump(start: u64, data: &[u8]) {

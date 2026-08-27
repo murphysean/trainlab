@@ -33,11 +33,10 @@ pub fn find_all(haystack: &[u8], pattern: &[Option<u8>]) -> Vec<usize> {
     let last = haystack.len() - pattern.len();
     'outer: for i in 0..=last {
         for (j, p) in pattern.iter().enumerate() {
-            if let Some(b) = p {
-                if haystack[i + j] != *b {
+            if let Some(b) = p
+                && haystack[i + j] != *b {
                     continue 'outer;
                 }
-            }
         }
         out.push(i);
     }

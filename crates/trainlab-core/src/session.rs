@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
-use crate::{cave_hook, event, protocol, scan};
+use crate::{cave_hook, protocol, scan};
 
 /// A labeled address the agent persists across turns (D7).
 #[derive(Debug, Clone)]
@@ -214,8 +214,10 @@ impl ClientContext {
 
 /// Explicit lifecycle state of the target game process and injector connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum SessionLifecycle {
     /// No target game process is selected.
+    #[default]
     Idle,
     /// A target game process is identified; external memory ops (Read/WriteProcessMemory) are active.
     TargetAttached {
@@ -241,11 +243,6 @@ pub enum SessionLifecycle {
     },
 }
 
-impl Default for SessionLifecycle {
-    fn default() -> Self {
-        SessionLifecycle::Idle
-    }
-}
 
 /// The shared, mutable session state.
 #[derive(Debug, Default)]
@@ -812,13 +809,12 @@ impl SessionState {
     /// Update a toggle cheat's cave installation info (original bytes + cave address).
     /// Called after a cave is successfully installed for this toggle.
     pub fn set_toggle_cave_info(&mut self, id: u64, original_bytes: Vec<u8>, cave_addr: u64) -> bool {
-        if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
-            if let CheatKind::Toggle { original_bytes: ob, cave_addr: ca, .. } = &mut c.kind {
+        if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id)
+            && let CheatKind::Toggle { original_bytes: ob, cave_addr: ca, .. } = &mut c.kind {
                 *ob = original_bytes;
                 *ca = cave_addr;
                 return true;
             }
-        }
         false
     }
 
@@ -1098,7 +1094,7 @@ mod tests {
 
         // Register client contexts
         let mut ctx_mcp = s.create_context("mcp-agent-1", ClientKind::Mcp { agent_name: Some("test-bot".into()) });
-        let mut ctx_web = s.create_context("web-session-42", ClientKind::Web { session_id: "tab-1".into() });
+        let ctx_web = s.create_context("web-session-42", ClientKind::Web { session_id: "tab-1".into() });
 
         assert_eq!(ctx_mcp.id, "mcp-agent-1");
         assert_eq!(ctx_web.id, "web-session-42");

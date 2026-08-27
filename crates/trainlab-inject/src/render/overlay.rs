@@ -243,11 +243,10 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         super::set_overlay_visible(false);
     }
 
-    if !events.is_empty() {
-        if let Ok(mut queue) = PENDING_EGUI_EVENTS.lock() {
+    if !events.is_empty()
+        && let Ok(mut queue) = PENDING_EGUI_EVENTS.lock() {
             queue.extend(events);
         }
-    }
 }
 
 /// Push mouse move and pointer button events from Touchscreen / Trackpad / Mouse.
@@ -291,19 +290,17 @@ pub fn apply_event(event: Event) {
             }
         }
         Event::CheatToggled { id, enabled } => {
-            if let Ok(mut lock) = CHEATS.lock() {
-                if let Some(cheat) = lock.iter_mut().find(|c| c.id == id) {
+            if let Ok(mut lock) = CHEATS.lock()
+                && let Some(cheat) = lock.iter_mut().find(|c| c.id == id) {
                     cheat.enabled = enabled;
                 }
-            }
         }
         Event::CheatValueChanged { id, value_str, pinned_bytes } => {
-            if let Ok(mut lock) = CHEATS.lock() {
-                if let Some(cheat) = lock.iter_mut().find(|c| c.id == id) {
+            if let Ok(mut lock) = CHEATS.lock()
+                && let Some(cheat) = lock.iter_mut().find(|c| c.id == id) {
                     cheat.current_value = Some(value_str);
                     cheat.pinned_bytes = pinned_bytes;
                 }
-            }
         }
         Event::CheatRemoved { id } => {
             if let Ok(mut lock) = CHEATS.lock() {
@@ -335,16 +332,16 @@ pub fn drain_outbound_events() -> Vec<Event> {
 pub fn handle_click(x: i32, y: i32) {
     let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
     // Tab header clicks (y: 30..70)
-    if y >= 30 && y <= 75 {
-        if x >= 30 && x <= 140 {
+    if (30..=75).contains(&y) {
+        if (30..=140).contains(&x) {
             ACTIVE_TAB.store(0, Ordering::Relaxed);
             SELECTED_INDEX.store(0, Ordering::Relaxed);
             return;
-        } else if x >= 145 && x <= 255 {
+        } else if (145..=255).contains(&x) {
             ACTIVE_TAB.store(1, Ordering::Relaxed);
             SELECTED_INDEX.store(0, Ordering::Relaxed);
             return;
-        } else if x >= 260 && x <= 370 {
+        } else if (260..=370).contains(&x) {
             ACTIVE_TAB.store(2, Ordering::Relaxed);
             SELECTED_INDEX.store(0, Ordering::Relaxed);
             return;
@@ -352,7 +349,7 @@ pub fn handle_click(x: i32, y: i32) {
     }
 
     // List item clicks (y >= 140)
-    if x >= 30 && x <= 380 && y >= 140 {
+    if (30..=380).contains(&x) && y >= 140 {
         let item_idx = ((y - 140) / 48) as usize;
         SELECTED_INDEX.store(item_idx as u64, Ordering::Relaxed);
         if cur_tab == 0 {
@@ -399,14 +396,12 @@ pub fn execute_pinning_cadence() {
     if let Ok(cheats) = CHEATS.lock() {
         let mem = trainlab_core::memory::SelfProcess;
         for c in cheats.iter() {
-            if c.enabled {
-                if let Some(pinned_bytes) = &c.pinned_bytes {
-                    if c.address != 0 && !pinned_bytes.is_empty() {
+            if c.enabled
+                && let Some(pinned_bytes) = &c.pinned_bytes
+                    && c.address != 0 && !pinned_bytes.is_empty() {
                         use trainlab_core::memory::ProcessMemory;
                         let _ = mem.write(c.address, pinned_bytes);
                     }
-                }
-            }
         }
     }
 }
@@ -427,7 +422,7 @@ pub fn render_in_game_egui(
             visuals.window_rounding = egui::Rounding::same(10.0);
             visuals.window_fill = egui::Color32::from_rgba_premultiplied(12, 16, 24, 210);
             visuals.panel_fill = egui::Color32::from_rgba_premultiplied(16, 22, 34, 180);
-            visuals.window_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgba_premultiplied(30, 160, 240, 200));
+            visuals.window_stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_premultiplied(30, 160, 240, 200));
             visuals.window_shadow = egui::epaint::Shadow {
                 offset: egui::vec2(0.0, 8.0),
                 blur: 16.0,
@@ -519,7 +514,7 @@ pub fn render_in_game_egui(
                             if is_selected {
                                 egui::Frame::none()
                                     .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
-                                    .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 220, 255)))
+                                    .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)))
                                     .rounding(egui::Rounding::same(6.0))
                                     .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                                     .show(ui, |ui| {
@@ -568,7 +563,7 @@ pub fn render_in_game_egui(
                             if is_selected {
                                 egui::Frame::none()
                                     .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
-                                    .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 220, 255)))
+                                    .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)))
                                     .rounding(egui::Rounding::same(6.0))
                                     .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                                     .show(ui, |ui| {
@@ -604,7 +599,7 @@ pub fn render_in_game_egui(
                         if is_selected {
                             egui::Frame::none()
                                 .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
-                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 220, 255)))
+                                .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)))
                                 .rounding(egui::Rounding::same(6.0))
                                 .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                                 .show(ui, |ui| {

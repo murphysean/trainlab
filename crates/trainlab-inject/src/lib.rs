@@ -147,11 +147,10 @@ fn handle_connection(mut stream: TcpStream) {
                 Message::Request { id, req } => {
                     let resp = handle_request_guarded(&mem, req);
                     let resp_msg = Message::Response { id, resp };
-                    if let Ok(out) = protocol::encode(&resp_msg) {
-                        if stream.write_all(&out).is_err() {
+                    if let Ok(out) = protocol::encode(&resp_msg)
+                        && stream.write_all(&out).is_err() {
                             break;
                         }
-                    }
                 }
                 Message::Event(event) => {
                     render::overlay::apply_event(event);
@@ -163,11 +162,10 @@ fn handle_connection(mut stream: TcpStream) {
             let outbound = render::overlay::drain_outbound_events();
             for evt in outbound {
                 let evt_msg = Message::Event(evt);
-                if let Ok(out) = protocol::encode(&evt_msg) {
-                    if stream.write_all(&out).is_err() {
+                if let Ok(out) = protocol::encode(&evt_msg)
+                    && stream.write_all(&out).is_err() {
                         break;
                     }
-                }
             }
             continue;
         }
@@ -243,16 +241,14 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 if !r.readable {
                     continue;
                 }
-                if let Some(s) = start {
-                    if r.end < s {
+                if let Some(s) = start
+                    && r.end < s {
                         continue;
                     }
-                }
-                if let Some(e) = end {
-                    if r.start > e {
+                if let Some(e) = end
+                    && r.start > e {
                         continue;
                     }
-                }
                 let lo = start.map_or(r.start, |s| s.max(r.start));
                 let hi = end.map_or(r.end, |e| e.min(r.end));
                 if lo >= hi {

@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use crate::mcp;
 use crate::profile;
 use crate::session::SharedSession;
-use trainlab_core::protocol::{Request, Response};
 
 /// Application state shared across all REST API handlers.
 #[derive(Clone)]
@@ -410,7 +409,7 @@ async fn load_profile(
     })
     .await
     .map_err(|e| err(format!("profile load task panicked: {e}")))?
-    .map_err(|e| err(e))?;
+    .map_err(err)?;
 
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "profile": req.name, "result": res })))
@@ -457,7 +456,7 @@ async fn read_memory(
         value_type: req.value_type.clone(),
     })).map_err(|e| err(e.message))?;
 
-    let text_block = match &res.content.get(0) {
+    let text_block = match &res.content.first() {
         Some(rmcp::model::ContentBlock::Text(t)) => t.text.clone(),
         _ => "".into(),
     };
@@ -598,7 +597,7 @@ async fn launch_app_handler(
     let args = req.args.unwrap_or_default();
     let pid = {
         let mut s = lock_session_or_500(&state)?;
-        s.launch_application(&req.path, &args).map_err(|e| err(e))?
+        s.launch_application(&req.path, &args).map_err(err)?
     };
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "path": req.path, "pid": pid })))

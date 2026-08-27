@@ -452,7 +452,7 @@ pub fn eval_addr_expr(
 ) -> Result<u64, ToolError> {
     let s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let resolve_marker = |name: &str| s.get_marker(name).map(|m| m.address);
-    let resolve_module = |name: &str| {
+    let resolve_module = |_name: &str| {
         if let Some(pid) = s.game_pid() {
             #[cfg(windows)]
             {
@@ -828,7 +828,7 @@ pub fn execute_allocate_string(
         let _ = ctx;
         let _ = mem;
         let _ = len;
-        return Err(err("string allocation is only supported on Windows"));
+        Err(err("string allocation is only supported on Windows"))
     }
 
     #[cfg(windows)]
@@ -1103,13 +1103,11 @@ pub fn execute_scan_aob(
 
     let count = matches.len();
 
-    if let Some(m) = &args.marker {
-        if let Some(&first) = matches.first() {
-            if let Ok(mut s) = session.lock() {
+    if let Some(m) = &args.marker
+        && let Some(&first) = matches.first()
+            && let Ok(mut s) = session.lock() {
                 let _ = s.set_marker(m, first, Some(&format!("AOB match for '{}'", args.pattern)));
             }
-        }
-    }
 
     if let Ok(mut s) = session.lock() {
         s.log_activity(&ctx.id, format!("AOB scan '{}': {count} match(es)", args.pattern));

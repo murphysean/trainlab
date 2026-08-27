@@ -44,9 +44,9 @@ impl IpcClient {
                 }
 
                 let mut resp_opt: Option<Response> = None;
-                if let Ok(mut addrs) = target_addr.to_socket_addrs() {
-                    if let Some(sock_addr) = addrs.next() {
-                        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(&sock_addr, Duration::from_millis(500)) {
+                if let Ok(mut addrs) = target_addr.to_socket_addrs()
+                    && let Some(sock_addr) = addrs.next()
+                        && let Ok(mut stream) = std::net::TcpStream::connect_timeout(&sock_addr, Duration::from_millis(500)) {
                             let _ = stream.set_nodelay(true);
                             let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
                             let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
@@ -61,8 +61,8 @@ impl IpcClient {
 
                             // 2. Send the actual correlated request
                             let msg = Message::Request { id, req };
-                            if let Ok(frame) = protocol::encode(&msg) {
-                                if stream.write_all(&frame).is_ok() {
+                            if let Ok(frame) = protocol::encode(&msg)
+                                && stream.write_all(&frame).is_ok() {
                                     // Read responses / events until we get our response
                                     while let Ok(len_buf) = read_exact_array::<4>(&mut stream) {
                                         let len = u32::from_le_bytes(len_buf) as usize;
@@ -93,10 +93,7 @@ impl IpcClient {
                                         }
                                     }
                                 }
-                            }
                         }
-                    }
-                }
                 let resp = resp_opt.unwrap_or_else(|| Response::Error {
                     message: "IPC request failed / timeout".into(),
                 });
@@ -193,11 +190,10 @@ pub fn emit_event_to_dll(session: &SharedSession, event: Event) {
         }
     };
     let lock = GLOBAL_CLIENT.lock().unwrap();
-    if let Some((h, p, c)) = &*lock {
-        if h == &host && *p == port {
+    if let Some((h, p, c)) = &*lock
+        && h == &host && *p == port {
             c.emit_event(event);
         }
-    }
 }
 
 /// Send a request to the DLL using the session's configured host/port.

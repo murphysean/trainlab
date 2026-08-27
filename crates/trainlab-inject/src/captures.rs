@@ -98,7 +98,7 @@ pub fn read(
         c.gate_value_type,
         read,
     )?;
-    let disarmed = trainlab_cave::capture::read_disarmed(c.scratch, &read)?;
+    let disarmed = trainlab_cave::capture::read_disarmed(c.scratch, read)?;
     Ok((entries, disarmed))
 }
 

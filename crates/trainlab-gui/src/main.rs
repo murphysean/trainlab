@@ -1,6 +1,8 @@
 // Produce a GUI-subsystem Windows PE so no console window is spawned when the
 // trainer runs under Wine/Proton (a console-subsystem exe gets a conhost window).
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
 
 //! # trainlab-gui
 //!
@@ -119,7 +121,9 @@ struct TrainlabApp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 enum ScanOpMode {
+    #[default]
     Exact,
     Range,
     Changed,
@@ -128,14 +132,11 @@ enum ScanOpMode {
     Decreased,
 }
 
-impl Default for ScanOpMode {
-    fn default() -> Self {
-        ScanOpMode::Exact
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 enum ActiveTab {
+    #[default]
     Cheats,
     MemoryScan,
     TaggedMarkers,
@@ -144,11 +145,6 @@ enum ActiveTab {
     ActivityLog,
 }
 
-impl Default for ActiveTab {
-    fn default() -> Self {
-        ActiveTab::Cheats
-    }
-}
 
 impl Default for TrainlabApp {
     fn default() -> Self {
@@ -286,7 +282,7 @@ impl TrainlabApp {
                             if let Ok(mut s) = session.lock() {
                                 s.log_activity("UI", format!("starting sequential profile initialization for '{file}'..."));
                             }
-                            match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(&file, true) {
+                            match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(file, true) {
                                 Ok(detail) => {
                                     if let Ok(mut s) = session.lock() {
                                         s.log_activity("UI", format!("profile '{file}' loaded: {detail}"));
@@ -353,7 +349,7 @@ impl TrainlabApp {
                     ui.label(egui::RichText::new("Write New Value").strong());
                     ui.end_row();
 
-                    for (label, addr, note) in &markers {
+                    for (label, addr, _note) in &markers {
                         ui.label(format!("${label}"));
                         ui.label(format!("{addr:#x}"));
 
@@ -389,13 +385,13 @@ impl TrainlabApp {
                         }
 
                         // Editable input for writing to marker
-                        let marker_edit_key = format!("marker_val_{label}");
-                        let mut edit_val = self.cheat_values.get(&((*addr) as u64)).cloned().unwrap_or_default();
+                        let _marker_edit_key = format!("marker_val_{label}");
+                        let mut edit_val = self.cheat_values.get(&{ *addr }).cloned().unwrap_or_default();
                         
                         ui.horizontal(|ui| {
                             let text_edit = ui.add(egui::TextEdit::singleline(&mut edit_val).hint_text("new value").desired_width(90.0));
                             if text_edit.changed() {
-                                self.cheat_values.insert((*addr) as u64, edit_val.clone());
+                                self.cheat_values.insert(*addr, edit_val.clone());
                             }
                             if ui.button("Write i32").clicked() {
                                 write_op = Some((*addr, edit_val.clone(), trainlab_core::scan::ValueType::I32));
@@ -455,11 +451,10 @@ impl TrainlabApp {
     /// Cached live reads to avoid firing blocking TCP read requests on every UI frame.
     fn read_cached(&mut self, address: u64, len: usize) -> Option<Vec<u8>> {
         let now = std::time::Instant::now();
-        if let Some((cached_time, cached_val)) = self.cheat_values_cache.get(&address) {
-            if now.duration_since(*cached_time) < std::time::Duration::from_millis(250) {
+        if let Some((cached_time, cached_val)) = self.cheat_values_cache.get(&address)
+            && now.duration_since(*cached_time) < std::time::Duration::from_millis(250) {
                 return cached_val.clone();
             }
-        }
         let r = self.request(&Request::Read { address, len });
         let val = match r {
             Some(Response::Read { data }) => Some(data),
@@ -527,7 +522,7 @@ impl TrainlabApp {
     /// Render the Cheats panel: user-facing adjustable game options discovered
     /// by the agent. Value cheats show a live read + editable field + Apply;
     /// toggle cheats show an on/off switch.
-    fn show_cheats_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn show_cheats_panel(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading("Cheats");
             if ui.checkbox(&mut self.show_cheats, "show").changed() {
@@ -744,14 +739,13 @@ impl TrainlabApp {
                                         }
                                     });
 
-                                    if do_write && field_target != 0 {
-                                        if let Ok(bytes) = parse_value_bytes(&edit_val, field_def.value_type) {
+                                    if do_write && field_target != 0
+                                        && let Ok(bytes) = parse_value_bytes(&edit_val, field_def.value_type) {
                                             let r = self.request(&Request::Write { address: field_target, data: bytes });
                                             if let Some(Response::Write { bytes_written }) = r {
                                                 self.log(format!("struct field '{}.{}' set to {edit_val} ({bytes_written} bytes)", cheat.label, field_def.label));
                                             }
                                         }
-                                    }
                                 }
                             });
                         });
@@ -855,11 +849,10 @@ impl TrainlabApp {
                             let label = cheat.label.clone();
                             let cmds = commands.clone();
                             std::thread::spawn(move || {
-                                if let Err(e) = mcp::execute_profile_commands(&session, &cmds) {
-                                    if let Ok(mut s) = session.lock() {
+                                if let Err(e) = mcp::execute_profile_commands(&session, &cmds)
+                                    && let Ok(mut s) = session.lock() {
                                         s.log_activity("UI", format!("button '{label}' failed: {e}"));
                                     }
-                                }
                             });
                         }
                         if let Some(n) = &cheat.note {
@@ -1064,8 +1057,8 @@ impl TrainlabApp {
                     address
                 };
                 // For value cheats, re-apply the value currently in the edit box if present.
-                if let Some(val_str) = self.cheat_values.get(&cheat_id).cloned() {
-                    if let Ok(bytes) = parse_value_bytes(&val_str, value_type) {
+                if let Some(val_str) = self.cheat_values.get(&cheat_id).cloned()
+                    && let Ok(bytes) = parse_value_bytes(&val_str, value_type) {
                         let r = self.request(&Request::Write {
                             address: target_addr,
                             data: bytes,
@@ -1077,7 +1070,6 @@ impl TrainlabApp {
                             _ => self.log(format!("hotkey apply for '{}' failed", label)),
                         }
                     }
-                }
             }
             CheatKind::Struct { base_address, base_expr, fields } => {
                 let base_addr = if !base_expr.is_empty() {
@@ -1331,7 +1323,7 @@ impl TrainlabApp {
 
                                 match op_res {
                                     Ok(op) => {
-                                        let mut scan_to_refine = {
+                                        let scan_to_refine = {
                                             let s = self.session.lock().unwrap();
                                             s.scan().cloned()
                                         };
@@ -1396,7 +1388,7 @@ impl TrainlabApp {
                                                     address_expr: Some(format!("{addr:#x}")),
                                                 },
                                                 None,
-                                                Some("Added from search UI".into()),
+                                                Some("Added from search UI"),
                                             );
                                             s.log_activity("UI", format!("added cheat '{label}' (id {cheat_id})"));
                                         }
@@ -1416,14 +1408,12 @@ fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
     // Check if startup delay is requested via TRAINLAB_STARTUP_DELAY env var
-    if let Ok(delay_str) = std::env::var("TRAINLAB_STARTUP_DELAY") {
-        if let Ok(delay_secs) = delay_str.parse::<u64>() {
-            if delay_secs > 0 {
+    if let Ok(delay_str) = std::env::var("TRAINLAB_STARTUP_DELAY")
+        && let Ok(delay_secs) = delay_str.parse::<u64>()
+            && delay_secs > 0 {
                 tracing::info!("trainlab-gui delaying window startup for {delay_secs} seconds...");
                 std::thread::sleep(std::time::Duration::from_secs(delay_secs));
             }
-        }
-    }
 
     // One shared session state across the GUI and the MCP server. The GUI sets
     // `game_pid` when it injects the game; the MCP server reads it to open the
@@ -1630,8 +1620,8 @@ impl eframe::App for TrainlabApp {
         }
 
         // Process remote window visibility commands from REST API / MCP / Web Dashboard
-        if let Ok(mut s) = self.session.lock() {
-            if let Some(cmd) = s.take_window_cmd() {
+        if let Ok(mut s) = self.session.lock()
+            && let Some(cmd) = s.take_window_cmd() {
                 if cmd == "show" {
                     s.log_activity("GUI", "executing remote 'show' window command");
                     self.window_visible = true;
@@ -1645,7 +1635,6 @@ impl eframe::App for TrainlabApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
             }
-        }
 
         // Poll Win32 WM_HOTKEY message queue for global hotkeys (works even when window is hidden/unmapped)
         if let Some(hotkey_id) = hotkeys::poll_wm_hotkey() {
@@ -1812,11 +1801,10 @@ impl eframe::App for TrainlabApp {
                                     .selected_text(selected_text)
                                     .show_ui(ui, |ui| {
                                         for (i, n) in names.iter().enumerate() {
-                                            if ui.selectable_value(&mut sel, i, n).clicked() {
-                                                if let Some(cand) = self.game_candidates.get(i) {
+                                            if ui.selectable_value(&mut sel, i, n).clicked()
+                                                && let Some(cand) = self.game_candidates.get(i) {
                                                     self.game_name = cand.name.clone();
                                                 }
-                                            }
                                         }
                                     });
                             });
@@ -2031,14 +2019,13 @@ impl eframe::App for TrainlabApp {
                                                 }
                                             });
 
-                                            if do_write && target_addr != 0 {
-                                                if let Ok(bytes) = parse_value_bytes(&self.playground_write_val, self.playground_type) {
+                                            if do_write && target_addr != 0
+                                                && let Ok(bytes) = parse_value_bytes(&self.playground_write_val, self.playground_type) {
                                                     let r = self.request(&Request::Write { address: target_addr, data: bytes });
                                                     if let Some(Response::Write { bytes_written }) = r {
                                                         self.log(format!("wrote {} to {target_addr:#x} ({bytes_written} bytes)", self.playground_write_val));
                                                     }
                                                 }
-                                            }
 
                                             if do_popout {
                                                 let lbl = if !self.playground_cheat_label.trim().is_empty() {
@@ -2274,11 +2261,10 @@ impl TrainlabApp {
                             }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let launch_target = app.path.as_deref().unwrap_or(&app.name).to_string();
-                                if ui.button("▶ Re-Launch").clicked() {
-                                    if let Ok(mut s) = self.session.lock() {
+                                if ui.button("▶ Re-Launch").clicked()
+                                    && let Ok(mut s) = self.session.lock() {
                                         let _ = s.launch_application(&launch_target, &[]);
                                     }
-                                }
                             });
                         });
                     }
@@ -2302,11 +2288,10 @@ impl TrainlabApp {
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let game_exe = prof.game.clone();
-                                if ui.button("🚀 Launch Game").clicked() {
-                                    if let Ok(mut s) = self.session.lock() {
+                                if ui.button("🚀 Launch Game").clicked()
+                                    && let Ok(mut s) = self.session.lock() {
                                         let _ = s.launch_application(&game_exe, &[]);
                                     }
-                                }
                             });
                         });
                     }

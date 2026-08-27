@@ -1121,8 +1121,8 @@ impl TrainlabMcpServer {
         }
 
         // Execute profile init_commands if defined so memory markers and allocations are established
-        if let Some(init_cmds) = &profile.init_commands {
-            if !init_cmds.is_empty() {
+        if let Some(init_cmds) = &profile.init_commands
+            && !init_cmds.is_empty() {
                 if let Ok(mut s) = self.session.lock() {
                     s.log_activity("PROFILE", format!("executing {} profile init_command(s)...", init_cmds.len()));
                 }
@@ -1134,7 +1134,6 @@ impl TrainlabMcpServer {
                     err(err_msg)
                 })?;
             }
-        }
 
         // Materialize cheats and setup markers into the session.
         let mut s = self
@@ -1281,7 +1280,7 @@ impl TrainlabMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let app_args = args.args.unwrap_or_default();
         let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
-        let pid = s.launch_application(&args.path, &app_args).map_err(|e| err(e))?;
+        let pid = s.launch_application(&args.path, &app_args).map_err(err)?;
         drop(s);
         self.request_repaint();
         Ok(CallToolResult::success(vec![
@@ -1357,33 +1356,27 @@ impl TrainlabMcpServer {
                 }
             }
             // Validate value_type if present.
-            if let Some(vt) = &pc.value_type {
-                if parse_value_type(vt).is_err() {
+            if let Some(vt) = &pc.value_type
+                && parse_value_type(vt).is_err() {
                     errors.push(format!("cheat '{}': unknown value_type '{}'", pc.label, vt));
                 }
-            }
             // Validate payload hex if present.
-            if let Some(payload) = &pc.payload {
-                if !payload.is_empty() {
-                    if parse_hex_bytes(payload).is_err() {
+            if let Some(payload) = &pc.payload
+                && !payload.is_empty()
+                    && parse_hex_bytes(payload).is_err() {
                         errors.push(format!("cheat '{}': invalid payload hex '{}'", pc.label, payload));
                     }
-                }
-            }
             // Validate hook kind if present (for toggle, must be trampoline/override; for patch, it's a cave marker ref).
-            if let Some(h) = &pc.hook {
-                if pc.kind.eq_ignore_ascii_case("toggle") {
-                    if h != "trampoline" && h != "override" {
+            if let Some(h) = &pc.hook
+                && pc.kind.eq_ignore_ascii_case("toggle")
+                    && h != "trampoline" && h != "override" {
                         errors.push(format!("cheat '{}': unknown hook '{}' (expected 'trampoline' or 'override')", pc.label, h));
                     }
-                }
-            }
             // Validate jump style if present.
-            if let Some(j) = &pc.jump {
-                if j != "absolute" && j != "relative" && j != "short" {
+            if let Some(j) = &pc.jump
+                && j != "absolute" && j != "relative" && j != "short" {
                     warnings.push(format!("cheat '{}': unknown jump '{}' (expected 'absolute' or 'relative')", pc.label, j));
                 }
-            }
         }
 
         // Validate init_commands payloads if present.
@@ -1391,11 +1384,10 @@ impl TrainlabMcpServer {
             for (i, cmd) in init_cmds.iter().enumerate() {
                 match cmd {
                     crate::profile::ProfileCommand::Write { value, value_type, .. } => {
-                        if let Some(vt) = value_type {
-                            if parse_value_type(vt).is_err() {
+                        if let Some(vt) = value_type
+                            && parse_value_type(vt).is_err() {
                                 errors.push(format!("init_cmd {i}: unknown value_type '{vt}'"));
                             }
-                        }
                         // Value is hard to validate without session markers, but check non-empty.
                         if value.trim().is_empty() {
                             errors.push(format!("init_cmd {i}: write value is empty"));
@@ -1656,11 +1648,10 @@ impl TrainlabMcpServer {
         }).map_err(|e| err(e.message))?;
 
         // Sync scan back to session for GUI/inspectors
-        if let Some(scan) = ctx.scan {
-            if let Ok(mut s) = self.session.lock() {
+        if let Some(scan) = ctx.scan
+            && let Ok(mut s) = self.session.lock() {
                 s.set_scan(scan);
             }
-        }
 
         self.request_repaint();
 
@@ -1690,11 +1681,10 @@ impl TrainlabMcpServer {
             max: args.max,
         }).map_err(|e| err(e.message))?;
 
-        if let Some(scan) = ctx.scan {
-            if let Ok(mut s) = self.session.lock() {
+        if let Some(scan) = ctx.scan
+            && let Ok(mut s) = self.session.lock() {
                 s.set_scan(scan);
             }
-        }
 
         self.request_repaint();
 
@@ -2316,12 +2306,11 @@ impl TrainlabMcpServer {
                             .map_err(|_| err("session lock poisoned"))?;
                         if let Some(cid) = cheat_id {
                             // Toggle patch cheat state
-                            if let Some(c) = s.get_cheat(cid) {
-                                if let CheatKind::Patch { patch_bytes, .. } = &c.kind {
+                            if let Some(c) = s.get_cheat(cid)
+                                && let CheatKind::Patch { patch_bytes, .. } = &c.kind {
                                     let is_enabling = data == patch_bytes;
                                     s.set_cheat_toggle(cid, is_enabling);
                                 }
-                            }
                         }
                         if !original.is_empty() {
                             let id = s.record_undo(
@@ -2363,7 +2352,7 @@ impl TrainlabMcpServer {
                             format!("install_cave at {:#x}", target),
                         );
                         if let Some(m) = marker {
-                            let _ = s.set_marker(&m, cave, Some(&format!("Code cave allocated for target {target:#x}")));
+                            let _ = s.set_marker(m, cave, Some(&format!("Code cave allocated for target {target:#x}")));
                         }
                         // T-110/T-111: update the toggle cheat's cave info + flip enabled.
                         if let Some(cid) = cheat_id {
@@ -2571,7 +2560,7 @@ pub(crate) fn parse_addr_expr_with_mem(
     if let Some(idx) = split_idx {
         let (base_part, off_part) = (&input[..idx], &input[idx + 1..]);
         let base = parse_addr_expr_with_mem(session, base_part, custom_mem)?;
-        let off = parse_addr_str(off_part.trim()).map_err(|e| err(e))?;
+        let off = parse_addr_str(off_part.trim()).map_err(err)?;
         return Ok(if is_add {
             base.wrapping_add(off)
         } else {
@@ -2619,11 +2608,10 @@ pub(crate) fn parse_addr_expr_with_mem(
 
     // 3. Try looking up in session markers (support optional '$' prefix like "$mycoolstring" or "mycoolstring")
     let marker_name = input.strip_prefix('$').unwrap_or(input);
-    if let Ok(s) = session.lock() {
-        if let Some(m) = s.get_marker(marker_name).or_else(|| s.get_marker(input)) {
+    if let Ok(s) = session.lock()
+        && let Some(m) = s.get_marker(marker_name).or_else(|| s.get_marker(input)) {
             return Ok(m.address);
         }
-    }
 
     // 4. Try looking up as a loaded module base (e.g. "Unrailed2.exe" or "game.dll")
     if let Ok(base) = resolve_module_base(session, input) {
@@ -2634,9 +2622,6 @@ pub(crate) fn parse_addr_expr_with_mem(
         "could not resolve address expression '{input}' (not a raw hex/dec address, saved marker, or loaded module)"
     )))
 }
-
-/// Parse a whitespace-tolerant hex string (e.g. "00 80 ac 43" or "0080ac43")
-/// into raw bytes.
 
 /// Execute a sequence of profile commands (AOB scans, cave installs, string allocations, assertions, pointer chases).
 pub(crate) fn execute_profile_commands(
@@ -2721,11 +2706,10 @@ pub(crate) fn execute_profile_commands(
 
                 match resp {
                     trainlab_core::protocol::Response::CaveInstalled { cave, original, .. } => {
-                        if let Some(m) = marker {
-                            if let Ok(mut s) = session.lock() {
+                        if let Some(m) = marker
+                            && let Ok(mut s) = session.lock() {
                                 let _ = s.set_marker(m, cave, Some(&format!("Cave for target {target_addr:#x}")));
                             }
-                        }
                         if let Ok(mut s) = session.lock() {
                             // T-101: Record undo snapshot for profile-command cave installs.
                             if !original.is_empty() {
@@ -2745,11 +2729,10 @@ pub(crate) fn execute_profile_commands(
             crate::profile::ProfileCommand::AllocateString { content, kind, marker } => {
                 match allocate_string_in_game(session, content, kind) {
                     Ok((ptr, len)) => {
-                        if let Some(m) = marker {
-                            if let Ok(mut s) = session.lock() {
+                        if let Some(m) = marker
+                            && let Ok(mut s) = session.lock() {
                                 let _ = s.set_marker(m, ptr, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
                             }
-                        }
                         if let Ok(mut s) = session.lock() {
                             s.log_activity("PROFILE", format!("cmd {idx}: allocate string ({kind}) -> ptr={ptr:#x} (len {len})"));
                         }
@@ -2774,12 +2757,11 @@ pub(crate) fn execute_profile_commands(
                     if len < parsed_pat.len() {
                         continue;
                     }
-                    if let Ok(buf) = proc.read(r.start, len) {
-                        if let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_pat).first() {
+                    if let Ok(buf) = proc.read(r.start, len)
+                        && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_pat).first() {
                             first_match = Some(r.start + *off as u64);
                             break;
                         }
-                    }
                 }
 
                 if let Some(match_addr) = first_match {
@@ -2913,7 +2895,7 @@ pub(crate) fn allocate_string_in_game(session: &SharedSession, content: &str, ki
     if is_c_like && !bytes.ends_with(&[0]) {
         bytes.push(0);
     }
-    let len = bytes.len();
+    let _len = bytes.len();
     let pid = {
         let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
         s.game_pid().ok_or_else(|| "no attached game process".to_string())?
@@ -2983,12 +2965,11 @@ fn resolve_setup_step(
                 if len < parsed.len() {
                     continue;
                 }
-                if let Ok(buf) = proc.read(r.start, len) {
-                    if let Some(off) = trainlab_core::aob::find_all(&buf, &parsed).first() {
+                if let Ok(buf) = proc.read(r.start, len)
+                    && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed).first() {
                         first_match = Some(r.start + *off as u64);
                         break;
                     }
-                }
             }
             let m = first_match.ok_or_else(|| "aob scan found no matches".to_string())?;
             Ok((m as i64 + offset.unwrap_or(0)) as u64)
@@ -3149,7 +3130,7 @@ pub(crate) fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> 
 
 pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, ErrorData> {
     let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(err("hex string must have an even number of digits"));
     }
     let mut out = Vec::with_capacity(cleaned.len() / 2);
@@ -3696,8 +3677,8 @@ mod tests {
         );
         // f64
         assert_eq!(
-            parse_value_bytes("3.14", trainlab_core::scan::ValueType::F64).unwrap(),
-            3.14f64.to_le_bytes().to_vec()
+            parse_value_bytes("3.25", trainlab_core::scan::ValueType::F64).unwrap(),
+            3.25f64.to_le_bytes().to_vec()
         );
         // u64
         assert_eq!(

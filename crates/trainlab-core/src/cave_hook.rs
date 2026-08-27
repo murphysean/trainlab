@@ -13,18 +13,15 @@ use serde::{Deserialize, Serialize};
 /// strategy from the MCP tool.
 /// Jump style for the code cave patch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum JumpStyle {
     /// 14-byte absolute jump (`FF 25 rel32` + 8-byte target slot). Needs 14 contiguous bytes.
+    #[default]
     Absolute,
     /// 5-byte relative jump (`E9 rel32`). Fits tight patch sites (>= 5 bytes).
     Relative,
 }
 
-impl Default for JumpStyle {
-    fn default() -> Self {
-        JumpStyle::Absolute
-    }
-}
 
 /// How a code-cave hook redirects a target instruction (see the `trainlab-cave`
 /// installer for semantics). Serialized so an agent can choose the patch

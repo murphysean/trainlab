@@ -172,14 +172,9 @@ impl Scan {
     ) -> Result<usize, MemoryError> {
         let mut kept = Vec::with_capacity(self.matches.len());
         for (addr, prev) in &self.matches {
-            match read_value(proc, *addr, self.value_type) {
-                Ok(cur) => {
-                    if op_matches(op, *prev, cur, self.value_type) {
-                        kept.push((*addr, cur));
-                    }
-                }
-                // Address no longer readable (freed / unmapped): drop it.
-                Err(_) => {}
+            if let Ok(cur) = read_value(proc, *addr, self.value_type)
+                && op_matches(op, *prev, cur, self.value_type) {
+                    kept.push((*addr, cur));
             }
         }
         self.matches = kept;
@@ -269,7 +264,7 @@ pub(crate) fn scan_buffer(
     let mut offset = 0;
     while offset <= end_offset {
         let addr = base + offset as u64;
-        if alignment > 1 && addr % alignment as u64 != 0 {
+        if alignment > 1 && !addr.is_multiple_of(alignment as u64) {
             offset += step;
             continue;
         }

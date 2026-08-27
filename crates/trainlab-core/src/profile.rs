@@ -292,22 +292,20 @@ pub fn discover_profiles() -> Vec<(String, GameProfile)> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(profile) = GameProfile::from_yaml(&text) {
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(profile) = GameProfile::from_yaml(&text) {
                 out.push((name, profile));
             }
-        }
     }
     out
 }
 
 /// The absolute path to the profiles directory (next to the GUI exe).
 pub fn profiles_dir_path() -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             return dir.join(PROFILES_DIR);
         }
-    }
     std::path::PathBuf::from(PROFILES_DIR)
 }
 

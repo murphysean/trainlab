@@ -1,10 +1,9 @@
 //! Live MCP driver to validate the code-cave instruction-aligned patch fix.
 //!
 //! Drives the running `trainlab-gui` MCP server (external, crash-safe scans)
-//! + the injected DLL fast channel (poke-family: watch / cave). It runs as
-//! discrete *stages* so a human can make the game tick between steps and so we
-//! share the GUI's persistent session state (the scan match set survives across
-//! separate invocations).
+//! and the injected DLL fast channel (poke-family: watch / cave).
+//! Runs as discrete *stages* so a human can make the game tick between steps and so we
+//! share the GUI's persistent session state (the scan match set survives across separate invocations).
 //!
 //! Usage:  cargo run -p trainlab-gui --example cave_validate -- <stage>
 //!

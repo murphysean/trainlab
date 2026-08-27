@@ -94,7 +94,7 @@ pub fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
     if clean.is_empty() {
         return Ok(Vec::new());
     }
-    if clean.len() % 2 != 0 {
+    if !clean.len().is_multiple_of(2) {
         return Err(format!("odd hex string length: {}", clean.len()));
     }
     (0..clean.len())
@@ -226,11 +226,10 @@ where
     }
 
     // Fallback try raw hex without 0x if all characters are hex
-    if !input.is_empty() && input.chars().all(|c| c.is_ascii_hexdigit()) {
-        if let Ok(a) = u64::from_str_radix(input, 16) {
+    if !input.is_empty() && input.chars().all(|c| c.is_ascii_hexdigit())
+        && let Ok(a) = u64::from_str_radix(input, 16) {
             return Ok(a);
         }
-    }
 
     Err(format!(
         "could not resolve address expression '{input}' (not a raw hex/dec address, marker, or loaded module)"
@@ -265,7 +264,7 @@ mod tests {
     #[test]
     fn test_format_and_parse_values() {
         assert_eq!(format_value(&12345i32.to_le_bytes(), ValueType::I32), "12345");
-        assert_eq!(format_value(&3.14f32.to_le_bytes(), ValueType::F32), "3.14");
+        assert_eq!(format_value(&3.25f32.to_le_bytes(), ValueType::F32), "3.25");
         assert_eq!(
             parse_value_bytes("999", ValueType::I32).unwrap(),
             999i32.to_le_bytes().to_vec()

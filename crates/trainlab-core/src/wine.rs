@@ -133,10 +133,10 @@ pub fn tag_regions(pid: i32) -> Result<Vec<TaggedRegion>, std::io::Error> {
 }
 
 /// Filter tagged regions to those of a given kind.
-pub fn regions_of_kind<'a>(
-    regions: &'a [TaggedRegion],
+pub fn regions_of_kind(
+    regions: &[TaggedRegion],
     kind: RegionKind,
-) -> impl Iterator<Item = &'a TaggedRegion> {
+) -> impl Iterator<Item = &TaggedRegion> {
     regions.iter().filter(move |r| r.kind == kind)
 }
 
@@ -170,9 +170,9 @@ impl ScanScope {
     ///
     /// When `scope` is [`ScanScope::All`, returns every readable region.
     /// Otherwise, returns regions whose [`RegionKind`] is in scope.
-    pub fn regions<'a>(
+    pub fn regions(
         &self,
-        tagged: &'a [TaggedRegion],
+        tagged: &[TaggedRegion],
     ) -> Vec<crate::memory::Region> {
         match self {
             ScanScope::All => tagged
@@ -229,11 +229,10 @@ pub fn is_wine_process(pid: i32) -> bool {
         }
     }
     // (2) Wine DLLs mapped.
-    if let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) {
-        if maps.contains("/wine/") || maps.to_lowercase().contains("wine") {
+    if let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps"))
+        && (maps.contains("/wine/") || maps.to_lowercase().contains("wine")) {
             return true;
         }
-    }
     // (3) Ancestor walk.
     ancestor_has_wine(pid)
 }

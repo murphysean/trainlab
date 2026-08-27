@@ -135,11 +135,10 @@ fn parse_dd(s: &str, symbols: &HashMap<String, u64>) -> Result<Vec<u8>, String> 
         let f: f32 = f_str.trim().parse().map_err(|e| format!("invalid float '{f_str}': {e}"))?;
         return Ok(f.to_le_bytes().to_vec());
     }
-    if s.contains('.') {
-        if let Ok(f) = s.parse::<f32>() {
+    if s.contains('.')
+        && let Ok(f) = s.parse::<f32>() {
             return Ok(f.to_le_bytes().to_vec());
         }
-    }
     let val = parse_u64_expr(s, symbols)?;
     Ok((val as u32).to_le_bytes().to_vec())
 }
@@ -191,7 +190,7 @@ fn parse_and_emit_instruction(
     labels: &mut HashMap<String, iced_x86::code_asm::CodeLabel>,
     referenced_labels: &mut std::collections::HashSet<String>,
 ) -> Result<(), String> {
-    use iced_x86::code_asm::*;
+    
 
     let line = line.trim();
     let (mnemonic, args_str) = match line.find(|c: char| c.is_whitespace()) {
@@ -221,12 +220,11 @@ fn parse_and_emit_instruction(
         "jmp" => {
             if args.len() != 1 { return Err("jmp requires 1 operand".into()); }
             let target = args[0];
-            if let Some(sym) = target.strip_prefix('$') {
-                if let Some(target_addr) = symbols.get(sym) {
+            if let Some(sym) = target.strip_prefix('$')
+                && let Some(target_addr) = symbols.get(sym) {
                     a.jmp(*target_addr).map_err(|e| e.to_string())?;
                     return Ok(());
                 }
-            }
             if let Ok(reg) = parse_gpr64(target) {
                 a.jmp(reg).map_err(|e| e.to_string())?;
                 return Ok(());
@@ -238,7 +236,7 @@ fn parse_and_emit_instruction(
             // Local label
             let name = target.trim().trim_start_matches('$').to_lowercase();
             referenced_labels.insert(name.clone());
-            let lbl = labels.entry(name.clone()).or_insert_with(|| a.create_label()).clone();
+            let lbl = *labels.entry(name.clone()).or_insert_with(|| a.create_label());
             a.jmp(lbl).map_err(|e| e.to_string())?;
         }
         "mulss" => {
@@ -401,7 +399,7 @@ fn parse_and_emit_instruction(
             let target = args[0];
             let name = target.trim().trim_start_matches('$').to_lowercase();
             referenced_labels.insert(name.clone());
-            let lbl = labels.entry(name).or_insert_with(|| a.create_label()).clone();
+            let lbl = *labels.entry(name).or_insert_with(|| a.create_label());
             match mnemonic.as_str() {
                 "je" | "jz" => { a.je(lbl).map_err(|e| e.to_string())?; }
                 "jne" | "jnz" => { a.jne(lbl).map_err(|e| e.to_string())?; }
@@ -600,7 +598,7 @@ fn parse_mem(
         }
         let sym_name = trimmed.trim_start_matches('$').to_lowercase();
         referenced_labels.insert(sym_name.clone());
-        let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
+        let lbl = *labels.entry(sym_name).or_insert_with(|| a.create_label());
         return Ok(wrap_mem(dword_ptr(lbl)));
     }
     if let Some(stripped) = inner.strip_prefix("rip -").or_else(|| inner.strip_prefix("RIP -")).or_else(|| inner.strip_prefix("rip-")).or_else(|| inner.strip_prefix("RIP-")) {
@@ -611,7 +609,7 @@ fn parse_mem(
         }
         let sym_name = trimmed.trim_start_matches('$').to_lowercase();
         referenced_labels.insert(sym_name.clone());
-        let lbl = labels.entry(sym_name).or_insert_with(|| a.create_label()).clone();
+        let lbl = *labels.entry(sym_name).or_insert_with(|| a.create_label());
         return Ok(wrap_mem(dword_ptr(lbl)));
     }
 
@@ -701,6 +699,7 @@ mod tests {
 /// defined BEFORE or AFTER the instruction that uses it. Our assembler must accept BOTH:
 ///   - const-first  ("BWD"):  label: dd X   then   instr [rip + label]
 ///   - instruction-first ("FWD"/CE-verbatim):  instr [rip + label]  then  label: dd X
+///
 /// The constant lands at a different offset in each layout (bytes differ), but EACH must
 /// resolve `[rip + label]` to its constant slot with a correct relative displacement and must
 /// NOT emit an address-size (0x67) prefix (which indicates an unresolved label in iced-x86).
