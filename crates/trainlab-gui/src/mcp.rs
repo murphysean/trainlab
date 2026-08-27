@@ -1811,61 +1811,17 @@ impl TrainlabMcpServer {
     /// Read memory from the game process (raw bytes or typed value).
     #[tool(description = "Read memory from the game process. Supports raw hex bytes (default) OR typed values (value_type='ptr'|'i32'|'u32'|'f32'|'i64'|'u64'|'f64'|'cstr'). Supports expressions (e.g. 'game.exe+0x123', 'wood_ptr+0x10').")]
     pub(crate) fn read(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&self.session, &args.address)?;
         let proc = game_process(&self.session)?;
-        let vt_str = args.value_type.as_deref().unwrap_or("hex").trim().to_lowercase();
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_read(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ReadArgs {
+            address: args.address,
+            len: args.len,
+            value_type: args.value_type,
+        }).map_err(|e| err(e.message))?;
 
-        match vt_str.as_str() {
-            "hex" | "bytes" => {
-                let len = args.len.unwrap_or(16);
-                let data = proc.read(address, len).map_err(|e| err(format!("read failed: {e}")))?;
-                let hex = data
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(hex),
-                ]))
-            }
-            "ptr" | "pointer" => {
-                let val = read_u64(proc.as_ref(), address).map_err(|e| err(format!("read ptr failed: {e}")))?;
-                let ptr_val = parse_addr_str(&val).unwrap_or(0);
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(format!("{ptr_val:#018x} ({val})")),
-                ]))
-            }
-            "i32" => {
-                let val = read_i32(proc.as_ref(), address).map_err(|e| err(format!("read i32 failed: {e}")))?;
-                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
-            }
-            "u32" => {
-                let val = read_u32(proc.as_ref(), address).map_err(|e| err(format!("read u32 failed: {e}")))?;
-                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
-            }
-            "f32" | "float" => {
-                let val = read_f32_val(proc.as_ref(), address).map_err(|e| err(format!("read f32 failed: {e}")))?;
-                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
-            }
-            "i64" => {
-                let val = read_i64(proc.as_ref(), address).map_err(|e| err(format!("read i64 failed: {e}")))?;
-                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
-            }
-            "u64" => {
-                let val = read_u64(proc.as_ref(), address).map_err(|e| err(format!("read u64 failed: {e}")))?;
-                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
-            }
-            "f64" | "double" => {
-                let val = read_f64_val(proc.as_ref(), address).map_err(|e| err(format!("read f64 failed: {e}")))?;
-                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
-            }
-            "cstr" | "string" => {
-                let max_len = args.len.unwrap_or(256);
-                let val = read_cstr(proc.as_ref(), address, max_len).map_err(|e| err(format!("read cstr failed: {e}")))?;
-                Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(val)]))
-            }
-            other => Err(err(format!("unknown read value_type '{other}' (expected hex, ptr, i32, u32, f32, i64, u64, f64, cstr)"))),
-        }
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 
     /// Report the Windows integrity level of the game process and the trainer
@@ -2250,14 +2206,16 @@ impl TrainlabMcpServer {
     /// Dump a chunk of memory formatted for struct/class reversal.
     #[tool(description = "Read a chunk of memory around an address and format it as hex + ASCII (and typed fields where obvious) so the agent can reverse a struct/class layout. The LLM does the teasing-out.")]
     fn dump(&self, Parameters(args): Parameters<DumpArgs>) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&self.session, &args.address)?;
         let proc = game_process(&self.session)?;
-        match proc.read(address, args.len) {
-            Ok(data) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format_dump(address, &data)),
-            ])),
-            Err(e) => Err(err(format!("dump failed: {e}"))),
-        }
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_dump(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::DumpArgs {
+            address: args.address,
+            len: args.len,
+        }).map_err(|e| err(e.message))?;
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 
     /// Dump a memory range to a snapshot binary file on disk and return a downloadable URL.
@@ -2266,69 +2224,31 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<SnapshotArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let start = parse_addr(&self.session, &args.start)?;
-        let len = match (args.end.as_deref(), args.len) {
-            (Some(end_str), None) => {
-                let end = parse_addr(&self.session, end_str)?;
-                if end <= start {
-                    return Err(err("end address must be greater than start address"));
-                }
-                end - start
-            }
-            (None, Some(l)) => {
-                if l == 0 {
-                    return Err(err("length must be greater than 0"));
-                }
-                l
-            }
-            (Some(_), Some(_)) => {
-                return Err(err("specify either 'end' or 'len', but not both"));
-            }
-            (None, None) => {
-                return Err(err("must specify either 'end' or 'len'"));
-            }
-        };
-
-        let file_name = args.name.unwrap_or_else(|| {
-            format!("snap_0x{start:08x}_{len}.bin")
-        });
-
-        // Ensure snapshot file is saved in snapshots/ subdirectory
-        let snap_dir = std::path::Path::new("snapshots");
-        let file_path = snap_dir.join(&file_name);
-
         let proc = game_process(&self.session)?;
-        let bytes_written = trainlab_core::memory::dump_range_to_file(
-            proc.as_ref(),
-            start,
-            len,
-            &file_path,
-            args.max_len,
-        )
-        .map_err(|e| err(format!("snapshot dump failed: {e}")))?;
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_snapshot(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::SnapshotArgs {
+            start: args.start,
+            end: args.end,
+            len: args.len,
+            name: args.name,
+            max_len: args.max_len,
+        }).map_err(|e| err(e.message))?;
 
-        // Build the download URL based on configured MCP host and port
         let (host, port) = {
             let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
             (s.dll_host().to_string(), s.dll_port())
         };
-        // Use loopback or host address for the snapshot URL
         let url_host = if host == "0.0.0.0" { "127.0.0.1".to_string() } else { host };
+        let file_name = res.data.as_ref().and_then(|d| d.get("file_name")).and_then(|f| f.as_str()).unwrap_or("");
         let url = format!("http://{url_host}:{port}/snapshots/{file_name}");
 
-        if let Ok(mut s) = self.session.lock() {
-            s.log_activity(
-                "MCP",
-                format!("created memory snapshot '{file_name}' ({bytes_written} bytes)"),
-            );
-        }
-        self.request_repaint();
-
         let resp_json = serde_json::json!({
-            "path": file_path.to_string_lossy(),
-            "size": bytes_written,
+            "path": res.data.as_ref().and_then(|d| d.get("path")).and_then(|p| p.as_str()).unwrap_or(""),
+            "size": res.data.as_ref().and_then(|d| d.get("bytes_written")).and_then(|s| s.as_u64()).unwrap_or(0),
             "url": url,
         });
+
+        self.request_repaint();
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(resp_json.to_string()),
@@ -2342,169 +2262,42 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<AllocateStringArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let kind = args.kind.trim().to_lowercase();
-        let mut bytes = args.content.as_bytes().to_vec();
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_allocate_string(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateStringArgs {
+            content: args.content,
+            kind: args.kind,
+            marker: args.marker,
+        }).map_err(|e| err(e.message))?;
 
-        let is_rust = kind == "rust";
-        let is_c_like = matches!(
-            kind.as_str(),
-            "c" | "json" | "yaml" | "xml" | "js" | "config"
-        );
-
-        if !is_rust && !is_c_like {
-            return Err(err(format!(
-                "unknown string kind '{kind}' (expected 'c', 'rust', 'json', 'yaml', 'xml', 'js', or 'config')"
-            )));
-        }
-
-        // C-like strings must be NUL-terminated for C string parsers
-        if is_c_like && !bytes.ends_with(&[0]) {
-            bytes.push(0);
-        }
-
-        let len = bytes.len();
-
-        // Perform memory allocation in target process via Windows VirtualAllocEx
-        let alloc_addr = {
-            #[cfg(windows)]
-            {
-                use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
-                let pid = self.session.lock().map_err(|_| err("session lock poisoned"))?.game_pid();
-                if let Some(pid) = pid {
-                    let proc_handle = unsafe {
-                        windows_sys::Win32::System::Threading::OpenProcess(
-                            windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION
-                                | windows_sys::Win32::System::Threading::PROCESS_VM_WRITE
-                                | windows_sys::Win32::System::Threading::PROCESS_VM_READ,
-                            0,
-                            pid,
-                        )
-                    };
-                    if !proc_handle.is_null() {
-                        let ptr = unsafe {
-                            VirtualAllocEx(proc_handle, std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
-                        };
-                        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
-                        if !ptr.is_null() {
-                            ptr as u64
-                        } else {
-                            return Err(err("VirtualAllocEx failed in target process"));
-                        }
-                    } else {
-                        return Err(err("failed to open process for allocation"));
-                    }
-                } else {
-                    return Err(err("no attached game process to allocate string in"));
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                0x10000u64
-            }
-        };
-
-        // Write the string bytes to the allocated address
-        proc.write(alloc_addr, &bytes)
-            .map_err(|e| err(format!("failed to write string bytes: {e}")))?;
-
-        if let Ok(mut s) = self.session.lock() {
-            s.log_activity(
-                "MCP",
-                format!("allocated string ({kind}, {len} bytes) at {alloc_addr:#x}"),
-            );
-            if let Some(m) = &args.marker {
-                let _ = s.set_marker(m, alloc_addr, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
-            }
-        }
         self.request_repaint();
 
-        let resp_json = if is_rust {
-            serde_json::json!({
-                "ptr": format!("{alloc_addr:#x}"),
-                "len": len,
-                "kind": kind,
-            })
-        } else {
-            serde_json::json!({
-                "ptr": format!("{alloc_addr:#x}"),
-                "kind": kind,
-            })
-        };
-
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(resp_json.to_string()),
+            rmcp::model::ContentBlock::text(serde_json::to_string(&res.data).unwrap_or(res.message)),
         ]))
     }
 
-    /// Read a struct at an address as a list of typed fields (name, type,
-    /// offset) and format them, so the agent can reverse a struct/class layout
-    /// without manually slicing raw bytes.
+    /// Read a struct at an address and format each requested field by type.
     #[tool(description = "Read a struct at an address and format each requested field by type. Field types: i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, ptr, cstr (null-terminated ASCII), or bytes. Pass an offset per field (default 0).")]
     fn dump_struct(
         &self,
         Parameters(args): Parameters<DumpStructArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&self.session, &args.address)?;
-        if args.fields.is_empty() {
-            return Err(err("dump_struct requires at least one field"));
-        }
         let proc = game_process(&self.session)?;
-        let mut lines = Vec::with_capacity(args.fields.len());
-        for f in &args.fields {
-            if f.name.trim().is_empty() {
-                return Err(err("field name cannot be empty"));
-            }
-            // Resolve the field address = struct base + offset.
-            let field_addr = address.wrapping_add(f.offset);
-            let result = match f.value_type.trim().to_lowercase().as_str() {
-                "i8" => read_i8(proc.as_ref(), field_addr),
-                "u8" => read_u8(proc.as_ref(), field_addr),
-                "i16" => read_i16(proc.as_ref(), field_addr),
-                "u16" => read_u16(proc.as_ref(), field_addr),
-                "i32" => read_i32(proc.as_ref(), field_addr),
-                "u32" => read_u32(proc.as_ref(), field_addr),
-                "i64" => read_i64(proc.as_ref(), field_addr),
-                "u64" => read_u64(proc.as_ref(), field_addr),
-                "f32" => read_f32_val(proc.as_ref(), field_addr),
-                "f64" => read_f64_val(proc.as_ref(), field_addr),
-                "ptr" => read_u64(proc.as_ref(), field_addr),
-                "cstr" => {
-                    let max_len = f.len.unwrap_or(256).max(1);
-                    match read_cstr(proc.as_ref(), field_addr, max_len) {
-                        Ok(s) => Ok(format!("{s:?}")),
-                        Err(e) => Err(e),
-                    }
-                }
-                "bytes" => {
-                    let n = f.len.unwrap_or(16).max(1);
-                    match proc.read(field_addr, n) {
-                        Ok(data) => Ok(format!(
-                            "[{}] {}",
-                            data.len(),
-                            data.iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        )),
-                        Err(e) => Err(format!("read failed: {e}")),
-                    }
-                }
-                other => Err(format!(
-                    "unknown field type '{other}' (expected i8/u8/i16/u16/i32/u32/i64/u64/f32/f64/ptr/cstr/bytes)"
-                )),
-            };
-            match result {
-                Ok(v) => lines.push(format!(
-                    "{:+5} {:<6} {}: {}",
-                    f.offset, f.value_type, f.name, v
-                )),
-                Err(e) => lines.push(format!("{:+5} {:<6} {}: <error: {e}>", f.offset, f.value_type, f.name)),
-            }
-        }
-        let mut text = format!("struct @ {address:#018x} ({} field(s))\n", args.fields.len());
-        text.push_str(&lines.join("\n"));
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let fields = args.fields.into_iter().map(|f| trainlab_core::tools::StructFieldSpec {
+            name: f.name,
+            offset: f.offset as i64,
+            value_type: f.value_type,
+            len: f.len,
+        }).collect();
+
+        let res = trainlab_core::tools::execute_dump_struct(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::DumpStructArgs {
+            address: args.address,
+            fields,
+        }).map_err(|e| err(e.message))?;
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(text),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
@@ -2549,17 +2342,17 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<DisassembleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&self.session, &args.address)?;
         let proc = game_process(&self.session)?;
-        match proc.read(address, args.len) {
-            Ok(data) => {
-                let lines = trainlab_core::disasm::disassemble(address, &data, args.max_instructions);
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(lines.join("\n")),
-                ]))
-            }
-            Err(e) => Err(err(format!("disassemble failed: {e}"))),
-        }
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_disassemble(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::DisassembleArgs {
+            address: args.address,
+            len: args.len,
+            max_instructions: args.max_instructions.unwrap_or(32),
+        }).map_err(|e| err(e.message))?;
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 
     /// Arm a passive, non-stalling register capture at a code address.
