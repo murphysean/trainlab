@@ -155,13 +155,6 @@ pub struct ReadArgs {
     pub value_type: Option<String>,
 }
 
-/// Arguments for [`aob_scan`].
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct AobArgs {
-    /// AOB pattern in hex with `??` wildcards, e.g. "48 8B 05 ?? ?? ?? ??".
-    pub pattern: String,
-}
-
 /// Arguments for [`set_marker`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SetMarkerArgs {
@@ -188,7 +181,7 @@ pub struct RemoveMarkerArgs {
     pub label: String,
 }
 
-/// Arguments for [`read`].
+/// Arguments for [`undo_info`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct UndoInfoArgs {
     /// Optional undo id; if omitted, describe the most recent mutation.
@@ -196,9 +189,9 @@ pub struct UndoInfoArgs {
     pub id: Option<u64>,
 }
 
-/// Arguments for [`scan`].
+/// Arguments for [`scan_start`] / [`scan`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ScanArgs {
+pub struct ScanStartArgs {
     /// Value type: i32, u32, f32, i64, u64, f64, or ptr.
     pub value_type: String,
     /// Value to scan for (as a number). For a range scan this is the min.
@@ -214,9 +207,12 @@ pub struct ScanArgs {
     pub alignment: Option<usize>,
 }
 
-/// Arguments for [`next`].
+/// Backwards-compatible alias for [`ScanStartArgs`].
+pub type ScanArgs = ScanStartArgs;
+
+/// Arguments for [`scan_next`] / [`next`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct NextArgs {
+pub struct ScanNextArgs {
     /// Narrowing op: changed, unchanged, increased, decreased, exact, range.
     pub op: String,
     /// For `exact`: the value to match. For `range`: the min.
@@ -227,15 +223,47 @@ pub struct NextArgs {
     pub max: Option<f64>,
 }
 
-/// Arguments for [`pointer_scan`].
+/// Backwards-compatible alias for [`ScanNextArgs`].
+pub type NextArgs = ScanNextArgs;
+
+/// Arguments for [`scan_set`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct PointerScanArgs {
+pub struct ScanSetArgs {
+    /// Value to write to all currently matching scan addresses (e.g. "999", "3.14", "0x1234").
+    pub value: String,
+    /// Optional value type override (defaults to the scan's value type).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+}
+
+/// Arguments for [`scan_aob`] / [`aob_scan`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ScanAobArgs {
+    /// AOB pattern in hex with `??` wildcards, e.g. "48 8B 05 ?? ?? ?? ??".
+    pub pattern: String,
+    /// Optional byte offset to add to the matched address (e.g. 3 to skip the opcode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    /// Optional marker name to automatically save the first match address under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+}
+
+/// Backwards-compatible alias for [`ScanAobArgs`].
+pub type AobArgs = ScanAobArgs;
+
+/// Arguments for [`scan_pointer`] / [`pointer_scan`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ScanPointerArgs {
     /// Target address or expression whose referrers to find: raw hex, dec, module, or marker ("wood_ptr+0x10").
     pub address: String,
     /// Optional size around `address` to treat as the target range (default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
 }
+
+/// Backwards-compatible alias for [`ScanPointerArgs`].
+pub type PointerScanArgs = ScanPointerArgs;
 
 /// Arguments for [`pointer_chase`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1956,197 +1984,186 @@ impl TrainlabMcpServer {
     }
 
     /// AOB pattern scan over the game's readable memory (external).
-    #[tool(description = "Scan game memory for an AOB byte pattern (hex, ?? wildcards); returns match addresses, read externally.")]
-    fn aob_scan(&self, Parameters(args): Parameters<AobArgs>) -> Result<CallToolResult, ErrorData> {
-        let pattern = trainlab_core::aob::parse(&args.pattern);
-        if pattern.is_empty() {
-            return Err(err("empty/invalid AOB pattern"));
-        }
+    #[tool(description = "Scan game memory for an AOB byte pattern (hex, ?? wildcards); returns match addresses, read externally. Can optionally apply an offset and save to a marker.")]
+    fn scan_aob(&self, Parameters(args): Parameters<ScanAobArgs>) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let regions = proc.regions().map_err(|e| err(format!("regions failed: {e}")))?;
-        let mut matches = Vec::new();
-        for r in regions {
-            if !r.readable {
-                continue;
-            }
-            let len = (r.end - r.start) as usize;
-            if len < pattern.len() {
-                continue;
-            }
-            match proc.read(r.start, len) {
-                Ok(buf) => {
-                    for off in trainlab_core::aob::find_all(&buf, &pattern) {
-                        matches.push(r.start + off as u64);
-                    }
-                }
-                Err(_) => continue, // region unreadable: skip
-            }
-        }
-        let lines: Vec<String> = matches.iter().map(|m| format!("{m:#018x}")).collect();
-        let count = lines.len();
-        let mut text = format!("{count} match(es)\n");
-        text.push_str(&lines.join("\n"));
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_scan_aob(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanAobArgs {
+            pattern: args.pattern,
+            offset: args.offset,
+            marker: args.marker,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(text),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
-    /// Start a value scan over the game's memory (via the DLL).
-    ///
-    /// The match set is stored in the session so you can narrow it with
-    /// `next`. Value types: i32, u32, f32, i64, u64, f64, ptr. Pass `max` to
-    /// do a range first-scan (matches `[value, max]`), useful for floats with
-    /// fractional storage.
-    #[tool(description = "First value scan: find all addresses holding a value (exact, or a range if 'max' is given). Stores the match set in the session for narrowing with 'next'.")]
-    pub(crate) fn scan(&self, Parameters(args): Parameters<ScanArgs>) -> Result<CallToolResult, ErrorData> {
-        let value_type = parse_value_type(&args.value_type)?;
-        let alignment = args.alignment.unwrap_or(0);
-        let op = match args.max {
-            Some(max) => trainlab_core::scan::ScanOp::Range {
-                min: args.value,
-                max,
-            },
-            None => trainlab_core::scan::ScanOp::Exact { value: args.value },
-        };
-        // Run the first scan externally (graceful errors on a big heap, unlike
-        // an in-process scan which can fault the game).
+    /// Backwards-compatible alias for [`scan_aob`].
+    #[tool(description = "Alias for scan_aob. Scan game memory for an AOB byte pattern.")]
+    fn aob_scan(&self, Parameters(args): Parameters<AobArgs>) -> Result<CallToolResult, ErrorData> {
+        self.scan_aob(Parameters(args))
+    }
+
+    /// Start a value scan over the game's memory.
+    #[tool(description = "First value scan: find all addresses holding a value (exact, or a range if max is given). Stores the match set in the caller's scan context for narrowing with scan_next.")]
+    pub(crate) fn scan_start(&self, Parameters(args): Parameters<ScanStartArgs>) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let regions = proc.regions().map_err(|e| err(format!("regions failed: {e}")))?;
-        let mut scan = trainlab_core::scan::Scan::new(value_type).with_alignment(alignment);
-        scan.first_scan(proc.as_ref(), &regions, op)
-            .map_err(|e| err(format!("scan failed: {e}")))?;
-        let matches = scan.matches().to_vec();
-        // Store the match set in the session for narrowing.
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        s.set_scan(scan);
-        drop(s);
-        let count = matches.len();
-        let lines: Vec<String> = matches
-            .iter()
-            .take(50)
-            .map(|(a, v)| format!("{a:#018x} = {v}"))
-            .collect();
-        let mut text = format!("{count} match(es)\n");
-        text.push_str(&lines.join("\n"));
-        if count > 50 {
-            text.push_str(&format!("\n... and {} more", count - 50));
+        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        // Load any existing scan from session if present
+        if let Ok(s) = self.session.lock() {
+            ctx.scan = s.scan().cloned();
         }
+
+        let res = trainlab_core::tools::execute_scan_start(&self.session, &mut ctx, proc.as_ref(), trainlab_core::tools::ScanStartArgs {
+            value_type: args.value_type,
+            value: args.value,
+            max: args.max,
+            alignment: args.alignment,
+        }).map_err(|e| err(e.message))?;
+
+        // Sync scan back to session for GUI/inspectors
+        if let Some(scan) = ctx.scan {
+            if let Ok(mut s) = self.session.lock() {
+                s.set_scan(scan);
+            }
+        }
+
+        self.request_repaint();
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(text),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
+    }
+
+    /// Backwards-compatible alias for [`scan_start`].
+    #[tool(description = "Alias for scan_start. First value scan.")]
+    pub(crate) fn scan(&self, Parameters(args): Parameters<ScanArgs>) -> Result<CallToolResult, ErrorData> {
+        self.scan_start(Parameters(args))
     }
 
     /// Narrow the previous scan's match set.
-    ///
-    /// Ops: changed, unchanged, increased, decreased, exact, range. For
-    /// `exact` pass `value`; for `range` pass `value` (min) and `max`.
     #[tool(description = "Narrow the previous scan: keep matches that changed/unchanged/increased/decreased or match a new exact/range value.")]
-    pub(crate) fn next(&self, Parameters(args): Parameters<NextArgs>) -> Result<CallToolResult, ErrorData> {
-        let op = parse_scan_op(&args.op, args.value, args.max)?;
-        // Pull the current match set + value type from the session.
-        let (value_type, matches) = {
-            let mut s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            let scan = s
-                .scan_mut()
-                .ok_or_else(|| err("no active scan; run 'scan' first"))?;
-            (scan.value_type(), scan.matches().to_vec())
-        };
-        // Narrow externally (re-read each address via ReadProcessMemory, which
-        // fails gracefully if an address is no longer valid).
+    pub(crate) fn scan_next(&self, Parameters(args): Parameters<ScanNextArgs>) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let mut scan = trainlab_core::scan::Scan::from_parts(value_type, matches);
-        scan.refine(proc.as_ref(), op)
-            .map_err(|e| err(format!("next failed: {e}")))?;
-        let matches = scan.matches().to_vec();
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        s.set_scan(scan);
-        drop(s);
-        let count = matches.len();
-        let lines: Vec<String> = matches
-            .iter()
-            .take(50)
-            .map(|(a, v)| format!("{a:#018x} = {v}"))
-            .collect();
-        let mut text = format!("{count} match(es)\n");
-        text.push_str(&lines.join("\n"));
-        if count > 50 {
-            text.push_str(&format!("\n... and {} more", count - 50));
+        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        if let Ok(s) = self.session.lock() {
+            ctx.scan = s.scan().cloned();
         }
+
+        let res = trainlab_core::tools::execute_scan_next(&self.session, &mut ctx, proc.as_ref(), trainlab_core::tools::ScanNextArgs {
+            op: args.op,
+            value: args.value,
+            max: args.max,
+        }).map_err(|e| err(e.message))?;
+
+        if let Some(scan) = ctx.scan {
+            if let Ok(mut s) = self.session.lock() {
+                s.set_scan(scan);
+            }
+        }
+
+        self.request_repaint();
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(text),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
-    /// Read the active value scan status and candidate matches without mutating the scan state.
-    #[tool(description = "Inspect the current active scan session without modifying it. Reports total match count, value type, alignment, and lists up to 50 current candidate matches (address = value).")]
-    fn scan_status(&self) -> Result<CallToolResult, ErrorData> {
-        let s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let scan = s
-            .scan()
-            .ok_or_else(|| err("no active scan session in progress"))?;
-        let count = scan.len();
-        let value_type = scan.value_type();
-        let alignment = scan.alignment();
-        let matches = scan.matches().to_vec();
-        drop(s);
+    /// Backwards-compatible alias for [`scan_next`].
+    #[tool(description = "Alias for scan_next. Narrow the active scan.")]
+    pub(crate) fn next(&self, Parameters(args): Parameters<NextArgs>) -> Result<CallToolResult, ErrorData> {
+        self.scan_next(Parameters(args))
+    }
 
-        let lines: Vec<String> = matches
-            .iter()
-            .take(50)
-            .map(|(a, v)| format!("{a:#018x} = {v}"))
-            .collect();
-        let mut text = format!("active scan: {count} match(es) (type: {value_type:?}, align: {alignment})\n");
-        text.push_str(&lines.join("\n"));
-        if count > 50 {
-            text.push_str(&format!("\n... and {} more", count - 50));
+    /// Read the active value scan status and candidate matches without mutating the scan state.
+    #[tool(description = "Inspect the current active scan session without modifying it. Reports total match count, value type, alignment, and lists the top 10 current candidate matches (address = value).")]
+    fn scan_status(&self) -> Result<CallToolResult, ErrorData> {
+        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        if let Ok(s) = self.session.lock() {
+            ctx.scan = s.scan().cloned();
         }
 
+        let res = trainlab_core::tools::execute_scan_status(&self.session, &ctx).map_err(|e| err(e.message))?;
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(text),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
+    }
+
+    /// Batch test-write a value across all matching addresses in the active scan.
+    #[tool(description = "Batch test-write: write a value to all matching addresses in the active scan (useful when <= 10 matches exist to test authoritative state). Snapshots each address for auto-undo.")]
+    fn scan_set(&self, Parameters(args): Parameters<ScanSetArgs>) -> Result<CallToolResult, ErrorData> {
+        let proc = game_process(&self.session)?;
+        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        if let Ok(s) = self.session.lock() {
+            ctx.scan = s.scan().cloned();
+        }
+
+        let res = trainlab_core::tools::execute_scan_set(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanSetArgs {
+            value: args.value,
+            value_type: args.value_type,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
+    }
+
+    /// Clear or end the active scan session.
+    #[tool(description = "Clear the active scan session in the caller's context.")]
+    fn scan_clear(&self) -> Result<CallToolResult, ErrorData> {
+        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_scan_clear(&self.session, &mut ctx).map_err(|e| err(e.message))?;
+
+        if let Ok(mut s) = self.session.lock() {
+            s.clear_scan();
+        }
+
+        self.request_repaint();
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
+    }
+
+    /// Backwards-compatible alias for [`scan_clear`].
+    #[tool(description = "Alias for 'scan_clear'. End and clear the active scan session.")]
+    fn scan_end(&self) -> Result<CallToolResult, ErrorData> {
+        self.scan_clear()
     }
 
     /// Find addresses that point to (reference) a target address.
     #[tool(description = "Reverse-reference scan: find writable addresses whose pointer value points into the range around a target address. Use to find what points to a value (owning object), then chase a stable chain.")]
+    fn scan_pointer(
+        &self,
+        Parameters(args): Parameters<ScanPointerArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let proc = game_process(&self.session)?;
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_scan_pointer(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanPointerArgs {
+            address: args.address,
+            size: args.size,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
+    }
+
+    /// Backwards-compatible alias for [`scan_pointer`].
+    #[tool(description = "Alias for 'scan_pointer'. Reverse-reference pointer scan.")]
     fn pointer_scan(
         &self,
         Parameters(args): Parameters<PointerScanArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&self.session, &args.address)?;
-        let size = args.size.unwrap_or(8).max(1);
-        let lo = address;
-        let hi = address + size - 1;
-        // Reverse-reference scan externally (graceful on a live heap).
-        let proc = game_process(&self.session)?;
-        let regions = proc.regions().map_err(|e| err(format!("regions failed: {e}")))?;
-        let matches = trainlab_core::pointer::reverse_scan(proc.as_ref(), &regions, lo, hi)
-            .map_err(|e| err(format!("pointer_scan failed: {e}")))?;
-        let count = matches.len();
-        let lines: Vec<String> = matches
-            .iter()
-            .take(100)
-            .map(|(a, p)| format!("{a:#018x} -> {p:#018x}"))
-            .collect();
-        let mut text = format!("{count} referrer(s)\n");
-        text.push_str(&lines.join("\n"));
-        if count > 100 {
-            text.push_str(&format!("\n... and {} more", count - 100));
-        }
-        Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(text),
-        ]))
+        self.scan_pointer(Parameters(args))
     }
 
     /// Resolve a known pointer chain to the current address of a value.
@@ -2155,29 +2172,15 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<PointerChaseArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let base = parse_addr(&self.session, &args.base)?;
-        let mut offsets = Vec::new();
-        for o in &args.offsets {
-            offsets.push(parse_addr(&self.session, o)?);
-        }
-        // Chase the chain externally (each hop via ReadProcessMemory, which
-        // fails gracefully if the chain is stale / the process moved).
         let proc = game_process(&self.session)?;
-        let hops = trainlab_core::pointer::chase(proc.as_ref(), base, &offsets)
-            .map_err(|e| err(format!("pointer_chase failed: {e}")))?;
-        let lines: Vec<String> = hops
-            .iter()
-            .enumerate()
-            .map(|(i, h)| {
-                if i == hops.len() - 1 {
-                    format!("value addr: {h:#018x}")
-                } else {
-                    format!("hop {i}: {h:#018x}")
-                }
-            })
-            .collect();
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_pointer_chase(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::PointerChaseArgs {
+            base: args.base,
+            offsets: args.offsets,
+        }).map_err(|e| err(e.message))?;
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(lines.join("\n")),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 

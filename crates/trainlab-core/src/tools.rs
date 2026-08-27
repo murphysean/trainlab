@@ -122,6 +122,48 @@ pub struct DisassembleArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanStartArgs {
+    pub value_type: String,
+    pub value: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanNextArgs {
+    pub op: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanSetArgs {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanAobArgs {
+    pub pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanPointerArgs {
+    pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetMarkerArgs {
     pub label: String,
     pub address: String,
@@ -667,6 +709,322 @@ pub fn execute_allocate_string(
     }
 }
 
+/// Start a new value memory scan within the caller's `ClientContext`.
+pub fn execute_scan_start(
+    session: &SharedSession,
+    ctx: &mut ClientContext,
+    mem: &dyn ProcessMemory,
+    args: ScanStartArgs,
+) -> Result<ToolResult, ToolError> {
+    let vt = parse_value_type(&args.value_type).map_err(err)?;
+    let alignment = args.alignment.unwrap_or(0);
+    let op = match args.max {
+        Some(max) => crate::scan::ScanOp::Range {
+            min: args.value,
+            max,
+        },
+        None => crate::scan::ScanOp::Exact { value: args.value },
+    };
+
+    let regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+    let mut scan = crate::scan::Scan::new(vt).with_alignment(alignment);
+    scan.first_scan(mem, &regions, op).map_err(|e| err(format!("scan failed: {e}")))?;
+
+    let count = scan.len();
+    let top_matches: Vec<(u64, f64)> = scan.matches().iter().take(10).copied().collect();
+
+    // Store active scan in this client context
+    ctx.scan = Some(scan);
+
+    if let Ok(mut s) = session.lock() {
+        s.log_activity(&ctx.id, format!("started value scan ({:?}): {count} match(es)", vt));
+    }
+
+    let mut lines = Vec::new();
+    for (a, v) in &top_matches {
+        lines.push(format!("{a:#018x} = {v}"));
+    }
+
+    let mut text = format!("scan started: {count} match(es) (type: {vt:?})\n");
+    text.push_str(&lines.join("\n"));
+    if count > 10 {
+        text.push_str(&format!("\n... and {} more (use 'scan_status' to view)", count - 10));
+    }
+
+    Ok(ToolResult::with_data(
+        text,
+        serde_json::json!({
+            "count": count,
+            "value_type": format!("{vt:?}"),
+            "top_matches": top_matches.iter().map(|(a, v)| serde_json::json!({ "address": a, "value": v })).collect::<Vec<_>>(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Narrow/refine the active value memory scan within the caller's `ClientContext`.
+pub fn execute_scan_next(
+    session: &SharedSession,
+    ctx: &mut ClientContext,
+    mem: &dyn ProcessMemory,
+    args: ScanNextArgs,
+) -> Result<ToolResult, ToolError> {
+    use crate::scan::ScanOp;
+    let op = match args.op.trim().to_lowercase().as_str() {
+        "changed" => ScanOp::Changed,
+        "unchanged" => ScanOp::Unchanged,
+        "increased" => ScanOp::Increased,
+        "decreased" => ScanOp::Decreased,
+        "exact" => {
+            let v = args.value.ok_or_else(|| err("'exact' requires 'value'"))?;
+            ScanOp::Exact { value: v }
+        }
+        "range" => {
+            let min = args.value.ok_or_else(|| err("'range' requires 'value' (min)"))?;
+            let max = args.max.ok_or_else(|| err("'range' requires 'max'"))?;
+            ScanOp::Range { min, max }
+        }
+        other => return Err(err(format!("unknown scan op '{other}' (expected changed, unchanged, increased, decreased, exact, range)"))),
+    };
+
+    let scan = ctx.scan.as_mut().ok_or_else(|| err("no active scan in this context; run 'scan_start' first"))?;
+    scan.refine(mem, op).map_err(|e| err(format!("refine failed: {e}")))?;
+
+    let count = scan.len();
+    let vt = scan.value_type();
+    let top_matches: Vec<(u64, f64)> = scan.matches().iter().take(10).copied().collect();
+
+    if let Ok(mut s) = session.lock() {
+        s.log_activity(&ctx.id, format!("narrowed scan: {count} match(es) remaining"));
+    }
+
+    let mut lines = Vec::new();
+    for (a, v) in &top_matches {
+        lines.push(format!("{a:#018x} = {v}"));
+    }
+
+    let mut text = format!("scan refined: {count} match(es) remaining\n");
+    text.push_str(&lines.join("\n"));
+    if count > 10 {
+        text.push_str(&format!("\n... and {} more", count - 10));
+    }
+
+    Ok(ToolResult::with_data(
+        text,
+        serde_json::json!({
+            "count": count,
+            "value_type": format!("{vt:?}"),
+            "top_matches": top_matches.iter().map(|(a, v)| serde_json::json!({ "address": a, "value": v })).collect::<Vec<_>>(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Inspect the status and top 10 candidate matches of the active scan.
+pub fn execute_scan_status(
+    _session: &SharedSession,
+    ctx: &ClientContext,
+) -> Result<ToolResult, ToolError> {
+    let scan = ctx.scan.as_ref().ok_or_else(|| err("no active scan in this context"))?;
+    let count = scan.len();
+    let vt = scan.value_type();
+    let align = scan.alignment();
+    let top_matches: Vec<(u64, f64)> = scan.matches().iter().take(10).copied().collect();
+
+    let mut lines = Vec::new();
+    for (a, v) in &top_matches {
+        lines.push(format!("{a:#018x} = {v}"));
+    }
+
+    let mut text = format!("active scan: {count} match(es) (type: {vt:?}, align: {align})\n");
+    text.push_str(&lines.join("\n"));
+    if count > 10 {
+        text.push_str(&format!("\n... and {} more", count - 10));
+    }
+
+    Ok(ToolResult::with_data(
+        text,
+        serde_json::json!({
+            "count": count,
+            "value_type": format!("{vt:?}"),
+            "alignment": align,
+            "top_matches": top_matches.iter().map(|(a, v)| serde_json::json!({ "address": a, "value": v })).collect::<Vec<_>>(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Batch test-write a value across all matching addresses in the active scan.
+pub fn execute_scan_set(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: &dyn ProcessMemory,
+    args: ScanSetArgs,
+) -> Result<ToolResult, ToolError> {
+    let scan = ctx.scan.as_ref().ok_or_else(|| err("no active scan in this context; run 'scan_start' first"))?;
+    let matches = scan.matches().to_vec();
+    if matches.is_empty() {
+        return Err(err("active scan has 0 matches to write to"));
+    }
+
+    let vt = if let Some(vt_str) = &args.value_type {
+        parse_value_type(vt_str).map_err(err)?
+    } else {
+        scan.value_type()
+    };
+
+    let data = parse_value_bytes(&args.value, vt).map_err(err)?;
+    let mut updated = 0;
+    let mut undo_ids = Vec::new();
+
+    let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
+
+    for &(addr, _) in &matches {
+        let orig = mem.read(addr, data.len()).unwrap_or_default();
+        if mem.write(addr, &data).is_ok() {
+            updated += 1;
+            if !orig.is_empty() {
+                let id = s.record_undo(addr, orig, format!("scan_set {} to {addr:#x}", args.value));
+                undo_ids.push(id);
+            }
+        }
+    }
+
+    s.log_activity(&ctx.id, format!("scan_set: wrote {} to {} candidate addresses", args.value, updated));
+
+    Ok(ToolResult::with_data(
+        format!("scan_set: successfully wrote '{}' to {} address(es) (recorded {} undo snapshots)", args.value, updated, undo_ids.len()),
+        serde_json::json!({
+            "updated_count": updated,
+            "value": args.value,
+            "undo_ids": undo_ids,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Clear the active scan in the caller's context.
+pub fn execute_scan_clear(
+    session: &SharedSession,
+    ctx: &mut ClientContext,
+) -> Result<ToolResult, ToolError> {
+    let was_active = ctx.scan.is_some();
+    ctx.scan = None;
+
+    if let Ok(mut s) = session.lock() {
+        s.log_activity(&ctx.id, "cleared active scan");
+    }
+
+    Ok(ToolResult::with_data(
+        if was_active { "scan cleared" } else { "no active scan was present" },
+        serde_json::json!({
+            "cleared": was_active,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Search readable process memory for an AOB pattern.
+pub fn execute_scan_aob(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: &dyn ProcessMemory,
+    args: ScanAobArgs,
+) -> Result<ToolResult, ToolError> {
+    let parsed_pat = crate::aob::parse(&args.pattern);
+    if parsed_pat.is_empty() {
+        return Err(err("empty or invalid AOB pattern"));
+    }
+
+    let regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+    let mut matches = Vec::new();
+
+    for r in regions {
+        if !r.readable {
+            continue;
+        }
+        let len = (r.end - r.start) as usize;
+        if len < parsed_pat.len() {
+            continue;
+        }
+        if let Ok(buf) = mem.read(r.start, len) {
+            for off in crate::aob::find_all(&buf, &parsed_pat) {
+                let match_addr = (r.start + off as u64) as i64 + args.offset.unwrap_or(0);
+                matches.push(match_addr as u64);
+            }
+        }
+    }
+
+    let count = matches.len();
+
+    if let Some(m) = &args.marker {
+        if let Some(&first) = matches.first() {
+            if let Ok(mut s) = session.lock() {
+                let _ = s.set_marker(m, first, Some(&format!("AOB match for '{}'", args.pattern)));
+            }
+        }
+    }
+
+    if let Ok(mut s) = session.lock() {
+        s.log_activity(&ctx.id, format!("AOB scan '{}': {count} match(es)", args.pattern));
+    }
+
+    let lines: Vec<String> = matches.iter().take(20).map(|m| format!("{m:#018x}")).collect();
+    let mut text = format!("{count} match(es)\n");
+    text.push_str(&lines.join("\n"));
+    if count > 20 {
+        text.push_str(&format!("\n... and {} more", count - 20));
+    }
+
+    Ok(ToolResult::with_data(
+        text,
+        serde_json::json!({
+            "count": count,
+            "matches": matches,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Search for pointers referencing a target address.
+pub fn execute_scan_pointer(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: &dyn ProcessMemory,
+    args: ScanPointerArgs,
+) -> Result<ToolResult, ToolError> {
+    let address = eval_addr_expr(session, &args.address, Some(mem))?;
+    let size = args.size.unwrap_or(8).max(1);
+    let lo = address;
+    let hi = address.saturating_add(size).saturating_sub(1);
+
+    let regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+    let matches = crate::pointer::reverse_scan(mem, &regions, lo, hi)
+        .map_err(|e| err(format!("pointer_scan failed: {e}")))?;
+
+    let count = matches.len();
+    let lines: Vec<String> = matches.iter().take(50).map(|(a, p)| format!("{a:#018x} -> {p:#018x}")).collect();
+    let mut text = format!("{count} referrer(s)\n");
+    text.push_str(&lines.join("\n"));
+    if count > 50 {
+        text.push_str(&format!("\n... and {} more", count - 50));
+    }
+
+    if let Ok(mut s) = session.lock() {
+        s.log_activity(&ctx.id, format!("pointer scan for {address:#x}: {count} referrer(s)"));
+    }
+
+    Ok(ToolResult::with_data(
+        text,
+        serde_json::json!({
+            "count": count,
+            "target": address,
+            "referrers": matches.iter().map(|(a, p)| serde_json::json!({ "address": a, "points_to": p })).collect::<Vec<_>>(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
 /// Execute a pointer chase operation.
 pub fn execute_pointer_chase(
     session: &SharedSession,
@@ -827,5 +1185,92 @@ mod tests {
         assert!(res_struct.message.contains("health: 12345"));
         assert!(res_struct.message.contains("speed: 3.14"));
         assert!(res_struct.message.contains("tag: \"hi\""));
+    }
+
+    #[test]
+    fn test_execute_scan_suite_and_scan_set() {
+        let mut data = vec![0u8; 256];
+        // Place 100i32 at 0x10 and 0x20, and 200i32 at 0x30
+        data[0x10..0x14].copy_from_slice(&100i32.to_le_bytes());
+        data[0x20..0x24].copy_from_slice(&100i32.to_le_bytes());
+        data[0x30..0x34].copy_from_slice(&200i32.to_le_bytes());
+
+        struct ScanMem {
+            data: std::sync::Mutex<Vec<u8>>,
+        }
+
+        impl ProcessMemory for ScanMem {
+            fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> {
+                let d = self.data.lock().unwrap();
+                let start = address as usize;
+                let end = (start + len).min(d.len());
+                if start >= d.len() {
+                    return Err(crate::memory::MemoryError::OutOfRange { address });
+                }
+                Ok(d[start..end].to_vec())
+            }
+            fn write(&self, address: u64, data: &[u8]) -> Result<usize, crate::memory::MemoryError> {
+                let mut d = self.data.lock().unwrap();
+                let start = address as usize;
+                if start + data.len() > d.len() {
+                    return Err(crate::memory::MemoryError::OutOfRange { address });
+                }
+                d[start..start + data.len()].copy_from_slice(data);
+                Ok(data.len())
+            }
+            fn regions(&self) -> Result<Vec<crate::memory::Region>, crate::memory::MemoryError> {
+                Ok(vec![crate::memory::Region {
+                    start: 0,
+                    end: 256,
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                    name: None,
+                }])
+            }
+        }
+
+        let mem = ScanMem { data: std::sync::Mutex::new(data) };
+        let session = Arc::new(Mutex::new(SessionState::new()));
+        let mut s = session.lock().unwrap();
+        let mut ctx = s.create_context("scan-test-client", ClientKind::Gui);
+        drop(s);
+
+        // 1. scan_start
+        let res1 = execute_scan_start(&session, &mut ctx, &mem, ScanStartArgs {
+            value_type: "i32".into(),
+            value: 100.0,
+            max: None,
+            alignment: Some(4),
+        }).unwrap();
+        assert!(res1.message.contains("2 match(es)"));
+
+        // 2. scan_status
+        let res_status = execute_scan_status(&session, &ctx).unwrap();
+        assert!(res_status.message.contains("2 match(es)"));
+
+        // 3. scan_set (batch test-write 999 to both matches)
+        let res_set = execute_scan_set(&session, &ctx, &mem, ScanSetArgs {
+            value: "999".into(),
+            value_type: Some("i32".into()),
+        }).unwrap();
+        assert!(res_set.message.contains("wrote '999' to 2 address(es)"));
+
+        // Verify values written in memory
+        let check_val = mem.read(0x10, 4).unwrap();
+        assert_eq!(i32::from_le_bytes(check_val.try_into().unwrap()), 999);
+
+        // 4. scan_next (refine exact 999)
+        let res_next = execute_scan_next(&session, &mut ctx, &mem, ScanNextArgs {
+            op: "exact".into(),
+            value: Some(999.0),
+            max: None,
+        }).unwrap();
+        assert!(res_next.message.contains("2 match(es)"));
+
+        // 5. scan_clear
+        let res_clear = execute_scan_clear(&session, &mut ctx).unwrap();
+        assert!(res_clear.message.contains("cleared"));
+        assert!(ctx.scan.is_none());
     }
 }
