@@ -177,9 +177,81 @@ impl PendingKind {
     }
 }
 
+/// Origin kind of a client / consumer connecting to the session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientKind {
+    Gui,
+    Mcp { agent_name: Option<String> },
+    Web { session_id: String },
+    Cli,
+    Overlay,
+    Internal,
+}
+
+/// An isolated handle/state for an active connection or consumer.
+#[derive(Debug)]
+pub struct ClientContext {
+    /// Unique context ID (e.g., "mcp-claude-1", "web-tab-42", "gui-main").
+    pub id: String,
+    /// Origin kind.
+    pub kind: ClientKind,
+    /// Context-scoped active memory scan (so different web tabs or agents don't overwrite each other).
+    pub scan: Option<scan::Scan>,
+    /// Private event subscriber channel.
+    pub event_rx: tokio::sync::broadcast::Receiver<crate::event::SessionEvent>,
+}
+
+impl ClientContext {
+    pub fn new(id: impl Into<String>, kind: ClientKind, event_bus: &crate::event::EventBus) -> Self {
+        Self {
+            id: id.into(),
+            kind,
+            scan: None,
+            event_rx: event_bus.subscribe(),
+        }
+    }
+}
+
+/// Explicit lifecycle state of the target game process and injector connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionLifecycle {
+    /// No target game process is selected.
+    Idle,
+    /// A target game process is identified; external memory ops (Read/WriteProcessMemory) are active.
+    TargetAttached {
+        pid: u32,
+        exe_name: String,
+    },
+    /// DLL injected into game process; IPC listener initialized.
+    Injected {
+        pid: u32,
+        exe_name: String,
+        dll_path: String,
+    },
+    /// Live fast-channel IPC connection active (caves, capture rings, overlay active).
+    Connected {
+        pid: u32,
+        exe_name: String,
+        dll_version: Option<String>,
+    },
+    /// Target process terminated or crashed.
+    TargetLost {
+        pid: u32,
+        exe_name: String,
+    },
+}
+
+impl Default for SessionLifecycle {
+    fn default() -> Self {
+        SessionLifecycle::Idle
+    }
+}
+
 /// The shared, mutable session state.
 #[derive(Debug, Default)]
 pub struct SessionState {
+    /// Explicit lifecycle state of the session.
+    lifecycle: SessionLifecycle,
     /// Markers keyed by label (case-sensitive).
     markers: BTreeMap<String, Marker>,
     /// Undo log in the order mutations were made.
@@ -232,6 +304,66 @@ pub struct DiscoveredApp {
 }
 
 impl SessionState {
+    /// Create and register a new client context with its own private event subscriber.
+    pub fn create_context(&mut self, id: impl Into<String>, kind: ClientKind) -> ClientContext {
+        let id_str = id.into();
+        self.log_activity(&id_str, format!("client context created ({:?})", kind));
+        ClientContext::new(id_str, kind, &self.event_bus)
+    }
+
+    /// Access the current session lifecycle state.
+    pub fn lifecycle(&self) -> &SessionLifecycle {
+        &self.lifecycle
+    }
+
+    /// Update the session lifecycle state and broadcast an event.
+    pub fn set_lifecycle(&mut self, lifecycle: SessionLifecycle) {
+        let state_name = match &lifecycle {
+            SessionLifecycle::Idle => "idle",
+            SessionLifecycle::TargetAttached { .. } => "target_attached",
+            SessionLifecycle::Injected { .. } => "injected",
+            SessionLifecycle::Connected { .. } => "connected",
+            SessionLifecycle::TargetLost { .. } => "target_lost",
+        };
+        let pid = match &lifecycle {
+            SessionLifecycle::TargetAttached { pid, .. }
+            | SessionLifecycle::Injected { pid, .. }
+            | SessionLifecycle::Connected { pid, .. }
+            | SessionLifecycle::TargetLost { pid, .. } => Some(*pid),
+            SessionLifecycle::Idle => None,
+        };
+        let exe = match &lifecycle {
+            SessionLifecycle::TargetAttached { exe_name, .. }
+            | SessionLifecycle::Injected { exe_name, .. }
+            | SessionLifecycle::Connected { exe_name, .. }
+            | SessionLifecycle::TargetLost { exe_name, .. } => exe_name.clone(),
+            SessionLifecycle::Idle => String::new(),
+        };
+
+        self.lifecycle = lifecycle;
+        self.event_bus.emit(crate::event::SessionEvent::LifecycleChanged {
+            state: state_name.to_string(),
+            pid,
+            exe,
+        });
+    }
+
+    /// Validate if the target process is still running; transitions to TargetLost if it terminated.
+    pub fn validate_target_alive(&mut self) -> bool {
+        if let Some(pid) = self.game_pid() {
+            let is_alive = crate::process::is_pid_alive(pid);
+            if !is_alive {
+                let exe = self.game_name.clone();
+                self.log_activity("SYSTEM", format!("target process '{exe}' (PID {pid}) terminated"));
+                self.set_lifecycle(SessionLifecycle::TargetLost { pid, exe_name: exe });
+                self.game_pid = None;
+                self.connected = false;
+                return false;
+            }
+            return true;
+        }
+        false
+    }
     /// Log an activity entry tagged by source (e.g., "UI", "MCP").
     pub fn log_activity(&mut self, source: &str, msg: impl Into<String>) {
         let msg_str = msg.into();
@@ -339,6 +471,17 @@ impl SessionState {
     /// Set the game process PID that scan-family tools target.
     pub fn set_game_pid(&mut self, pid: Option<u32>) {
         self.game_pid = pid;
+        if let Some(p) = pid {
+            if matches!(self.lifecycle, SessionLifecycle::Idle | SessionLifecycle::TargetLost { .. }) {
+                let name = self.game_name.clone();
+                self.set_lifecycle(SessionLifecycle::TargetAttached {
+                    pid: p,
+                    exe_name: name,
+                });
+            }
+        } else if matches!(self.lifecycle, SessionLifecycle::TargetAttached { .. } | SessionLifecycle::Connected { .. }) {
+            self.set_lifecycle(SessionLifecycle::Idle);
+        }
     }
 
     /// Get the game process PID.
@@ -369,6 +512,24 @@ impl SessionState {
     /// Mark whether we're connected to the DLL.
     pub fn set_connected(&mut self, connected: bool) {
         self.connected = connected;
+        if connected {
+            if let Some(pid) = self.game_pid {
+                self.set_lifecycle(SessionLifecycle::Connected {
+                    pid,
+                    exe_name: self.game_name.clone(),
+                    dll_version: self.inject_version.clone(),
+                });
+            }
+        } else if matches!(self.lifecycle, SessionLifecycle::Connected { .. }) {
+            if let Some(pid) = self.game_pid {
+                self.set_lifecycle(SessionLifecycle::TargetAttached {
+                    pid,
+                    exe_name: self.game_name.clone(),
+                });
+            } else {
+                self.set_lifecycle(SessionLifecycle::Idle);
+            }
+        }
         self.event_bus.emit(crate::event::SessionEvent::ConnectionChanged {
             connected,
             game_name: self.game_name.clone(),
@@ -382,7 +543,11 @@ impl SessionState {
 
     /// Record the target game name.
     pub fn set_game_name(&mut self, name: impl Into<String>) {
-        self.game_name = name.into();
+        let name_str = name.into();
+        self.game_name = name_str.clone();
+        if let SessionLifecycle::TargetAttached { pid, .. } = self.lifecycle {
+            self.set_lifecycle(SessionLifecycle::TargetAttached { pid, exe_name: name_str });
+        }
     }
 
     /// Get the target game name.
@@ -924,5 +1089,58 @@ mod tests {
         }
         let m = shared.lock().unwrap().get_marker("a").cloned().unwrap();
         assert_eq!(m.address, 1);
+    }
+
+    #[tokio::test]
+    async fn test_client_context_and_lifecycle_state_machine() {
+        let mut s = SessionState::new();
+        assert_eq!(*s.lifecycle(), SessionLifecycle::Idle);
+
+        // Register client contexts
+        let mut ctx_mcp = s.create_context("mcp-agent-1", ClientKind::Mcp { agent_name: Some("test-bot".into()) });
+        let mut ctx_web = s.create_context("web-session-42", ClientKind::Web { session_id: "tab-1".into() });
+
+        assert_eq!(ctx_mcp.id, "mcp-agent-1");
+        assert_eq!(ctx_web.id, "web-session-42");
+
+        // Target attached
+        s.set_game_name("DRGSurvivor.exe");
+        s.set_game_pid(Some(12345));
+        assert_eq!(
+            *s.lifecycle(),
+            SessionLifecycle::TargetAttached {
+                pid: 12345,
+                exe_name: "DRGSurvivor.exe".into()
+            }
+        );
+
+        // Connected to DLL
+        s.set_inject_version(Some("0.1.0".into()));
+        s.set_connected(true);
+        assert_eq!(
+            *s.lifecycle(),
+            SessionLifecycle::Connected {
+                pid: 12345,
+                exe_name: "DRGSurvivor.exe".into(),
+                dll_version: Some("0.1.0".into())
+            }
+        );
+
+        // Contexts receive broadcast events
+        let mut got_lifecycle = false;
+        while let Ok(event) = ctx_mcp.event_rx.recv().await {
+            if let crate::event::SessionEvent::LifecycleChanged { state, pid, exe } = event {
+                assert_eq!(state, "target_attached");
+                assert_eq!(pid, Some(12345));
+                assert_eq!(exe, "DRGSurvivor.exe");
+                got_lifecycle = true;
+                break;
+            }
+        }
+        assert!(got_lifecycle);
+
+        // Test context-scoped scans
+        assert!(ctx_mcp.scan.is_none());
+        assert!(ctx_web.scan.is_none());
     }
 }

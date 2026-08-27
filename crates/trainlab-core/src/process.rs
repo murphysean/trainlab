@@ -49,3 +49,30 @@ pub fn find_by_name(name: &str) -> Option<ProcessInfo> {
 pub fn find_by_pid(pid: i32) -> Option<ProcessInfo> {
     list().into_iter().find(|p| p.pid == pid)
 }
+
+/// Check if a PID is currently running and alive.
+pub fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if !handle.is_null() {
+                CloseHandle(handle);
+                true
+            } else {
+                false
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        true
+    }
+}

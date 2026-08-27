@@ -49,6 +49,12 @@ pub enum SessionEvent {
         connected: bool,
         game_name: String,
     },
+    /// Session lifecycle state changed (Idle, TargetAttached, Injected, Connected, TargetLost).
+    LifecycleChanged {
+        state: String,
+        pid: Option<u32>,
+        exe: String,
+    },
     /// An application / binary was launched.
     AppLaunched {
         name: String,
