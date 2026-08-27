@@ -2083,7 +2083,7 @@ mod tests {
     fn test_execute_read_and_dump_struct() {
         let mut data = vec![0u8; 128];
         data[0..4].copy_from_slice(&12345i32.to_le_bytes());
-        data[4..8].copy_from_slice(&3.14f32.to_le_bytes());
+        data[4..8].copy_from_slice(&2.5f32.to_le_bytes());
         data[8..11].copy_from_slice(b"hi\0");
 
         let mem = MockMem { data };
