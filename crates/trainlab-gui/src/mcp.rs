@@ -937,94 +937,15 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<SetCheatToggleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Look up the toggle cheat.
-        let kind = {
-            let s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            let c = s
-                .get_cheat(args.id)
-                .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
-            c.kind.clone()
-        };
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_set_cheat_toggle(&self.session, &ctx, trainlab_core::tools::SetCheatToggleArgs {
+            id: args.id,
+            enabled: args.enabled,
+        }).map_err(|e| err(e.message))?;
 
-        match kind {
-            CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
-                if enabled == args.enabled {
-                    return Ok(CallToolResult::success(vec![
-                        rmcp::model::ContentBlock::text(format!(
-                            "toggle cheat {} already {}",
-                            args.id,
-                            if args.enabled { "enabled" } else { "disabled" }
-                        )),
-                    ]));
-                }
-                let mut s = self
-                    .session
-                    .lock()
-                    .map_err(|_| err("session lock poisoned"))?;
-                let pid = if args.enabled {
-                    s.stage_op_with_cheat(
-                        target,
-                        PendingKind::InstallCave { hook, marker: None },
-                        format!("enable toggle cheat {} at {:#x}", args.id, target),
-                        Some(args.id),
-                    )
-                } else {
-                    if original_bytes.is_empty() {
-                        return Err(err(format!(
-                            "toggle cheat {} has no stored original bytes; cannot restore",
-                            args.id
-                        )));
-                    }
-                    s.stage_op_with_cheat(
-                        target,
-                        PendingKind::Undo { original_bytes },
-                        format!("disable toggle cheat {} at {:#x}", args.id, target),
-                        Some(args.id),
-                    )
-                };
-                drop(s);
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(format!(
-                        "staged toggle change (pending id {pid}) for cheat {}. Call 'confirm_op' to apply.",
-                        args.id
-                    )),
-                ]))
-            }
-            CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
-                if enabled == args.enabled {
-                    return Ok(CallToolResult::success(vec![
-                        rmcp::model::ContentBlock::text(format!(
-                            "patch cheat {} already {}",
-                            args.id,
-                            if args.enabled { "enabled" } else { "disabled" }
-                        )),
-                    ]));
-                }
-                let desc = cave_ref.as_deref().unwrap_or("fast patch");
-                let data = if args.enabled { patch_bytes } else { original_bytes };
-                let mut s = self
-                    .session
-                    .lock()
-                    .map_err(|_| err("session lock poisoned"))?;
-                let pid = s.stage_op_with_cheat(
-                    target,
-                    PendingKind::Write { data },
-                    format!("{} patch cheat {} at {:#x} ({desc})", if args.enabled { "enable" } else { "disable" }, args.id, target),
-                    Some(args.id),
-                );
-                drop(s);
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(format!(
-                        "staged patch toggle (pending id {pid}) for cheat {}. Call 'confirm_op' to apply.",
-                        args.id
-                    )),
-                ]))
-            }
-            _ => Err(err(format!("cheat {} is not a toggle or patch cheat", args.id))),
-        }
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 
     /// List cheat profiles discovered in the `cheats/` directory.

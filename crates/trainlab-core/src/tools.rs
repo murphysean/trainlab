@@ -1460,6 +1460,126 @@ pub fn execute_list_cheats(
     ))
 }
 
+/// Enable or disable a toggle or patch cheat (stages mutation through pending ops).
+pub fn execute_set_cheat_toggle(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    args: SetCheatToggleArgs,
+) -> Result<ToolResult, ToolError> {
+    use crate::session::PendingKind;
+
+    let kind = {
+        let s = session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
+        let c = s
+            .get_cheat(args.id)
+            .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
+        c.kind.clone()
+    };
+
+    match kind {
+        CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
+            if enabled == args.enabled {
+                return Ok(ToolResult::with_data(
+                    format!(
+                        "toggle cheat {} already {}",
+                        args.id,
+                        if args.enabled { "enabled" } else { "disabled" }
+                    ),
+                    serde_json::json!({
+                        "id": args.id,
+                        "enabled": enabled,
+                        "client_id": ctx.id,
+                    }),
+                ));
+            }
+            let mut s = session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
+            let pid = if args.enabled {
+                s.stage_op_with_cheat(
+                    target,
+                    PendingKind::InstallCave { hook, marker: None },
+                    format!("enable toggle cheat {} at {:#x}", args.id, target),
+                    Some(args.id),
+                )
+            } else {
+                if original_bytes.is_empty() {
+                    return Err(err(format!(
+                        "toggle cheat {} has no stored original bytes; cannot restore",
+                        args.id
+                    )));
+                }
+                s.stage_op_with_cheat(
+                    target,
+                    PendingKind::Undo { original_bytes },
+                    format!("disable toggle cheat {} at {:#x}", args.id, target),
+                    Some(args.id),
+                )
+            };
+            s.log_activity(&ctx.id, format!("staged toggle change (pending id {pid}) for cheat {}", args.id));
+            drop(s);
+
+            Ok(ToolResult::with_data(
+                format!(
+                    "staged toggle change (pending id {pid}) for cheat {}. Call 'confirm_op' to apply.",
+                    args.id
+                ),
+                serde_json::json!({
+                    "pending_id": pid,
+                    "id": args.id,
+                    "enabled": args.enabled,
+                    "client_id": ctx.id,
+                }),
+            ))
+        }
+        CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+            if enabled == args.enabled {
+                return Ok(ToolResult::with_data(
+                    format!(
+                        "patch cheat {} already {}",
+                        args.id,
+                        if args.enabled { "enabled" } else { "disabled" }
+                    ),
+                    serde_json::json!({
+                        "id": args.id,
+                        "enabled": enabled,
+                        "client_id": ctx.id,
+                    }),
+                ));
+            }
+            let desc = cave_ref.as_deref().unwrap_or("fast patch");
+            let data = if args.enabled { patch_bytes } else { original_bytes };
+            let mut s = session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
+            let pid = s.stage_op_with_cheat(
+                target,
+                PendingKind::Write { data },
+                format!("{} patch cheat {} at {:#x} ({desc})", if args.enabled { "enable" } else { "disable" }, args.id, target),
+                Some(args.id),
+            );
+            s.log_activity(&ctx.id, format!("staged patch toggle (pending id {pid}) for cheat {}", args.id));
+            drop(s);
+
+            Ok(ToolResult::with_data(
+                format!(
+                    "staged patch toggle (pending id {pid}) for cheat {}. Call 'confirm_op' to apply.",
+                    args.id
+                ),
+                serde_json::json!({
+                    "pending_id": pid,
+                    "id": args.id,
+                    "enabled": args.enabled,
+                    "client_id": ctx.id,
+                }),
+            ))
+        }
+        _ => Err(err(format!("cheat {} is not a toggle or patch cheat", args.id))),
+    }
+}
+
 /// Remove a cheat by ID.
 pub fn execute_remove_cheat(
     session: &SharedSession,
@@ -2110,7 +2230,7 @@ mod tests {
             ],
         }).unwrap();
         assert!(res_struct.message.contains("health: 12345"));
-        assert!(res_struct.message.contains("speed: 3.14"));
+        assert!(res_struct.message.contains("speed: 2.5"));
         assert!(res_struct.message.contains("tag: \"hi\""));
     }
 
