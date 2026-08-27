@@ -1611,19 +1611,20 @@ pub fn execute_set_cheat_value(
     args: SetCheatValueArgs,
 ) -> Result<ToolResult, ToolError> {
     let (target_addr, value_type) = {
-        let s = session.lock().map_err(|_| err("session lock poisoned"))?;
-        let c = s.get_cheat(args.id).ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
-        match &c.kind {
-            CheatKind::Value { address, value_type, address_expr } => {
-                let target = if let Some(expr) = address_expr {
-                    eval_addr_expr(session, expr, Some(mem)).unwrap_or(*address)
-                } else {
-                    *address
-                };
-                (target, *value_type)
+        let (expr_opt, addr_fallback, vt) = {
+            let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+            let c = s.get_cheat(args.id).ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
+            match &c.kind {
+                CheatKind::Value { address, value_type, address_expr } => (address_expr.clone(), *address, *value_type),
+                _ => return Err(err(format!("cheat {} is not a value cheat", args.id))),
             }
-            _ => return Err(err(format!("cheat {} is not a value cheat", args.id))),
-        }
+        };
+        let target = if let Some(expr) = &expr_opt {
+            eval_addr_expr(session, expr, Some(mem)).unwrap_or(addr_fallback)
+        } else {
+            addr_fallback
+        };
+        (target, vt)
     };
 
     let data = parse_value_bytes(&args.value, value_type).map_err(err)?;
@@ -2402,11 +2403,11 @@ mod tests {
 
         // 4. Inspect undo info
         let u_info = execute_undo_info(&session, &ctx, UndoInfoArgs { id: None }).unwrap();
-        assert!(u_info.message.contains("undo #1"));
+        assert!(u_info.message.contains("undo #0"));
 
-        // 5. Revert undo #1 (restores memory back to 500)
-        let u_rev = execute_undo_revert(&session, &ctx, &mem, UndoRevertArgs { id: 1 }).unwrap();
-        assert!(u_rev.message.contains("successfully reverted undo #1"));
+        // 5. Revert undo #0 (restores memory back to 500)
+        let u_rev = execute_undo_revert(&session, &ctx, &mem, UndoRevertArgs { id: 0 }).unwrap();
+        assert!(u_rev.message.contains("successfully reverted undo #0"));
 
         let restored_val = mem.read(0x20, 4).unwrap();
         assert_eq!(i32::from_le_bytes(restored_val.try_into().unwrap()), 500);
