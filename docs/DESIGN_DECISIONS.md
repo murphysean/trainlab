@@ -90,22 +90,14 @@ Trainer.
 **Why:** The LLM's context is ephemeral and per-conversation. For a long
 reversing session, findings must persist so the agent can reload them next turn.
 
-## D8: Every mutation is undoable
+## D8: Automatic undo snapshots & single-pass mutations (revised 2026-08-26)
 
-**Decision:** Any write/cave operation snapshots original bytes and can be
-reverted. Write/cave tools require a confirmation gate (or dry-run).
+**Decision:** Mutating operations (`write`, `install_cave`, `set_cheat_value`) execute directly on the first pass while automatically snapshotting pre-mutation bytes into the session **Undo Log** (`UndoEntry`).
 
-**Why:** An autonomous agent writing raw memory can crash the game or corrupt
-state. Undo + confirmation is the safety contract that makes agent-driven
-mutating safe enough to use.
-
-**Implemented (2026-08-10):** the confirmation gate is enforced in the Trainer.
-Mutating MCP tools (`write`, `install_cave`, `undo`) **stage** a change into the
-session and return a pending op id + a human-readable preview; they never touch
-memory. A separate `confirm_op` tool applies a staged op (snapshotting originals
-for undo); `reject_op` discards it; `list_pending` enumerates everything awaiting
-confirmation. There is no `confirm:true` shortcut an agent can pass to bypass
-the gate — a human must call `confirm_op` (or a human-driven client must).
+**Why:**
+1. **Client-Level Gating**: In standard AI agent architectures (MCP hosts, IDEs, and CLI tools), human-in-the-loop permission prompts occur at the host/client layer before invoking mutating tools.
+2. **Eliminate Double-Turn Latency**: Forcing an LLM agent to call `write` (which staged a pending op) and then require a subsequent `confirm_op` call wasted LLM turns, doubled token costs, and added latency.
+3. **Guaranteed Safety via Undo**: Safety is preserved by automatically reading and recording the original bytes before any write or cave patch. The agent receives an `undo_id` in the tool response and can immediately call `undo(undo_id)` to restore memory if needed.
 
 ## D9: Mono games (Urbek) are NOT a trainer target
 
