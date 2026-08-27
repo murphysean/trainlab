@@ -158,6 +158,27 @@ stage a change and require `confirm_op` to apply.
 - Gate only writes but not cave installs (rejected: caves are equally
   dangerous; the distinction is profile-vs-adhoc, not write-vs-cave).
 
+## D12: Session Lifecycle & Target Process State Machine (2026-08-26)
+
+**Decision:**
+1. **Target-Gated Session Validity:** A valid session requires an identified target executable and PID. If the target process crashes or exits, the session becomes invalid and transitions to `Disconnected`/`TargetLost`.
+2. **Capability Layering (Injection Expands Capabilities):** A session is operational without injection (allowing external `ProcessMemory` reads, AOB scans, and memory writes via OS debugging APIs). Injecting the DLL (or Linux injection mechanism) is a capability expansion that unlocks in-process features: code-cave execution, transparent register capture rings, string/memory allocations in the target address space, hardware breakpoints, and DXGI/gamepad overlays.
+3. **Session State Machine:** The session explicitly models its lifecycle states:
+   - `Idle` (no target process)
+   - `TargetIdentified { pid, exe }` (external memory access available)
+   - `Injected` (DLL loaded, fast channel listener ready)
+   - `Connected` (active fast channel IPC established, full capability set unlocked)
+   - `TargetLost` (process terminated; session invalidated)
+
+## D13: Multi-Consumer Architecture & Isolated Client Contexts (2026-08-26)
+
+**Decision:** The trainer supports multiple concurrent consumers (GUI, web dashboard instances, MCP client sessions, and the in-game overlay). Every incoming connection registers with the session and receives an isolated **`ClientContext`**.
+
+**Architecture:**
+- **Caller Context & Scoped Logging:** Tool executions carry the caller's context ID (e.g. `mcp-agent-1`, `web-dashboard-2`, `gui-main`, `in-game-overlay`), ensuring log entries and audit trails explicitly attribute actions to the specific caller.
+- **Dedicated Event Streams:** Each client context owns its own event subscription stream (`tokio::sync::broadcast`). When any client or internal subsystem mutates state or logs activity, the event is broadcast to all active subscribers.
+- **Context-Scoped Operations (e.g. Scans):** Long-running operations like value memory scans can be held on the client's context rather than globally blocking other consumers, allowing an LLM agent, a web dashboard, and the GUI to run distinct inspection/scan workflows concurrently.
+
 ## Open decisions (not yet made)
 
 - **OD1:** Fast channel — keep TCP or move to shared memory for hot loops?
