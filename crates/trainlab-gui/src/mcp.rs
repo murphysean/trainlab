@@ -863,172 +863,35 @@ impl TrainlabMcpServer {
         ]))
     }
 
-    /// Add a user-facing adjustable game option ("cheat") to the session. It
-    /// shows up in the GUI's Cheats panel for the user to adjust.
+    /// Add a user-facing adjustable game option ("cheat") to the session.
     #[tool(description = "Add a cheat (adjustable game option) to the session. kind='value' for a typed value at an address; kind='toggle' for a code-cave hook (e.g. god mode). It appears in the GUI Cheats panel.")]
     fn add_cheat(
         &self,
         Parameters(args): Parameters<AddCheatArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        use trainlab_core::cave_hook::CaveHook;
-        use trainlab_core::scan::ValueType;
-        let kind = match args.kind.trim().to_lowercase().as_str() {
-            "value" => {
-                let address = args
-                    .address
-                    .as_deref()
-                    .ok_or_else(|| err("value cheat requires 'address'"))?;
-                let address_expr_str = args.address.clone();
-                let address = parse_addr(&self.session, args.address.as_deref().unwrap())?;
-                let vt = args
-                    .value_type
-                    .as_deref()
-                    .ok_or_else(|| err("value cheat requires 'value_type'"))?;
-                let value_type = match vt.trim().to_lowercase().as_str() {
-                    "i32" => ValueType::I32,
-                    "u32" => ValueType::U32,
-                    "f32" => ValueType::F32,
-                    "i64" => ValueType::I64,
-                    "u64" => ValueType::U64,
-                    "f64" => ValueType::F64,
-                    "ptr" => ValueType::Ptr,
-                    other => return Err(err(format!("unknown value_type '{other}'"))),
-                };
-                CheatKind::Value {
-                    address,
-                    value_type,
-                    address_expr: address_expr_str,
-                }
-            }
-            "toggle" => {
-                let target = args
-                    .target
-                    .as_deref()
-                    .ok_or_else(|| err("toggle cheat requires 'target'"))?;
-                let target = parse_addr(&self.session, target)?;
-                let payload = if let Some(asm_src) = &args.asm {
-                    let symbols: std::collections::HashMap<String, u64> = {
-                        let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
-                        s.list_markers()
-                            .into_iter()
-                            .map(|m| (m.label.clone(), m.address))
-                            .collect()
-                    };
-                    let origin = target;
-                    let block = crate::asm::assemble_text(asm_src, origin, &symbols)
-                        .map_err(|e| err(format!("asm assembly failed: {e}")))?;
-                    block.bytes
-                } else {
-                    parse_hex_bytes(args.payload.as_deref().unwrap_or(""))?
-                };
-                let jump_style = match args.jump.as_deref().unwrap_or("absolute").to_lowercase().as_str() {
-                    "relative" | "short" => trainlab_core::cave_hook::JumpStyle::Relative,
-                    _ => trainlab_core::cave_hook::JumpStyle::Absolute,
-                };
-                let hook = match args.hook.as_deref().unwrap_or("trampoline") {
-                    "trampoline" => CaveHook::Trampoline { payload, jump: jump_style },
-                    "override" => CaveHook::Override { payload, jump: jump_style },
-                    other => return Err(err(format!("unknown hook '{other}'"))),
-                };
-                CheatKind::Toggle {
-                    hook,
-                    target,
-                    enabled: false,
-                    original_bytes: Vec::new(),
-                    cave_addr: 0,
-                }
-            }
-            "patch" => {
-                let target = args
-                    .target
-                    .as_deref()
-                    .ok_or_else(|| err("patch cheat requires 'target'"))?;
-                let target = parse_addr(&self.session, target)?;
-                let patch_bytes = parse_hex_bytes(
-                    args.patch_bytes
-                        .as_deref()
-                        .or(args.payload.as_deref())
-                        .ok_or_else(|| err("patch cheat requires 'patch_bytes' (or 'payload')"))?,
-                )?;
-                let original_bytes = if let Some(orig) = &args.original_bytes {
-                    parse_hex_bytes(orig)?
-                } else {
-                    // Auto-read current original bytes from the game if connected!
-                    let len = patch_bytes.len();
-                    match crate::controller::request(&self.session, &Request::Read { address: target, len }) {
-                        Ok(Response::Read { data }) => data,
-                        _ => Vec::new(),
-                    }
-                };
-                CheatKind::Patch {
-                    target,
-                    patch_bytes,
-                    original_bytes,
-                    enabled: false,
-                    cave_ref: args.cave_ref.clone(),
-                }
-            }
-            other => return Err(err(format!("unknown cheat kind '{other}' (expected 'value', 'toggle', or 'patch')"))),
-        };
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let id = s.add_cheat(&args.label, kind, args.hotkey.as_deref(), args.note.as_deref());
-        s.log_activity("MCP", format!("added cheat '{}' (id {id})", args.label));
-        drop(s);
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_add_cheat(&self.session, &ctx, None, trainlab_core::tools::AddCheatArgs {
+            label: args.label,
+            kind: args.kind,
+            address: args.address,
+            value_type: args.value_type,
+            hotkey: args.hotkey,
+            note: args.note,
+        }).map_err(|e| err(e.message))?;
+
         self.request_repaint();
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "added cheat '{}' (id {id}); it's now in the GUI Cheats panel",
-                args.label
-            )),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
     /// List all cheats in the session.
     #[tool(description = "List all cheats (adjustable game options) in the session, with their ids, kinds, and addresses.")]
     fn list_cheats(&self) -> Result<CallToolResult, ErrorData> {
-        let s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let cheats = s.list_cheats();
-        if cheats.is_empty() {
-            return Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text("(no cheats yet; add one with 'add_cheat')"),
-            ]));
-        }
-        let lines: Vec<String> = cheats
-            .iter()
-            .map(|c| {
-                let kind = match &c.kind {
-                    CheatKind::Value { address, value_type, address_expr } => {
-                        if let Some(expr) = address_expr {
-                            format!("value {value_type:?} @ {expr} ({address:#x})")
-                        } else {
-                            format!("value {value_type:?} @ {address:#x}")
-                        }
-                    }
-                    CheatKind::Struct { base_address, base_expr, fields } => {
-                        format!("struct ({base_expr} @ {base_address:#x}) [{} field(s)]", fields.len())
-                    }
-                    CheatKind::Toggle { target, enabled, .. } => {
-                        format!("toggle @ {target:#x} ({})", if *enabled { "on" } else { "off" })
-                    }
-                    CheatKind::Patch { target, enabled, cave_ref, .. } => {
-                        let desc = cave_ref.as_deref().unwrap_or("fast patch");
-                        format!("patch @ {target:#x} ({}, {desc})", if *enabled { "on" } else { "off" })
-                    }
-                    CheatKind::Button { commands } => {
-                        format!("button ({} cmd(s))", commands.len())
-                    }
-                };
-                format!("[{}] {} — {kind}", c.id, c.label)
-            })
-            .collect();
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_list_cheats(&self.session, &ctx).map_err(|e| err(e.message))?;
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(lines.join("\n")),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
@@ -1038,87 +901,33 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<CheatIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let removed = {
-            let mut s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            s.remove_cheat(args.id)
-        };
-        match removed {
-            Some(c) => {
-                // T-150: Emit event for cheat removal.
-                if let Ok(s) = self.session.lock() {
-                    s.event_bus().emit(crate::event::SessionEvent::CheatUpdated {
-                        id: c.id,
-                        label: c.label.clone(),
-                        enabled: None,
-                        value: None,
-                    });
-                }
-                self.request_repaint();
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(format!("removed cheat '{}' (id {})", c.label, c.id)),
-                ]))
-            }
-            None => Err(err(format!("no cheat with id {}", args.id))),
-        }
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_remove_cheat(&self.session, &ctx, trainlab_core::tools::RemoveCheatArgs {
+            id: args.id,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 
-    /// Set a value cheat's value in game memory. This **stages** the write
-    /// through the D8 confirmation gate — apply it with `confirm_op`.
-    #[tool(description = "Set a value cheat's value in game memory. Stages the write (D8 gate); apply with 'confirm_op' or discard with 'reject_op'.")]
+    /// Set a value cheat's value directly in game memory (with automatic undo snapshot).
+    #[tool(description = "Set a value cheat's value in game memory with automatic undo snapshot.")]
     pub(crate) fn set_cheat_value(
         &self,
         Parameters(args): Parameters<SetCheatValueArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Look up the cheat to get its address + type.
-        let (address, value_type) = {
-            let s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            let c = s
-                .get_cheat(args.id)
-                .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
-            match &c.kind {
-                CheatKind::Value { address, value_type, address_expr } => {
-                    let target = if let Some(expr) = address_expr {
-                        parse_addr_expr(&self.session, expr).unwrap_or(*address)
-                    } else {
-                        *address
-                    };
-                    (target, *value_type)
-                }
-                _ => {
-                    return Err(err(format!("cheat {} is not a value cheat", args.id)))
-                }
-            }
-        };
-        // Parse the value into bytes per the type.
-        let data = parse_value_bytes(&args.value, value_type)?;
-        // Stage the write (D8 gate).
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let op_id = s.stage_op_with_cheat(
-            address,
-            crate::session::PendingKind::Write { data: data.clone() },
-            format!(
-                "write {} ({value_type:?}) @ {address:#018x}",
-                args.value,
-            ),
-            Some(args.id),
-        );
-        s.log_activity("MCP", format!("staged write value for cheat {} (op_id {op_id})", args.id));
-        drop(s);
+        let proc = game_process(&self.session)?;
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_set_cheat_value(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::SetCheatValueArgs {
+            id: args.id,
+            value: args.value,
+        }).map_err(|e| err(e.message))?;
+
         self.request_repaint();
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "staged write op #{op_id}: set cheat {} value to '{}' @ {address:#018x}. Apply with 'confirm_op' (id {op_id}) or discard with 'reject_op' (id {op_id}).",
-                args.id, args.value
-            )),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
@@ -1277,25 +1086,11 @@ impl TrainlabMcpServer {
     /// List cheat profiles discovered in the `cheats/` directory.
     #[tool(description = "List cheat profiles (portable YAML cheat tables) discovered in the cheats/ directory next to the GUI, with their target game.")]
     fn list_profiles(&self) -> Result<CallToolResult, ErrorData> {
-        let profiles = crate::profile::discover_profiles();
-        if profiles.is_empty() {
-            return Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(
-                    "(no profiles found in cheats/; add one or use 'save_profile')",
-                ),
-            ]));
-        }
-        let lines: Vec<String> = profiles
-            .iter()
-            .map(|(f, p)| {
-                format!(
-                    "{} — game: {} ({}) v{}",
-                    f, p.game, p.name, p.version
-                )
-            })
-            .collect();
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_list_profiles(&self.session, &ctx).map_err(|e| err(e.message))?;
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(lines.join("\n")),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
@@ -1573,105 +1368,20 @@ impl TrainlabMcpServer {
         ]))
     }
 
-    /// Save the current session's cheats to a cheat profile YAML file.
-    #[tool(description = "Save the current session's cheats to a portable YAML cheat profile in the cheats/ directory. Uses the session's game name and current cheats.")]
+    /// Save the current cheats in the session as a portable cheat profile YAML file.
+    #[tool(description = "Save the cheats currently in the session to a YAML profile in the cheats/ directory for reuse across sessions.")]
     fn save_profile(
         &self,
         Parameters(args): Parameters<SaveProfileArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        use crate::profile::{GameProfile, ProfileCheat};
-        let (game, cheats) = {
-            let s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            let game = s.game_name().to_string();
-            let cheats: Vec<crate::session::Cheat> = s.list_cheats().into_iter().cloned().collect();
-            (game, cheats)
-        };
-        if game.is_empty() {
-            return Err(err("no game attached; set a game name first (attach_game)"));
-        }
-        let profile_cheats: Vec<ProfileCheat> = cheats
-            .iter()
-            .map(|c| {
-                let (kind, value_type, address_ref, target_ref, hook, payload, base, fields) = match &c.kind {
-                    crate::session::CheatKind::Value { address, value_type, address_expr } => {
-                        ("value".to_string(), Some(format!("{value_type:?}").to_lowercase()), address_expr.clone().or_else(|| Some(format!("{address:#x}"))), None, None, None, None, None)
-                    }
-                    crate::session::CheatKind::Struct { base_address: _, base_expr, fields } => {
-                        ("struct".to_string(), None, None, None, None, None, Some(base_expr.clone()), Some(fields.clone()))
-                    }
-                    crate::session::CheatKind::Toggle { target, hook, .. } => {
-                        let (hk, pl) = match hook {
-                            trainlab_core::cave_hook::CaveHook::Trampoline { payload, .. } => {
-                                ("trampoline".to_string(), Some(hex_encode(payload)))
-                            }
-                            trainlab_core::cave_hook::CaveHook::Override { payload, .. } => {
-                                ("override".to_string(), Some(hex_encode(payload)))
-                            }
-                        };
-                        ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl, None, None)
-                    }
-                    crate::session::CheatKind::Patch { target, patch_bytes, original_bytes: _, cave_ref, .. } => {
-                        ("patch".to_string(), None, None, Some(format!("{target:#x}")), cave_ref.clone(), Some(hex_encode(patch_bytes)), None, None)
-                    }
-                    CheatKind::Button { .. } => {
-                        ("button".to_string(), None, None, None, None, None, None, None)
-                    }
-                };
-                ProfileCheat {
-                    id: c.id.to_string(),
-                    label: c.label.clone(),
-                    kind,
-                    value_type,
-                    address_ref,
-                    target_ref,
-                    hook,
-                    payload,
-                    asm: None,
-                    jump: None,
-                    mechanism: None,
-                    rate_hz: None,
-                    value: None,
-                    base,
-                    fields,
-                    commands: match &c.kind {
-                        CheatKind::Button { commands } => Some(commands.clone()),
-                        _ => None,
-                    },
-                    hotkey: c.hotkey.clone(),
-                    note: c.note.clone(),
-                }
-            })
-            .collect();
-        let profile = GameProfile {
-            schema: GameProfile::SCHEMA_V1.into(),
-            game: game.clone(),
-            name: format!("{game} cheats"),
-            inject_dll: true,
-            version: "1.0.0".into(),
-            game_version: None,
-            date: None,
-            author: None,
-            setup: vec![],
-            init_commands: None,
-            cheats: profile_cheats.clone(),
-        };
-        let yaml = profile.to_yaml().map_err(err)?;
-        let file = args
-            .file
-            .unwrap_or_else(|| format!("{}.yaml", game.replace(".exe", "")));
-        let dir = crate::profile::profiles_dir_path();
-        std::fs::create_dir_all(&dir).map_err(|e| err(format!("mkdir {dir:?}: {e}")))?;
-        let path = dir.join(&file);
-        std::fs::write(&path, yaml).map_err(|e| err(format!("write {path:?}: {e}")))?;
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_save_profile(&self.session, &ctx, trainlab_core::tools::ProfileSaveArgs {
+            file: args.file,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "saved profile to {} ({} cheats)",
-                path.display(),
-                profile_cheats.len()
-            )),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
@@ -2190,19 +1900,16 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<SetMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let address = parse_addr(&self.session, &args.address)?;
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        s.set_marker(&args.label, address, args.note.as_deref())
-            .map_err(|e| err(e))?;
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_set_marker(&self.session, &ctx, None, trainlab_core::tools::SetMarkerArgs {
+            label: args.label,
+            address: args.address,
+            note: args.note,
+        }).map_err(|e| err(e.message))?;
+
         self.request_repaint();
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!(
-                "marker '{}' set to {address:#018x}",
-                args.label
-            )),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
@@ -3113,61 +2820,24 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<GetMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        match s.get_marker(&args.label) {
-            Some(m) => {
-                let note = m.note.as_deref().unwrap_or("");
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(format!(
-                        "{} = {:#018x}{}",
-                        m.label,
-                        m.address,
-                        if note.is_empty() {
-                            String::new()
-                        } else {
-                            format!("  ({note})")
-                        }
-                    )),
-                ]))
-            }
-            None => Err(err(format!("marker '{}' not found", args.label))),
-        }
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_get_marker(&self.session, &ctx, trainlab_core::tools::GetMarkerArgs {
+            label: args.label,
+        }).map_err(|e| err(e.message))?;
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 
     /// List all saved markers.
     #[tool(description = "List all markers saved in the session, sorted by label.")]
     fn list_markers(&self) -> Result<CallToolResult, ErrorData> {
-        let s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let markers = s.list_markers();
-        if markers.is_empty() {
-            return Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text("(no markers)"),
-            ]));
-        }
-        let lines: Vec<String> = markers
-            .iter()
-            .map(|m| {
-                let note = m.note.as_deref().unwrap_or("");
-                format!(
-                    "{:<20} {:#018x}{}",
-                    m.label,
-                    m.address,
-                    if note.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  ({note})")
-                    }
-                )
-            })
-            .collect();
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_list_markers(&self.session, &ctx).map_err(|e| err(e.message))?;
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(lines.join("\n")),
+            rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
@@ -3177,19 +2847,15 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<RemoveMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        match s.remove_marker(&args.label) {
-            Some(m) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format!(
-                    "removed marker '{}' ({:#018x})",
-                    m.label, m.address
-                )),
-            ])),
-            None => Err(err(format!("marker '{}' not found", args.label))),
-        }
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_remove_marker(&self.session, &ctx, trainlab_core::tools::RemoveMarkerArgs {
+            label: args.label,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 
     /// Describe an undo entry (or the most recent one).
@@ -3198,23 +2864,14 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<UndoInfoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let s = self
-            .session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
-        let entry = match args.id {
-            Some(id) => s.get_undo(id),
-            None => s.peek_undo_last(),
-        };
-        match entry {
-            Some(e) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format!(
-                    "undo #{}: {} @ {:#018x} ({} original byte(s))",
-                    e.id, e.description, e.address, e.original_bytes.len()
-                )),
-            ])),
-            None => Err(err("no undo entry found")),
-        }
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_undo_info(&self.session, &ctx, trainlab_core::tools::UndoInfoArgs {
+            id: args.id,
+        }).map_err(|e| err(e.message))?;
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
     }
 }
 fn parse_addr(session: &SharedSession, s: &str) -> Result<u64, ErrorData> {

@@ -164,6 +164,32 @@ pub struct ScanPointerArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetMarkerArgs {
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveMarkerArgs {
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveCheatArgs {
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoInfoArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoRevertArgs {
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetMarkerArgs {
     pub label: String,
     pub address: String,
@@ -196,6 +222,23 @@ pub struct SetCheatValueArgs {
 pub struct SetCheatToggleArgs {
     pub id: u64,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileLoadArgs {
+    pub file: String,
+    #[serde(default = "default_true")]
+    pub run_setup: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileSaveArgs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1129,142 @@ pub fn execute_set_marker(
     ))
 }
 
+/// Retrieve a saved marker by label.
+pub fn execute_get_marker(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    args: GetMarkerArgs,
+) -> Result<ToolResult, ToolError> {
+    let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    match s.get_marker(&args.label) {
+        Some(m) => {
+            let note = m.note.as_deref().unwrap_or("");
+            let text = format!("{} = {:#018x}{}", m.label, m.address, if note.is_empty() { String::new() } else { format!("  ({note})") });
+            Ok(ToolResult::with_data(
+                text,
+                serde_json::json!({
+                    "label": m.label,
+                    "address": m.address,
+                    "note": m.note,
+                    "client_id": ctx.id,
+                }),
+            ))
+        }
+        None => Err(err(format!("marker '{}' not found", args.label))),
+    }
+}
+
+/// List all saved markers in the session.
+pub fn execute_list_markers(
+    session: &SharedSession,
+    ctx: &ClientContext,
+) -> Result<ToolResult, ToolError> {
+    let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    let markers = s.list_markers();
+    if markers.is_empty() {
+        return Ok(ToolResult::with_data(
+            "(no markers)",
+            serde_json::json!({ "markers": [], "client_id": ctx.id }),
+        ));
+    }
+    let lines: Vec<String> = markers
+        .iter()
+        .map(|m| {
+            let note = m.note.as_deref().unwrap_or("");
+            format!("{:<20} {:#018x}{}", m.label, m.address, if note.is_empty() { String::new() } else { format!("  ({note})") })
+        })
+        .collect();
+
+    Ok(ToolResult::with_data(
+        lines.join("\n"),
+        serde_json::json!({
+            "markers": markers.iter().map(|m| serde_json::json!({ "label": m.label, "address": m.address, "note": m.note })).collect::<Vec<_>>(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Remove a saved marker by label.
+pub fn execute_remove_marker(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    args: RemoveMarkerArgs,
+) -> Result<ToolResult, ToolError> {
+    let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    match s.remove_marker(&args.label) {
+        Some(m) => {
+            s.log_activity(&ctx.id, format!("removed marker '${}' ({:#018x})", m.label, m.address));
+            Ok(ToolResult::with_data(
+                format!("removed marker '${}' ({:#018x})", m.label, m.address),
+                serde_json::json!({
+                    "label": m.label,
+                    "address": m.address,
+                    "client_id": ctx.id,
+                }),
+            ))
+        }
+        None => Err(err(format!("marker '{}' not found", args.label))),
+    }
+}
+
+/// Inspect the undo log for a specific entry or the most recent mutation.
+pub fn execute_undo_info(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    args: UndoInfoArgs,
+) -> Result<ToolResult, ToolError> {
+    let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    let entry = match args.id {
+        Some(id) => s.get_undo(id),
+        None => s.peek_undo_last(),
+    };
+    match entry {
+        Some(e) => Ok(ToolResult::with_data(
+            format!("undo #{}: {} @ {:#018x} ({} original byte(s))", e.id, e.description, e.address, e.original_bytes.len()),
+            serde_json::json!({
+                "id": e.id,
+                "description": e.description,
+                "address": e.address,
+                "bytes_len": e.original_bytes.len(),
+                "client_id": ctx.id,
+            }),
+        )),
+        None => Err(err("no undo entry found")),
+    }
+}
+
+/// Revert a mutation directly by undo ID or the most recent mutation.
+pub fn execute_undo_revert(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: &dyn ProcessMemory,
+    args: UndoRevertArgs,
+) -> Result<ToolResult, ToolError> {
+    let entry = {
+        let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+        s.get_undo(args.id).cloned()
+    };
+    let entry = entry.ok_or_else(|| err(format!("undo entry #{} not found", args.id)))?;
+
+    // Write back original bytes
+    mem.write(entry.address, &entry.original_bytes)
+        .map_err(|e| err(format!("failed to revert memory at {:#x}: {e}", entry.address)))?;
+
+    let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    s.pop_undo(entry.id);
+    s.log_activity(&ctx.id, format!("reverted undo #{}: {}", entry.id, entry.description));
+
+    Ok(ToolResult::with_data(
+        format!("successfully reverted undo #{}: {} (restored {} bytes @ {:#x})", entry.id, entry.description, entry.original_bytes.len(), entry.address),
+        serde_json::json!({
+            "id": entry.id,
+            "address": entry.address,
+            "restored_bytes": entry.original_bytes.len(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
 /// Add a cheat to the session.
 pub fn execute_add_cheat(
     session: &SharedSession,
@@ -1104,7 +1283,7 @@ pub fn execute_add_cheat(
                 address_expr: Some(addr_str),
             }
         }
-        other => return Err(err(format!("unsupported cheat kind: '{other}'"))),
+        other => return Err(err(format!("unsupported cheat kind: '{other}' (expected 'value')"))),
     };
 
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
@@ -1116,6 +1295,269 @@ pub fn execute_add_cheat(
         serde_json::json!({
             "id": id,
             "label": args.label,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// List all cheats in the session.
+pub fn execute_list_cheats(
+    session: &SharedSession,
+    ctx: &ClientContext,
+) -> Result<ToolResult, ToolError> {
+    let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    let cheats = s.list_cheats();
+    if cheats.is_empty() {
+        return Ok(ToolResult::with_data(
+            "(no cheats yet)",
+            serde_json::json!({ "cheats": [], "client_id": ctx.id }),
+        ));
+    }
+    let lines: Vec<String> = cheats
+        .iter()
+        .map(|c| {
+            let kind = match &c.kind {
+                CheatKind::Value { address, value_type, address_expr } => {
+                    if let Some(expr) = address_expr {
+                        format!("value {value_type:?} @ {expr} ({address:#x})")
+                    } else {
+                        format!("value {value_type:?} @ {address:#x}")
+                    }
+                }
+                CheatKind::Struct { base_address, base_expr, fields } => {
+                    format!("struct ({base_expr} @ {base_address:#x}) [{} field(s)]", fields.len())
+                }
+                CheatKind::Toggle { target, enabled, .. } => {
+                    format!("toggle @ {target:#x} ({})", if *enabled { "on" } else { "off" })
+                }
+                CheatKind::Patch { target, enabled, cave_ref, .. } => {
+                    let desc = cave_ref.as_deref().unwrap_or("fast patch");
+                    format!("patch @ {target:#x} ({}, {desc})", if *enabled { "on" } else { "off" })
+                }
+                CheatKind::Button { commands } => {
+                    format!("button ({} cmd(s))", commands.len())
+                }
+            };
+            format!("[{}] {} — {kind}", c.id, c.label)
+        })
+        .collect();
+
+    Ok(ToolResult::with_data(
+        lines.join("\n"),
+        serde_json::json!({
+            "cheats": cheats.iter().map(|c| {
+                let enabled = match &c.kind {
+                    CheatKind::Toggle { enabled, .. } | CheatKind::Patch { enabled, .. } => Some(*enabled),
+                    _ => None,
+                };
+                serde_json::json!({ "id": c.id, "label": c.label, "enabled": enabled })
+            }).collect::<Vec<_>>(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Remove a cheat by ID.
+pub fn execute_remove_cheat(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    args: RemoveCheatArgs,
+) -> Result<ToolResult, ToolError> {
+    let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    match s.remove_cheat(args.id) {
+        Some(c) => {
+            s.log_activity(&ctx.id, format!("removed cheat '{}' (id {})", c.label, c.id));
+            Ok(ToolResult::with_data(
+                format!("removed cheat '{}' (id {})", c.label, c.id),
+                serde_json::json!({
+                    "id": c.id,
+                    "label": c.label,
+                    "client_id": ctx.id,
+                }),
+            ))
+        }
+        None => Err(err(format!("no cheat with id {}", args.id))),
+    }
+}
+
+/// Directly set a value cheat's target memory (with auto-undo).
+pub fn execute_set_cheat_value(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: &dyn ProcessMemory,
+    args: SetCheatValueArgs,
+) -> Result<ToolResult, ToolError> {
+    let (target_addr, value_type) = {
+        let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+        let c = s.get_cheat(args.id).ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
+        match &c.kind {
+            CheatKind::Value { address, value_type, address_expr } => {
+                let target = if let Some(expr) = address_expr {
+                    eval_addr_expr(session, expr, Some(mem)).unwrap_or(*address)
+                } else {
+                    *address
+                };
+                (target, *value_type)
+            }
+            _ => return Err(err(format!("cheat {} is not a value cheat", args.id))),
+        }
+    };
+
+    let data = parse_value_bytes(&args.value, value_type).map_err(err)?;
+    let orig = mem.read(target_addr, data.len()).unwrap_or_default();
+
+    mem.write(target_addr, &data).map_err(|e| err(format!("failed to write cheat value: {e}")))?;
+
+    let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    let undo_id = if !orig.is_empty() {
+        Some(s.record_undo(target_addr, orig, format!("set cheat #{} to {}", args.id, args.value)))
+    } else {
+        None
+    };
+
+    s.log_activity(&ctx.id, format!("set cheat #{} value to '{}' @ {target_addr:#x}", args.id, args.value));
+
+    Ok(ToolResult::with_data(
+        format!("set cheat #{} value to '{}' @ {target_addr:#x}", args.id, args.value),
+        serde_json::json!({
+            "id": args.id,
+            "address": target_addr,
+            "value": args.value,
+            "undo_id": undo_id,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// List cheat profiles discovered on disk.
+pub fn execute_list_profiles(
+    _session: &SharedSession,
+    ctx: &ClientContext,
+) -> Result<ToolResult, ToolError> {
+    let profiles = crate::profile::discover_profiles();
+    if profiles.is_empty() {
+        return Ok(ToolResult::with_data(
+            "(no profiles found in cheats/)",
+            serde_json::json!({ "profiles": [], "client_id": ctx.id }),
+        ));
+    }
+    let lines: Vec<String> = profiles
+        .iter()
+        .map(|(f, p)| format!("{} — game: {} ({}) v{}", f, p.game, p.name, p.version))
+        .collect();
+
+    Ok(ToolResult::with_data(
+        lines.join("\n"),
+        serde_json::json!({
+            "profiles": profiles.iter().map(|(f, p)| serde_json::json!({ "file": f, "game": p.game, "name": p.name, "version": p.version })).collect::<Vec<_>>(),
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Save current cheats in session to a portable YAML profile.
+pub fn execute_save_profile(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    args: ProfileSaveArgs,
+) -> Result<ToolResult, ToolError> {
+    use crate::profile::{GameProfile, ProfileCheat};
+
+    let (game, profile_cheats) = {
+        let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+        let game = s.game_name().to_string();
+        if game.is_empty() {
+            return Err(err("cannot save profile: session has no target game attached"));
+        }
+        let cheats = s.list_cheats();
+        let profile_cheats: Vec<ProfileCheat> = cheats
+            .iter()
+            .map(|c| {
+                let (kind, value_type, address_ref, target_ref, hook, payload, base, fields) = match &c.kind {
+                    CheatKind::Value { address, value_type, address_expr } => {
+                        let addr_ref = address_expr.clone().unwrap_or_else(|| format!("{address:#x}"));
+                        ("value".to_string(), Some(format!("{value_type:?}").to_lowercase()), Some(addr_ref), None, None, None, None, None)
+                    }
+                    CheatKind::Struct { base_address, base_expr, fields } => {
+                        let b = if base_expr.is_empty() { format!("{base_address:#x}") } else { base_expr.clone() };
+                        ("struct".to_string(), None, None, None, None, None, Some(b), Some(fields.clone()))
+                    }
+                    CheatKind::Toggle { target, hook, .. } => {
+                        let (hk, pl) = match hook {
+                            crate::cave_hook::CaveHook::Trampoline { payload, .. } => {
+                                ("trampoline".to_string(), Some(payload.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
+                            }
+                            crate::cave_hook::CaveHook::Override { payload, .. } => {
+                                ("override".to_string(), Some(payload.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
+                            }
+                        };
+                        ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl, None, None)
+                    }
+                    CheatKind::Patch { target, patch_bytes, cave_ref, .. } => {
+                        ("patch".to_string(), None, None, Some(format!("{target:#x}")), cave_ref.clone(), Some(patch_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")), None, None)
+                    }
+                    CheatKind::Button { .. } => {
+                        ("button".to_string(), None, None, None, None, None, None, None)
+                    }
+                };
+                ProfileCheat {
+                    id: c.id.to_string(),
+                    label: c.label.clone(),
+                    kind,
+                    value_type,
+                    address_ref,
+                    target_ref,
+                    hook,
+                    payload,
+                    asm: None,
+                    jump: None,
+                    mechanism: None,
+                    rate_hz: None,
+                    value: None,
+                    base,
+                    fields,
+                    commands: match &c.kind {
+                        CheatKind::Button { commands } => Some(commands.clone()),
+                        _ => None,
+                    },
+                    hotkey: c.hotkey.clone(),
+                    note: c.note.clone(),
+                }
+            })
+            .collect();
+        (game, profile_cheats)
+    };
+
+    let profile = GameProfile {
+        schema: GameProfile::SCHEMA_V1.into(),
+        game: game.clone(),
+        name: format!("{game} cheats"),
+        inject_dll: true,
+        version: "1.0.0".into(),
+        game_version: None,
+        date: None,
+        author: None,
+        setup: vec![],
+        init_commands: None,
+        cheats: profile_cheats.clone(),
+    };
+
+    let yaml = profile.to_yaml().map_err(err)?;
+    let file = args.file.unwrap_or_else(|| format!("{}.yaml", game.replace(".exe", "")));
+    let dir = crate::profile::profiles_dir_path();
+    std::fs::create_dir_all(&dir).map_err(|e| err(format!("mkdir {dir:?}: {e}")))?;
+    let path = dir.join(&file);
+    std::fs::write(&path, yaml).map_err(|e| err(format!("write {path:?}: {e}")))?;
+
+    if let Ok(mut s) = session.lock() {
+        s.log_activity(&ctx.id, format!("saved profile to {} ({} cheats)", path.display(), profile_cheats.len()));
+    }
+
+    Ok(ToolResult::with_data(
+        format!("saved profile to {} ({} cheats)", path.display(), profile_cheats.len()),
+        serde_json::json!({
+            "path": path.to_string_lossy(),
+            "cheats_count": profile_cheats.len(),
             "client_id": ctx.id,
         }),
     ))
@@ -1272,5 +1714,103 @@ mod tests {
         let res_clear = execute_scan_clear(&session, &mut ctx).unwrap();
         assert!(res_clear.message.contains("cleared"));
         assert!(ctx.scan.is_none());
+    }
+
+    #[test]
+    fn test_execute_markers_cheats_and_undo_revert() {
+        let mut data = vec![0u8; 128];
+        data[0x20..0x24].copy_from_slice(&500i32.to_le_bytes());
+
+        struct MockMem2 {
+            data: std::sync::Mutex<Vec<u8>>,
+        }
+
+        impl ProcessMemory for MockMem2 {
+            fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> {
+                let d = self.data.lock().unwrap();
+                let start = address as usize;
+                let end = (start + len).min(d.len());
+                if start >= d.len() {
+                    return Err(crate::memory::MemoryError::OutOfRange { address });
+                }
+                Ok(d[start..end].to_vec())
+            }
+            fn write(&self, address: u64, data: &[u8]) -> Result<usize, crate::memory::MemoryError> {
+                let mut d = self.data.lock().unwrap();
+                let start = address as usize;
+                if start + data.len() > d.len() {
+                    return Err(crate::memory::MemoryError::OutOfRange { address });
+                }
+                d[start..start + data.len()].copy_from_slice(data);
+                Ok(data.len())
+            }
+            fn regions(&self) -> Result<Vec<crate::memory::Region>, crate::memory::MemoryError> {
+                Ok(vec![])
+            }
+        }
+
+        let mem = MockMem2 { data: std::sync::Mutex::new(data) };
+        let session = Arc::new(Mutex::new(SessionState::new()));
+        let mut s = session.lock().unwrap();
+        let ctx = s.create_context("mcp-client-1", ClientKind::Mcp { agent_name: None });
+        drop(s);
+
+        // 1. Marker operations
+        let m_set = execute_set_marker(&session, &ctx, Some(&mem), SetMarkerArgs {
+            label: "gold_addr".into(),
+            address: "0x20".into(),
+            note: Some("gold currency".into()),
+        }).unwrap();
+        assert!(m_set.message.contains("saved marker '$gold_addr' = 0x20"));
+
+        let m_get = execute_get_marker(&session, &ctx, GetMarkerArgs {
+            label: "gold_addr".into(),
+        }).unwrap();
+        assert!(m_get.message.contains("gold_addr = 0x0000000000000020"));
+
+        let m_list = execute_list_markers(&session, &ctx).unwrap();
+        assert!(m_list.message.contains("gold_addr"));
+
+        // 2. Cheat operations
+        let c_add = execute_add_cheat(&session, &ctx, Some(&mem), AddCheatArgs {
+            label: "Gold Cheat".into(),
+            kind: "value".into(),
+            address: Some("gold_addr".into()),
+            value_type: Some("i32".into()),
+            hotkey: None,
+            note: None,
+        }).unwrap();
+        assert!(c_add.message.contains("added cheat 'Gold Cheat' (id 0)"));
+
+        let c_list = execute_list_cheats(&session, &ctx).unwrap();
+        assert!(c_list.message.contains("Gold Cheat"));
+
+        // 3. Set cheat value (mutates memory to 777 and creates undo)
+        let c_set = execute_set_cheat_value(&session, &ctx, &mem, SetCheatValueArgs {
+            id: 0,
+            value: "777".into(),
+        }).unwrap();
+        assert!(c_set.message.contains("set cheat #0 value to '777'"));
+
+        let cur_val = mem.read(0x20, 4).unwrap();
+        assert_eq!(i32::from_le_bytes(cur_val.try_into().unwrap()), 777);
+
+        // 4. Inspect undo info
+        let u_info = execute_undo_info(&session, &ctx, UndoInfoArgs { id: None }).unwrap();
+        assert!(u_info.message.contains("undo #1"));
+
+        // 5. Revert undo #1 (restores memory back to 500)
+        let u_rev = execute_undo_revert(&session, &ctx, &mem, UndoRevertArgs { id: 1 }).unwrap();
+        assert!(u_rev.message.contains("successfully reverted undo #1"));
+
+        let restored_val = mem.read(0x20, 4).unwrap();
+        assert_eq!(i32::from_le_bytes(restored_val.try_into().unwrap()), 500);
+
+        // 6. Remove cheat and marker
+        let c_rem = execute_remove_cheat(&session, &ctx, RemoveCheatArgs { id: 0 }).unwrap();
+        assert!(c_rem.message.contains("removed cheat 'Gold Cheat'"));
+
+        let m_rem = execute_remove_marker(&session, &ctx, RemoveMarkerArgs { label: "gold_addr".into() }).unwrap();
+        assert!(m_rem.message.contains("removed marker '$gold_addr'"));
     }
 }
