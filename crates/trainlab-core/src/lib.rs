@@ -15,12 +15,17 @@ pub mod aob;
 pub mod capture;
 pub mod cave_hook;
 pub mod disasm;
+pub mod event;
+pub mod expr;
 pub mod memory;
 pub mod modinfo;
 pub mod pointer;
 pub mod process;
+pub mod profile;
 pub mod protocol;
 pub mod scan;
+pub mod session;
+pub mod tools;
 #[cfg(unix)]
 pub mod wine;
 

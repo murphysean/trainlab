@@ -3534,16 +3534,6 @@ pub(crate) fn parse_addr_expr_with_mem(
 
 /// Parse a whitespace-tolerant hex string (e.g. "00 80 ac 43" or "0080ac43")
 /// into raw bytes.
-/// The name of a setup step (used for error messages and resolution).
-impl crate::profile::SetupStep {
-    fn name(&self) -> &str {
-        match self {
-            crate::profile::SetupStep::AobScan { name, .. }
-            | crate::profile::SetupStep::PointerChain { name, .. }
-            | crate::profile::SetupStep::Address { name, .. } => name,
-        }
-    }
-}
 
 /// Execute a sequence of profile commands (AOB scans, cave installs, string allocations, assertions, pointer chases).
 pub(crate) fn execute_profile_commands(

@@ -4397,9 +4397,13 @@ name = "trainlab-core"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "chrono",
  "iced-x86",
  "libc",
  "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
  "tracing",
  "windows-sys 0.59.0",
 ]
