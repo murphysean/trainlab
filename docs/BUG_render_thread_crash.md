@@ -1,6 +1,6 @@
 # Bug Report: render-thread access violation (0xC0000005) with DXGI present hook active
 
-**Status:** ✅ RESOLVED / MITIGATED (2026-09-01)
+**Status:** ⚠️ MITIGATED (More work to do)
 **Priority:** P1
 **crate:** trainlab (DXGI present hook / DLL graphics layer)
 **Requested by:** sins2 (Sins of a Solar Empire II), 2026-09-01
@@ -60,34 +60,38 @@ The crash happened after the profile loaded and resource value cheats were set (
 888888, Metal 777777, Crystal 666666). No game-logic code cave was installed at the time
 of the crash (the influence-hook trampoline test caves were undone before this).
 
-## Repro
+## Root Cause Analysis (RCA)
 
-1. Launch `sins2.exe` via the trainlab `launch.sh` wrapper (attaches trainer + DXGI present hook).
-2. Load the `sins2.yaml` profile.
-3. Set resource value cheats (Credits/Metal/Crystal).
-4. Play in a match — the game eventually crashes with a render-thread access violation.
+Inspecting `crates/trainlab-inject/src/render/dxgi.rs` and `crates/trainlab-inject/src/render/d3d11.rs` revealed three underlying structural vulnerabilities in the graphics hook layer:
 
-## Expected vs Actual
+1. **Trampoline Hooking of DXVK/Wine `Present`**:
+   - `init_dxgi_hook` uses a dummy swapchain to locate `IDXGISwapChain::Present` and installs an in-place **14-byte absolute jump trampoline** into executable code.
+   - Under Proton/DXVK (Vulkan backend) or Wine, `Present` functions are frequently short, non-standard, or invoked concurrently by DXVK presentation threads. An inline 14-byte patch risks instruction tearing or race conditions across swapchain re-creation and presentation.
+2. **Unsafe COM Pointer Querying in `hooked_present`**:
+   - `hooked_present` extracts the game's `HWND` by directly invoking `vtable[12]` (`GetDesc`) on the passed `swapchain` pointer without calling `QueryInterface(IID_IDXGISwapChain)` or taking reference counts (`AddRef`).
+   - If the game engine passes an internal wrapper, a deferred swapchain, or a swapchain in the middle of destruction / `ResizeBuffers`, invoking unverified VMT offsets triggers `0xC0000005`.
+3. **Missing D3D11 Pipeline State Backup & Restore**:
+   - In `d3d11.rs`, rendering the egui overlay directly binds viewports, shaders, rasterizer states, depth-stencil states, and render target views (`OMSetRenderTargets`, `RSSetViewports`, `IASetInputLayout`) to the immediate context.
+   - It does not save the game's active pipeline state beforehand or restore it before returning to the original `Present`. Subsequent game render passes that expect existing render targets or shader states will access clobbered state and crash.
 
-- **Expected:** the game runs stably with the trainer attached and the DXGI present hook active.
-- **Actual:** the game crashes with `[render thread crash] exception_code=0xC0000005` on the
-  render thread, taking down the whole process (and the MCP connection with it).
+## Mitigation Implemented
 
-## Resolution & Fix Summary
-
-1. **Profile-Level Render & Overlay Configuration**:
+1. **Profile-Level Opt-Out (`render` block in `GameProfile`)**:
    - Added `RenderConfig` to `GameProfile` in `trainlab-core/src/profile.rs` (`render.overlay`, `render.hook_wndproc`, `render.xinput_hooks`).
-   - Games that do not need in-game overlay rendering can completely disable the DXGI present hook in their cheat profile:
+   - For games sensitive to render-thread hooking, the DXGI present hook can be completely disabled in the profile:
      ```yaml
      render:
-       overlay: false
-       hook_wndproc: false
-       xinput_hooks: false
+       overlay: false       # Completely disables the DXGI Present hook
+       hook_wndproc: false  # Disables message/hotkey hooking
+       xinput_hooks: false  # Disables gamepad polling
      ```
-2. **Environment & DLL Flags**:
-   - Injected DLL checks `TRAINLAB_DISABLE_OVERLAY=1` and `TRAINLAB_DISABLE_XINPUT=1` to bypass DXGI detour and controller polling threads.
-3. **Application Configuration Subsystem**:
-   - Added `config.rs` to `trainlab-gui` with support for `config.yaml` and environment variables (`TRAINLAB_SCALE`, `TRAINLAB_MCP_HOST`, `TRAINLAB_MCP_PORT`, `TRAINLAB_DLL_HOST`, `TRAINLAB_DLL_PORT`).
-   - Enables DPI / UI scaling (`ctx.set_pixels_per_point`) for high-DPI displays.
-   - Defaults MCP server and DLL communication to `127.0.0.1` (localhost only), configurable to `0.0.0.0` for LAN access.
+2. **Environment Overrides**:
+   - Injected DLL checks `TRAINLAB_DISABLE_OVERLAY=1` and `TRAINLAB_DISABLE_XINPUT=1` to skip DXGI and XInput hooking threads on demand.
+
+## Future Work Required for Full Fix
+
+- [ ] **VMT Swap Detours**: Replace in-place 14-byte code cave patching of `Present` with VMT table swapping or clean COM method replacement.
+- [ ] **Safe COM Interface Probing**: Wrap swapchain operations in `QueryInterface` and add SEH exception boundaries to catch transient invalid swapchains during window resizes.
+- [ ] **Full D3D11 Pipeline State Backup/Restore**: Implement a full state saver that records `OMGetRenderTargets`, `RSGetViewports`, `OMGetBlendState`, `IAGetInputLayout`, etc., before overlay drawing and restores them cleanly before invoking the original `Present`.
+
 
