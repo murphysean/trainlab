@@ -48,6 +48,7 @@ pub enum HookKind {
 /// - know where the shellcode lives (`cave_addr`),
 /// - know what original bytes were overwritten at the call site (`original`),
 /// - restore the original bytes via [`restore`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstalledCave {
     /// Address of the allocated shellcode block (the "cave").
     pub cave_addr: u64,
@@ -104,6 +105,18 @@ where
     //    the jump-back lands on a real instruction boundary.
     let window = min_patch_len + 32;
     let buf = read(target, window).map_err(|e| format!("read window: {e}"))?;
+
+    // Check if target is already hooked by inspecting the initial bytes:
+    // - Absolute jump hook: starts with `FF 25 00 00 00 00` (jmp [rip+0])
+    // - Relative jump hook: starts with `E9`
+    // - Direct jump / short hook: `EB`
+    if buf.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) || (!buf.is_empty() && (buf[0] == 0xE9 || buf[0] == 0xEB)) {
+        return Err(format!(
+            "target {target:#x} is already hooked (starts with jmp opcode {:02x}); sequence aborted to prevent double-hook corruption",
+            buf[0]
+        ));
+    }
+
     let patch_len = disasm::instruction_aligned_len(&buf, min_patch_len)
         .ok_or_else(|| "could not find an instruction-aligned patch length".to_string())?;
 
@@ -303,6 +316,34 @@ mod tests {
     }
 
     #[test]
+    fn install_trampoline_conditional_branch_appends_jump_back() {
+        // Target bytes: cmp dword [rbx+0x30], 2 (4) ; jne +0x7D (2) ; mov eax, 1 (5) ...
+        let target = 0x6000u64;
+        let seed = [0x83, 0x7B, 0x30, 0x02, 0x75, 0x7D, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0xC3];
+        fake_write(target, &seed).unwrap();
+
+        let kind = HookKind::Trampoline {
+            payload: vec![0x90], // 1 byte nop
+            jump: JumpStyle::Relative,
+        };
+        let hook = install(target, kind, fake_read, fake_write, fake_alloc).unwrap();
+
+        // Stolen bytes are at least 5 bytes (4 + 2 = 6 bytes for cmp+jne)
+        assert!(hook.original.len() >= 6);
+
+        // In the cave: payload (1 byte) + relocated instructions + jump-back (14 bytes)
+        // Because jne is a conditional branch (has a fallthrough path), the cave MUST contain
+        // the jump-back to hook.return_to!
+        FAKE.with(|m| {
+            let cave_bytes = m.bytes_at(0x100000, 40);
+            assert_eq!(cave_bytes[0], 0x90); // payload
+            // Verify there is an absolute jump-back (0xFF, 0x25) after the relocated stolen block
+            let has_jmp_back = cave_bytes.windows(2).any(|w| w == [0xFF, 0x25]);
+            assert!(has_jmp_back, "cave must contain jump-back for conditional branch fallthrough");
+        });
+    }
+
+    #[test]
     fn install_relative_jump_5byte_patch() {
         let target = 0x100005u64; // Close to fake_alloc 0x100000
         let seed = [0x48, 0x2B, 0x41, 0x10, 0x48, 0xC1, 0xF8, 0x03, 0xC3]; // 9 bytes (sub; sar; ret)
@@ -320,6 +361,27 @@ mod tests {
             // Remaining 3 bytes in the 8-byte patch window must be NOP padded (0x90)
             assert_eq!(&patched[5..8], &[0x90, 0x90, 0x90]);
         });
+    }
+
+    #[test]
+    fn install_double_hook_fails_with_error() {
+        let target = 0x5000u64;
+        let seed = [0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x90, 0x90];
+        fake_write(target, &seed).unwrap();
+
+        let kind = HookKind::Trampoline {
+            payload: vec![0x90],
+            jump: JumpStyle::Absolute,
+        };
+        // First install succeeds
+        let hook1 = install(target, kind.clone(), fake_read, fake_write, fake_alloc);
+        assert!(hook1.is_ok());
+
+        // Second install on the already-hooked site MUST fail
+        let hook2 = install(target, kind, fake_read, fake_write, fake_alloc);
+        assert!(hook2.is_err());
+        let err_msg = hook2.unwrap_err();
+        assert!(err_msg.contains("already hooked"), "error message was: {err_msg}");
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub enum Event {
     CheatAdded { cheat: OverlayCheatDto },
     /// A cheat's toggle state changed.
     CheatToggled { id: u64, enabled: bool },
+    /// A button cheat or action was triggered (e.g. from in-game overlay).
+    CheatTriggered { id: u64 },
     /// A cheat's value or pinned target changed.
     CheatValueChanged { id: u64, value_str: String, pinned_bytes: Option<Vec<u8>> },
     /// A cheat was removed from the session.
@@ -39,6 +41,8 @@ pub enum Event {
     ActivityLogged { message: String },
     /// Remote request to show/hide the standalone GUI window ("show" / "hide" / "toggle").
     WindowCommand { command: String },
+    /// Injected DLL overlay is initialized and ready to receive cheats.
+    OverlayReady,
 }
 
 /// Asynchronous push notification types emitted by the injected DLL.
@@ -302,7 +306,7 @@ pub enum Response {
 }
 
 /// A serialized cheat representation sent to the injected in-game overlay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OverlayCheatDto {
     pub id: u64,
     pub label: String,
@@ -310,6 +314,7 @@ pub struct OverlayCheatDto {
     pub kind_str: String, // "toggle", "value", "button"
     pub enabled: bool,
     pub current_value: Option<String>,
+    pub group: Option<String>,
     pub hotkey: Option<String>,
     pub pinned_bytes: Option<Vec<u8>>,
 }

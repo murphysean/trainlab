@@ -28,78 +28,181 @@ static GLOBAL_CLIENT: Mutex<Option<(String, u16, IpcClient)>> = Mutex::new(None)
 
 impl IpcClient {
     pub fn connect(host: String, port: u16, session: Option<SharedSession>) -> Result<Self, String> {
+        use std::io::{Read, Write};
+        use std::net::ToSocketAddrs;
+        use std::collections::HashMap;
+
         let (tx, rx) = std::sync::mpsc::channel::<(u64, Request, oneshot::Sender<Response>)>();
         let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Event>();
         let target_addr = format!("{host}:{port}");
 
-        std::thread::spawn(move || {
-            use std::io::{Read, Write};
-            use std::net::ToSocketAddrs;
+        // If a session was provided, spawn an autonomous outbound bus subscriber
+        // to forward CheatUpdated / Sync events and respond to OverlayReady
+        if let Some(s) = &session {
+            let session_clone = s.clone();
+            let evt_tx_clone = evt_tx.clone();
+            let mut bus_rx = if let Ok(s_guard) = s.lock() {
+                s_guard.event_bus().subscribe()
+            } else {
+                return Err("session lock poisoned".into());
+            };
 
-            while let Ok((id, req, resp_tx)) = rx.recv() {
-                // Drain any pending outbound events to send along with this request
-                let mut pending_events = Vec::new();
-                while let Ok(evt) = evt_rx.try_recv() {
-                    pending_events.push(evt);
-                }
-
-                let mut resp_opt: Option<Response> = None;
-                if let Ok(mut addrs) = target_addr.to_socket_addrs()
-                    && let Some(sock_addr) = addrs.next()
-                        && let Ok(mut stream) = std::net::TcpStream::connect_timeout(&sock_addr, Duration::from_millis(500)) {
-                            let _ = stream.set_nodelay(true);
-                            let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
-                            let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
-
-                            // 1. Send any pending broadcast events
-                            for evt in pending_events {
-                                let evt_msg = Message::Event(evt);
-                                if let Ok(frame) = protocol::encode(&evt_msg) {
-                                    let _ = stream.write_all(&frame);
-                                }
+            std::thread::Builder::new()
+                .name("trainlab-ipc-bus-forwarder".into())
+                .spawn(move || {
+                    while let Ok(bus_event) = bus_rx.blocking_recv() {
+                        match bus_event {
+                            trainlab_core::event::BusEvent::Protocol(Event::OverlayReady) => {
+                                // Overlay signaled readiness: REST-style push initial complete cheat set
+                                let cheats = if let Ok(s_guard) = session_clone.lock() {
+                                    s_guard.export_overlay_cheats()
+                                } else {
+                                    Vec::new()
+                                };
+                                let _ = evt_tx_clone.send(Event::SyncCheats { cheats });
                             }
+                            trainlab_core::event::BusEvent::Session(trainlab_core::event::SessionEvent::CheatUpdated { .. }) => {
+                                // Incremental sync whenever cheats change
+                                let cheats = if let Ok(s_guard) = session_clone.lock() {
+                                    s_guard.export_overlay_cheats()
+                                } else {
+                                    Vec::new()
+                                };
+                                let _ = evt_tx_clone.send(Event::SyncCheats { cheats });
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .ok();
+        }
 
-                            // 2. Send the actual correlated request
-                            let msg = Message::Request { id, req };
-                            if let Ok(frame) = protocol::encode(&msg)
-                                && stream.write_all(&frame).is_ok() {
-                                    // Read responses / events until we get our response
-                                    while let Ok(len_buf) = read_exact_array::<4>(&mut stream) {
-                                        let len = u32::from_le_bytes(len_buf) as usize;
-                                        if len > 0 && len <= 64 * 1024 * 1024 {
-                                            let mut body = vec![0u8; len];
-                                            if stream.read_exact(&mut body).is_ok() {
-                                                let mut full = Vec::with_capacity(4 + len);
-                                                full.extend_from_slice(&len_buf);
-                                                full.extend_from_slice(&body);
-                                                if let Ok(incoming) = protocol::decode::<Message>(&full) {
-                                                    match incoming {
-                                                        Message::Response { id: resp_id, resp } => {
-                                                            if resp_id == id {
-                                                                resp_opt = Some(resp);
-                                                                break;
-                                                            }
-                                                        }
-                                                        Message::Event(event) => {
-                                                            // Inbound event from DLL (e.g. controller toggle in overlay)!
-                                                            if let Some(s) = &session {
-                                                                handle_inbound_event(s, event);
-                                                            }
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                        }
+        // Spawn dedicated background socket supervisor and multiplexer thread
+        std::thread::Builder::new()
+            .name("trainlab-ipc-multiplexer".into())
+            .spawn(move || {
+                let mut pending_responses: HashMap<u64, oneshot::Sender<Response>> = HashMap::new();
+
+                loop {
+                    // Connect / Reconnect socket
+                    let mut stream = match target_addr.to_socket_addrs() {
+                        Ok(mut addrs) => {
+                            if let Some(sock_addr) = addrs.next() {
+                                match std::net::TcpStream::connect_timeout(&sock_addr, Duration::from_millis(1000)) {
+                                    Ok(s) => s,
+                                    Err(_) => {
+                                        std::thread::sleep(Duration::from_millis(200));
+                                        continue;
                                     }
                                 }
+                            } else {
+                                std::thread::sleep(Duration::from_millis(500));
+                                continue;
+                            }
                         }
-                let resp = resp_opt.unwrap_or_else(|| Response::Error {
-                    message: "IPC request failed / timeout".into(),
-                });
-                let _ = resp_tx.send(resp);
-            }
-        });
+                        Err(_) => {
+                            std::thread::sleep(Duration::from_millis(500));
+                            continue;
+                        }
+                    };
+
+                    let _ = stream.set_nodelay(true);
+                    let mut reader_stream = match stream.try_clone() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+
+                    // Channel to receive frames from the inbound reader thread
+                    let (inbound_tx, inbound_rx) = std::sync::mpsc::channel::<Message>();
+
+                    // Spawn dedicated inbound reader thread on this TCP connection
+                    let session_for_inbound = session.clone();
+                    std::thread::Builder::new()
+                        .name("trainlab-ipc-inbound".into())
+                        .spawn(move || {
+                            while let Ok(len_buf) = read_exact_array::<4>(&mut reader_stream) {
+                                let len = u32::from_le_bytes(len_buf) as usize;
+                                if len == 0 || len > 64 * 1024 * 1024 {
+                                    break;
+                                }
+                                let mut body = vec![0u8; len];
+                                if reader_stream.read_exact(&mut body).is_err() {
+                                    break;
+                                }
+                                let mut full = Vec::with_capacity(4 + len);
+                                full.extend_from_slice(&len_buf);
+                                full.extend_from_slice(&body);
+                                if let Ok(msg) = protocol::decode::<Message>(&full) {
+                                    match &msg {
+                                        Message::Event(evt) => {
+                                            // Publish directly onto the Session EventBus
+                                            if let Some(s) = &session_for_inbound
+                                                && let Ok(s_guard) = s.lock() {
+                                                    s_guard.publish_event(trainlab_core::event::BusEvent::Protocol(evt.clone()));
+                                                }
+                                        }
+                                        Message::Response { .. } => {
+                                            if inbound_tx.send(msg).is_err() {
+                                                break;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        })
+                        .ok();
+
+                    // Main write & dispatch loop for this active stream
+                    'stream_loop: loop {
+                        // 1. Drain and write any pending outbound events (from GUI -> DLL)
+                        while let Ok(evt) = evt_rx.try_recv() {
+                            let evt_msg = Message::Event(evt);
+                            if let Ok(frame) = protocol::encode(&evt_msg)
+                                && stream.write_all(&frame).is_err() {
+                                    break 'stream_loop;
+                                }
+                        }
+
+                        // 2. Process correlated responses from reader thread
+                        while let Ok(msg) = inbound_rx.try_recv() {
+                            if let Message::Response { id, resp } = msg
+                                && let Some(sender) = pending_responses.remove(&id) {
+                                    let _ = sender.send(resp);
+                                }
+                        }
+
+                        // 3. Receive outbound requests with non-blocking try_recv / short timeout
+                        match rx.recv_timeout(Duration::from_millis(10)) {
+                            Ok((id, req, resp_tx)) => {
+                                pending_responses.insert(id, resp_tx);
+                                let msg = Message::Request { id, req };
+                                if let Ok(frame) = protocol::encode(&msg) {
+                                    if stream.write_all(&frame).is_err() {
+                                        if let Some(sender) = pending_responses.remove(&id) {
+                                            let _ = sender.send(Response::Error { message: "IPC write failed".into() });
+                                        }
+                                        break 'stream_loop;
+                                    }
+                                } else if let Some(sender) = pending_responses.remove(&id) {
+                                    let _ = sender.send(Response::Error { message: "protocol encode error".into() });
+                                }
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                // Channel dropped, shut down
+                                return;
+                            }
+                        }
+                    }
+
+                    // On stream disconnect, fail remaining pending responses
+                    for (_, sender) in pending_responses.drain() {
+                        let _ = sender.send(Response::Error { message: "IPC socket disconnected".into() });
+                    }
+                }
+            })
+            .map_err(|e| format!("failed to spawn IPC multiplexer thread: {e}"))?;
 
         Ok(Self { tx, event_tx: evt_tx })
     }
@@ -112,7 +215,7 @@ impl IpcClient {
             .map_err(|e| format!("IPC mailbox send failed: {e}"))?;
         
         let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_millis(2000) {
+        while start.elapsed() < Duration::from_millis(2500) {
             match resp_rx.try_recv() {
                 Ok(resp) => return Ok(resp),
                 Err(oneshot::error::TryRecvError::Empty) => {
@@ -136,33 +239,6 @@ fn read_exact_array<const N: usize>(stream: &mut std::net::TcpStream) -> std::io
     let mut buf = [0u8; N];
     stream.read_exact(&mut buf)?;
     Ok(buf)
-}
-
-fn handle_inbound_event(session: &SharedSession, event: Event) {
-    match event {
-        Event::CheatToggled { id, enabled } => {
-            if let Ok(mut s) = session.lock() {
-                s.set_cheat_toggle(id, enabled);
-                s.log_activity("OVERLAY", format!("in-game overlay toggled cheat #{id} -> {enabled}"));
-            }
-        }
-        Event::CheatValueChanged { id, value_str, .. } => {
-            if let Ok(mut s) = session.lock() {
-                s.log_activity("OVERLAY", format!("in-game overlay adjusted cheat #{id} value -> {value_str}"));
-            }
-        }
-        Event::OverlayVisibilityChanged { visible } => {
-            if let Ok(mut s) = session.lock() {
-                s.log_activity("OVERLAY", format!("overlay visibility changed -> {visible}"));
-            }
-        }
-        Event::WindowCommand { command } => {
-            if let Ok(mut s) = session.lock() {
-                s.request_window_cmd(&command);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Send a request to the DLL listener at `(host, port)` via the single multiplexed channel.

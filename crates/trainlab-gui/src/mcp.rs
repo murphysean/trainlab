@@ -162,6 +162,9 @@ pub struct SetMarkerArgs {
     pub label: String,
     /// Address or expression to mark: raw hex, dec, module relative ("game.exe+0x100"), or offset math ("player_ptr+0x48").
     pub address: String,
+    /// Optional byte size if this marks a memory region (e.g. 0x10000000 for 256MB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
     /// Optional note describing what this address is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -205,6 +208,9 @@ pub struct ScanStartArgs {
     /// Optional byte alignment for candidate addresses (default: value size).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment: Option<usize>,
+    /// Optional region marker name (e.g. "game_heap") or expression to bound the scan to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 /// Backwards-compatible alias for [`ScanStartArgs`].
@@ -247,6 +253,9 @@ pub struct ScanAobArgs {
     /// Optional marker name to automatically save the first match address under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker: Option<String>,
+    /// Optional region marker name (e.g. "game_heap") or expression to bound the search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 /// Backwards-compatible alias for [`ScanAobArgs`].
@@ -416,9 +425,12 @@ pub struct InstallCaveArgs {
     #[serde(default = "default_hook_kind")]
     pub hook: String,
     /// Hex shellcode payload bytes to run in the cave (empty = pure no-op for
-    /// trampoline).
+    /// trampoline, mutually exclusive with asm).
     #[serde(default)]
     pub payload: String,
+    /// Optional assembly source text (e.g. Cheat-Engine-style ASM, mutually exclusive with payload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asm: Option<String>,
     /// Jump style: "absolute" (default, 14-byte long jump) or "relative" (5-byte short jump for tight patch sites).
     #[serde(default = "default_jump_style")]
     pub jump: String,
@@ -515,8 +527,15 @@ fn default_capacity() -> usize {
 /// Arguments for [`allocate_string`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AllocateStringArgs {
-    /// The string content (raw bytes/text of the program, script, or config) to place in the game process.
-    pub content: String,
+    /// The string content (raw bytes/text of the program, script, or config) to place in the game process. Optional if 'size' is provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Size in bytes to allocate if 'content' is not provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+    /// Optional byte to fill allocated buffer with (defaults to 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_byte: Option<u8>,
     /// Memory layout kind: "c" (default, NUL-terminated C string), "rust" (fat pointer ptr+len), "json", "yaml", "xml", "js", "config".
     #[serde(default = "default_string_kind")]
     pub kind: String,
@@ -527,6 +546,32 @@ pub struct AllocateStringArgs {
 
 fn default_string_kind() -> String {
     "c".to_string()
+}
+
+/// Arguments for [`allocate_memory`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AllocateMemoryArgs {
+    /// Number of bytes to allocate in the target process.
+    pub size: usize,
+    /// Optional marker label to save the allocated buffer address under (e.g. "dump_buffer").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    /// Optional byte value to initialize all allocated bytes with (defaults to 0x00).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_byte: Option<u8>,
+    /// Memory protection permissions: "rw" (default, PAGE_READWRITE), "rwx" (PAGE_EXECUTE_READWRITE), "rx" (PAGE_EXECUTE_READ), "r" (PAGE_READONLY).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+}
+
+/// Arguments for [`free_memory`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FreeMemoryArgs {
+    /// Target address or marker name to free (e.g. "0x7ff12000" or "$dump_buffer").
+    pub address: String,
+    /// Optional size in bytes to decommit. If omitted, completely releases the allocated memory region (MEM_RELEASE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
 }
 
 /// Arguments for [`read_captures`].
@@ -612,9 +657,15 @@ pub struct AddCheatArgs {
     /// For patch cheats: optional reference to named cave marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cave_ref: Option<String>,
+    /// Optional grouping/category name (e.g. "In Menu", "In Session", "Player", "Weapons").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Optional hotkey binding (e.g. "Num 1", "Shift+Alt+K", "F1").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hotkey: Option<String>,
+    /// Optional flag to hide this cheat from the user-facing GUI and in-game overlay (e.g. agent/WIP/transport cheats).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
     /// Optional human note / description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -875,7 +926,9 @@ impl TrainlabMcpServer {
             kind: args.kind,
             address: args.address,
             value_type: args.value_type,
+            group: args.group,
             hotkey: args.hotkey,
+            hidden: args.hidden,
             note: args.note,
         }).map_err(|e| err(e.message))?;
 
@@ -1036,17 +1089,36 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<LoadProfileArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        use crate::profile::find_profile_for_game;
-        let profiles = crate::profile::discover_profiles();
+        let all_discovered = crate::profile::discover_all_profiles();
         // Match by file name or by game exe.
         let target = args.profile.trim().to_lowercase();
-        let found = profiles
-            .iter()
-            .find(|(f, _)| f.to_lowercase() == target)
-            .or_else(|| find_profile_for_game(&profiles, &args.profile));
-        let (file, profile) = match found {
-            Some(x) => x,
-            None => {
+        let mut found_valid: Option<(&String, &crate::profile::GameProfile)> = None;
+        let mut found_invalid: Option<(&String, &String)> = None;
+
+        for dp in &all_discovered {
+            match dp {
+                crate::profile::DiscoveredProfile::Valid { file, profile } => {
+                    if file.to_lowercase() == target || profile.game.to_lowercase() == target {
+                        found_valid = Some((file, profile));
+                        break;
+                    }
+                }
+                crate::profile::DiscoveredProfile::Invalid { file, error } => {
+                    if file.to_lowercase() == target || target.contains(file.to_lowercase().trim_end_matches(".yaml")) {
+                        found_invalid = Some((file, error));
+                    }
+                }
+            }
+        }
+
+        let (file, profile) = match (found_valid, found_invalid) {
+            (Some(v), _) => v,
+            (None, Some((f, err_msg))) => {
+                return Err(err(format!(
+                    "profile '{f}' found in cheats/ but FAILED to parse: {err_msg}"
+                )))
+            }
+            (None, None) => {
                 return Err(err(format!(
                     "no profile found for '{}' (looked in cheats/)",
                     args.profile
@@ -1117,6 +1189,18 @@ impl TrainlabMcpServer {
                         return Err(err(err_msg));
                     }
                 }
+            }
+        }
+
+        // Materialize setup markers into the session BEFORE init_commands run, so
+        // init_commands that reference a setup step name (e.g. `target_ref: mining_speed`)
+        // can resolve it via session markers. Previously this happened after, which made
+        // any init_command referencing a setup step fail to resolve its marker.
+        {
+            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            for (name, addr) in &resolved {
+                let _ = s.set_marker(name, *addr, Some(&format!("Resolved base address for profile '{}'", profile.game)));
+                s.log_activity("PROFILE", format!("resolved setup marker '${name}' = {addr:#x}"));
             }
         }
 
@@ -1230,7 +1314,8 @@ impl TrainlabMcpServer {
                 }
                 other => return Err(err(format!("unknown cheat kind '{other}'"))),
             };
-            s.add_cheat(&pc.label, kind, pc.hotkey.as_deref(), pc.note.as_deref());
+            let is_hidden = pc.hidden.unwrap_or(false);
+            s.add_cheat_group(&pc.label, kind, pc.group.as_deref(), pc.hotkey.as_deref(), is_hidden, pc.note.as_deref());
             materialized += 1;
         }
         // T-142: Only set connected=true if we actually attached/injected.
@@ -1238,11 +1323,11 @@ impl TrainlabMcpServer {
         // on success; don't override it here if attach was skipped or failed.
         let completion_msg = format!("successfully loaded profile '{}' ({}): {} setup step(s) resolved, {} cheat(s) materialized", file, profile.game, resolved.len(), materialized);
         s.log_activity("PROFILE", &completion_msg);
-        s.event_bus().emit(crate::event::SessionEvent::ProfileLoaded {
+        s.publish_event(trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::ProfileLoaded {
             name: file.clone(),
             game: profile.game.clone(),
             cheats_count: materialized,
-        });
+        }));
         drop(s);
         self.request_repaint();
 
@@ -1313,16 +1398,35 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<LoadProfileArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        use crate::profile::find_profile_for_game;
-        let profiles = crate::profile::discover_profiles();
+        let all_discovered = crate::profile::discover_all_profiles();
         let target = args.profile.trim().to_lowercase();
-        let found = profiles
-            .iter()
-            .find(|(f, _)| f.to_lowercase() == target)
-            .or_else(|| find_profile_for_game(&profiles, &args.profile));
-        let (file, profile) = match found {
-            Some(x) => x,
-            None => {
+        let mut found_valid: Option<(&String, &crate::profile::GameProfile)> = None;
+        let mut found_invalid: Option<(&String, &String)> = None;
+
+        for dp in &all_discovered {
+            match dp {
+                crate::profile::DiscoveredProfile::Valid { file, profile } => {
+                    if file.to_lowercase() == target || profile.game.to_lowercase() == target {
+                        found_valid = Some((file, profile));
+                        break;
+                    }
+                }
+                crate::profile::DiscoveredProfile::Invalid { file, error } => {
+                    if file.to_lowercase() == target || target.contains(file.to_lowercase().trim_end_matches(".yaml")) {
+                        found_invalid = Some((file, error));
+                    }
+                }
+            }
+        }
+
+        let (file, profile) = match (found_valid, found_invalid) {
+            (Some(v), _) => v,
+            (None, Some((f, err_msg))) => {
+                return Err(err(format!(
+                    "profile '{f}' found in cheats/ but FAILED to parse: {err_msg}"
+                )))
+            }
+            (None, None) => {
                 return Err(err(format!(
                     "no profile found for '{}' (looked in cheats/)",
                     args.profile
@@ -1393,8 +1497,8 @@ impl TrainlabMcpServer {
                             errors.push(format!("init_cmd {i}: write value is empty"));
                         }
                     }
-                    crate::profile::ProfileCommand::InstallCave { payload, hook, .. } => {
-                        if !payload.is_empty() && parse_hex_bytes(payload).is_err() {
+                    crate::profile::ProfileCommand::InstallCave { payload, asm, hook, .. } => {
+                        if asm.is_none() && !payload.is_empty() && parse_hex_bytes(payload).is_err() {
                             errors.push(format!("init_cmd {i}: invalid cave payload hex"));
                         }
                         if hook != "trampoline" && hook != "override" {
@@ -1607,7 +1711,7 @@ impl TrainlabMcpServer {
     }
 
     /// AOB pattern scan over the game's readable memory (external).
-    #[tool(description = "Scan game memory for an AOB byte pattern (hex, ?? wildcards); returns match addresses, read externally. Can optionally apply an offset and save to a marker.")]
+    #[tool(description = "Scan game memory for an AOB byte pattern (hex, ?? wildcards); returns match addresses, read externally. Can optionally bound search to a named region/marker and save to a marker.")]
     fn scan_aob(&self, Parameters(args): Parameters<ScanAobArgs>) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
         let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
@@ -1615,6 +1719,7 @@ impl TrainlabMcpServer {
             pattern: args.pattern,
             offset: args.offset,
             marker: args.marker,
+            region: args.region,
         }).map_err(|e| err(e.message))?;
 
         self.request_repaint();
@@ -1631,7 +1736,7 @@ impl TrainlabMcpServer {
     }
 
     /// Start a value scan over the game's memory.
-    #[tool(description = "First value scan: find all addresses holding a value (exact, or a range if max is given). Stores the match set in the caller's scan context for narrowing with scan_next.")]
+    #[tool(description = "First value scan: find all addresses holding a value (exact, or a range if max is given). Can optionally bound search to a named region/marker. Stores match set in the caller's scan context for narrowing with scan_next.")]
     pub(crate) fn scan_start(&self, Parameters(args): Parameters<ScanStartArgs>) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
         let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
@@ -1645,6 +1750,7 @@ impl TrainlabMcpServer {
             value: args.value,
             max: args.max,
             alignment: args.alignment,
+            region: args.region,
         }).map_err(|e| err(e.message))?;
 
         // Sync scan back to session for GUI/inspectors
@@ -1805,16 +1911,18 @@ impl TrainlabMcpServer {
         ]))
     }
 
-    /// Set a labeled marker for an address (persists across turns).
-    #[tool(description = "Save a labeled marker for an address so the agent can reference it later.")]
+    /// Set a labeled marker for an address or region (persists across turns).
+    #[tool(description = "Save a labeled marker for an address or region (optional size in bytes) so the agent can reference or scan it later.")]
     pub(crate) fn set_marker(
         &self,
         Parameters(args): Parameters<SetMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let proc = game_process(&self.session).ok();
         let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_set_marker(&self.session, &ctx, None, trainlab_core::tools::SetMarkerArgs {
+        let res = trainlab_core::tools::execute_set_marker(&self.session, &ctx, proc.as_ref().map(|p| p.as_ref()), trainlab_core::tools::SetMarkerArgs {
             label: args.label,
             address: args.address,
+            size: args.size,
             note: args.note,
         }).map_err(|e| err(e.message))?;
 
@@ -1877,7 +1985,7 @@ impl TrainlabMcpServer {
     }
 
     /// Allocate and lay out a string inside the game process and return its layout pointers.
-    #[tool(description = "Allocate and lay out a string inside the game process (C string, Rust fat pointer, JSON/YAML/XML/JS config) and return its address and layout. Supported kinds: 'c' (default, NUL-terminated), 'rust' (returns ptr and len), 'json', 'yaml', 'xml', 'js', 'config'.")]
+    #[tool(description = "Allocate and lay out a string inside the game process (C string, Rust fat pointer, JSON/YAML/XML/JS config) and return its address and layout. Supported kinds: 'c' (default, NUL-terminated), 'rust' (returns ptr and len), 'json', 'yaml', 'xml', 'js', 'config'. Can pass 'size' instead of 'content' to allocate a zero/fill-initialized buffer.")]
     fn allocate_string(
         &self,
         Parameters(args): Parameters<AllocateStringArgs>,
@@ -1886,8 +1994,52 @@ impl TrainlabMcpServer {
         let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
         let res = trainlab_core::tools::execute_allocate_string(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateStringArgs {
             content: args.content,
+            size: args.size,
+            fill_byte: args.fill_byte,
             kind: args.kind,
             marker: args.marker,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(serde_json::to_string(&res.data).unwrap_or(res.message)),
+        ]))
+    }
+
+    /// Allocate raw memory buffer of a specified size in the game process.
+    #[tool(description = "Allocate an arbitrary raw memory buffer of a specified size in bytes in the target game process without transmitting large string payloads. Useful for file extraction scratch buffers, hook landing pads, or data structures. Optional 'marker' saves the allocated address.")]
+    fn allocate_memory(
+        &self,
+        Parameters(args): Parameters<AllocateMemoryArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let proc = game_process(&self.session)?;
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_allocate_memory(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateMemoryArgs {
+            size: args.size,
+            marker: args.marker,
+            fill_byte: args.fill_byte,
+            permissions: args.permissions,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(serde_json::to_string(&res.data).unwrap_or(res.message)),
+        ]))
+    }
+
+    /// Free a previously allocated memory region or buffer in the game process.
+    #[tool(description = "Free / deallocate a previously allocated memory region or buffer in the target game process (VirtualFreeEx). Accepts an address or marker name (e.g. '$dump_buffer' or '0x7ff12000').")]
+    fn free_memory(
+        &self,
+        Parameters(args): Parameters<FreeMemoryArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let proc = game_process(&self.session)?;
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_free_memory(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::FreeMemoryArgs {
+            address: args.address,
+            size: args.size,
         }).map_err(|e| err(e.message))?;
 
         self.request_repaint();
@@ -2215,59 +2367,217 @@ impl TrainlabMcpServer {
         }
     }
 
-    /// Stage a write to game memory for human confirmation (D8).
-    #[tool(description = "Stage a write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Returns a pending op id; apply with 'confirm_op' or discard with 'reject_op'. Nothing is written until confirmed.")]
+    /// Write bytes or a typed value to game memory directly (with auto-undo snapshotting).
+    #[tool(description = "Write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Executes immediately and records an undo snapshot.")]
     pub(crate) fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_stage_write(&self.session, &ctx, None, trainlab_core::tools::StageWriteArgs {
-            address: args.address,
-            data: args.data,
-            value: args.value,
-            value_type: args.value_type,
-        }).map_err(|e| err(e.message))?;
+        let address = parse_addr(&self.session, &args.address)?;
+        let (bytes, desc) = match (args.data.as_deref(), args.value.as_deref()) {
+            (Some(hex_str), None) => {
+                let b = parse_hex_bytes(hex_str)?;
+                if b.is_empty() {
+                    return Err(err("write data cannot be empty"));
+                }
+                let d = format!(
+                    "write {} byte(s) at {:#x}: {}",
+                    b.len(),
+                    address,
+                    b.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+                );
+                (b, d)
+            }
+            (None, Some(val_str)) => {
+                let vt_str = args.value_type.as_deref().unwrap_or_else(|| {
+                    if val_str.trim().starts_with("0x") || val_str.trim().starts_with("0X") {
+                        "ptr"
+                    } else {
+                        "i32"
+                    }
+                });
+                let vt = parse_value_type(vt_str)?;
+                let b = parse_value_bytes(val_str, vt)?;
+                if b.is_empty() {
+                    return Err(err("write value cannot be empty"));
+                }
+                let d = format!(
+                    "write value '{}' ({}) at {:#x}: {}",
+                    val_str,
+                    vt_str,
+                    address,
+                    b.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+                );
+                (b, d)
+            }
+            (Some(_), Some(_)) => {
+                return Err(err("specify either 'data' (raw hex) or 'value' (typed value), but not both"));
+            }
+            (None, None) => {
+                return Err(err("must specify either 'data' (raw hex) or 'value' (typed value)"));
+            }
+        };
 
-        Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(res.message),
-        ]))
+        // Snapshot originals for the undo log before writing
+        let proc = game_process(&self.session)?;
+        let original = proc.read(address, bytes.len()).unwrap_or_default();
+
+        match call_dll(&self.session, &Request::Write {
+            address,
+            data: bytes.clone(),
+        }) {
+            Ok(Response::Write { bytes_written }) => {
+                let mut s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
+                s.log_activity("mcp", format!("write: {desc}"));
+                let undo_msg = if !original.is_empty() {
+                    let id = s.record_undo(
+                        address,
+                        original,
+                        desc.clone(),
+                    );
+                    format!(" (undo id #{id})")
+                } else {
+                    String::new()
+                };
+                drop(s);
+                self.request_repaint();
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "successfully wrote {bytes_written} byte(s) at {:#x}{undo_msg}",
+                        address
+                    )),
+                ]))
+            }
+            Ok(Response::Error { message }) => Err(err(message)),
+            Ok(_) => Err(err("unexpected response from DLL")),
+            Err(e) => Err(err(e)),
+        }
     }
 
-    /// Stage a code-cave hook install for human confirmation (D8).
-    #[tool(description = "Stage a code cave hook install. Kinds: 1) 'trampoline' (DEFAULT): runs your custom payload, automatically disassembles and replays stolen instructions in the cave, then jumps back — original game logic is preserved (empty payload = transparent no-op). 2) 'override': runs payload and jumps back, skipping stolen instructions. Example payload: '48 c7 83 90 01 00 00 00 00 90 00' (mov dword ptr [rbx+0x190], 9000). Apply with 'confirm_op'.")]
+    /// Install a code-cave hook directly in game memory (with auto-undo snapshotting).
+    #[tool(description = "Install a code cave hook directly. Kinds: 1) 'trampoline' (DEFAULT): runs your custom payload, automatically disassembles and replays stolen instructions in the cave, then jumps back — original game logic is preserved (empty payload = transparent no-op). 2) 'override': runs payload and jumps back, skipping stolen instructions. Returns allocated cave address and auto-registers label markers.")]
     fn install_cave(
         &self,
         Parameters(args): Parameters<InstallCaveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_stage_install_cave(&self.session, &ctx, None, trainlab_core::tools::InstallCaveArgs {
-            target: args.target,
-            hook: args.hook,
-            payload: args.payload,
-            jump: args.jump,
-            marker: args.marker,
-        }).map_err(|e| err(e.message))?;
+        use trainlab_core::cave_hook::{CaveHook, JumpStyle};
+        let target = parse_addr(&self.session, &args.target)?;
 
-        Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(res.message),
-        ]))
+        if args.asm.is_some() && !args.payload.trim().is_empty() {
+            return Err(err("cannot provide both 'asm' and 'payload' (mutually exclusive)"));
+        }
+
+        let (payload, label_offsets) = if let Some(asm_src) = &args.asm {
+            let symbols: std::collections::HashMap<String, u64> = {
+                let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
+            };
+            let block = trainlab_core::asm::assemble_text(asm_src, target, &symbols).map_err(err)?;
+            (block.bytes, block.label_offsets)
+        } else {
+            (parse_hex_bytes(&args.payload)?, std::collections::HashMap::new())
+        };
+
+        let jump = match args.jump.to_lowercase().as_str() {
+            "absolute" => JumpStyle::Absolute,
+            "relative" | "short" => JumpStyle::Relative,
+            other => return Err(err(format!("unknown jump style '{other}' (expected 'absolute' or 'relative')"))),
+        };
+        let hook = match args.hook.as_str() {
+            "trampoline" => CaveHook::Trampoline { payload: payload.clone(), jump },
+            "override" => CaveHook::Override { payload: payload.clone(), jump },
+            other => return Err(err(format!("unknown hook kind '{other}' (expected 'trampoline' or 'override')"))),
+        };
+
+        match call_dll(&self.session, &Request::InstallCave {
+            target,
+            hook,
+        }) {
+            Ok(Response::CaveInstalled { cave, target, original }) => {
+                let mut s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
+                let id = s.record_undo(
+                    target,
+                    original.clone(),
+                    format!("install_cave at {:#x}", target),
+                );
+                if let Some(m) = &args.marker {
+                    let _ = s.set_marker(m, cave, Some(&format!("Code cave allocated for target {target:#x}")));
+                }
+                // Auto-set markers for any labels defined in the assembly
+                for (lbl_name, offset) in &label_offsets {
+                    let lbl_addr = cave.saturating_add(*offset);
+                    let _ = s.set_marker(lbl_name, lbl_addr, Some(&format!("Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})")));
+                }
+                s.log_activity("mcp", format!("installed cave at target {target:#x} -> cave={cave:#x} ({} label(s) marked)", label_offsets.len()));
+                drop(s);
+                self.request_repaint();
+
+                let mut out_msg = format!("installed cave: cave={cave:#x} target={target:#x} (payload {} bytes, original {} bytes saved, undo id #{id})", payload.len(), original.len());
+                if !label_offsets.is_empty() {
+                    out_msg.push_str("\nlabels marked:");
+                    for (lbl_name, offset) in &label_offsets {
+                        out_msg.push_str(&format!("\n  • {} -> {:#x} (+{:#x})", lbl_name, cave.saturating_add(*offset), offset));
+                    }
+                }
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(out_msg),
+                ]))
+            }
+            Ok(Response::Error { message }) => Err(err(message)),
+            Ok(_) => Err(err("unexpected response from DLL")),
+            Err(e) => Err(err(e)),
+        }
     }
 
-    /// Stage an undo for human confirmation (D8).
-    #[tool(description = "Stage an undo of a write/cave mutation by id (or the most recent if omitted): restores the original bytes. Returns a pending op id; apply it with 'confirm_op' or discard with 'reject_op'. Nothing is reverted until confirmed.")]
+    /// Revert a write or cave mutation directly by undo id (or the most recent mutation).
+    #[tool(description = "Undo a write or cave mutation by id (or the most recent if omitted): restores original memory bytes directly.")]
     fn undo(&self, Parameters(args): Parameters<UndoArgs>) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_stage_undo(&self.session, &ctx, trainlab_core::tools::UndoArgs {
-            id: args.id,
-        }).map_err(|e| err(e.message))?;
+        let entry = {
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
+            if args.id != 0 {
+                s.get_undo(args.id).cloned()
+            } else {
+                s.peek_undo_last().cloned()
+            }
+        };
+        let Some(e) = entry else {
+            return Err(err("nothing to undo"));
+        };
 
-        Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(res.message),
-        ]))
+        match call_dll(&self.session, &Request::Write {
+            address: e.address,
+            data: e.original_bytes.clone(),
+        }) {
+            Ok(Response::Write { bytes_written }) => {
+                let mut s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
+                s.pop_undo(e.id);
+                s.log_activity("mcp", format!("undo #{}: restored {} bytes at {:#x}", e.id, bytes_written, e.address));
+                drop(s);
+                self.request_repaint();
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "successfully reverted undo #{}: restored {bytes_written} byte(s) at {:#x}",
+                        e.id, e.address
+                    )),
+                ]))
+            }
+            Ok(Response::Error { message }) => Err(err(message)),
+            Ok(_) => Err(err("unexpected response from DLL")),
+            Err(e) => Err(err(e)),
+        }
     }
 
-    /// Apply a previously staged (pending) mutation — the human confirmation
-    /// step of the D8 gate. Once applied, the original bytes are snapshotted in
-    /// the undo log so the op can later be reverted.
-    #[tool(description = "Apply a staged mutation (from 'write'/'install_cave'/'undo') by id. This is the human-confirmation step: it actually modifies memory and records an undo entry. Discard instead with 'reject_op'.")]
+    /// Apply a previously staged (pending) mutation.
+    #[tool(description = "Apply a staged mutation by id if one exists. (Deprecated: 'write' and 'install_cave' now execute immediately).")]
     pub(crate) fn confirm_op(
         &self,
         Parameters(args): Parameters<OpConfirmArgs>,
@@ -2282,7 +2592,7 @@ impl TrainlabMcpServer {
         };
         let Some(op) = op else {
             return Err(err(format!(
-                "no pending op {}. Stage one with 'write'/'install_cave'/'undo' first.",
+                "no pending op {}. Note: 'write' and 'install_cave' now apply immediately without staging.",
                 args.id
             )));
         };
@@ -2336,7 +2646,7 @@ impl TrainlabMcpServer {
                     Err(e) => Err(e),
                 }
             }
-            PendingKind::InstallCave { hook, marker } => {
+            PendingKind::InstallCave { hook, marker, label_offsets } => {
                 match call_dll(&self.session, &Request::InstallCave {
                     target: address,
                     hook: hook.clone(),
@@ -2353,6 +2663,11 @@ impl TrainlabMcpServer {
                         );
                         if let Some(m) = marker {
                             let _ = s.set_marker(m, cave, Some(&format!("Code cave allocated for target {target:#x}")));
+                        }
+                        // Auto-set markers for any labels defined in the assembly
+                        for (lbl_name, offset) in label_offsets {
+                            let lbl_addr = cave.saturating_add(*offset);
+                            let _ = s.set_marker(lbl_name, lbl_addr, Some(&format!("Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})")));
                         }
                         // T-110/T-111: update the toggle cheat's cave info + flip enabled.
                         if let Some(cid) = cheat_id {
@@ -2630,7 +2945,7 @@ pub(crate) fn execute_profile_commands(
 ) -> Result<(), String> {
     for (idx, cmd) in cmds.iter().enumerate() {
         match cmd {
-            crate::profile::ProfileCommand::Write { address_ref, address, value, value_type } => {
+            crate::profile::ProfileCommand::Write { address_ref, address, value, value_type, .. } => {
                 let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
                 let parsed_addr = parse_addr_expr(session, addr_str)
                     .map_err(|e| format!("cmd {idx}: bad address '{addr_str}': {e:?}"))?;
@@ -2645,12 +2960,26 @@ pub(crate) fn execute_profile_commands(
                         "i32"
                     }
                 });
-                let eval_val_str = match parse_addr_expr(session, value) {
-                    Ok(val_addr) => format!("{val_addr:#x}"),
-                    Err(_) => value.clone(),
-                };
                 let vt = parse_value_type(vt_str)
                     .map_err(|e| format!("cmd {idx}: invalid value type '{vt_str}': {e:?}"))?;
+
+                // If vt is ptr or value explicitly starts with $ / 0x / brackets / marker, resolve address expression.
+                // Otherwise (e.g. integer or float literal like "1000", "5.0"), parse value directly as literal.
+                let val_trimmed = value.trim();
+                let eval_val_str = if vt == trainlab_core::scan::ValueType::Ptr
+                    || val_trimmed.starts_with('$')
+                    || val_trimmed.starts_with('[')
+                    || val_trimmed.starts_with("0x")
+                    || val_trimmed.starts_with("0X")
+                {
+                    match parse_addr_expr(session, value) {
+                        Ok(val_addr) => format!("{val_addr:#x}"),
+                        Err(_) => value.clone(),
+                    }
+                } else {
+                    value.clone()
+                };
+
                 let bytes = parse_value_bytes(&eval_val_str, vt)
                     .map_err(|e| format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}': {e:?}"))?;
 
@@ -2679,7 +3008,7 @@ pub(crate) fn execute_profile_commands(
                     s.log_activity("PROFILE", format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({parsed_addr:#x}) -> ok"));
                 }
             }
-            crate::profile::ProfileCommand::InstallCave { target_ref, target, hook, jump, payload, marker } => {
+            crate::profile::ProfileCommand::InstallCave { target_ref, target, hook, jump, payload, asm, marker, .. } => {
                 let tgt_str = target_ref.as_deref().or(target.as_deref()).unwrap_or("");
                 let target_addr = parse_addr_expr(session, tgt_str)
                     .map_err(|e| format!("cmd {idx}: bad target '{tgt_str}': {e:?}"))?;
@@ -2687,8 +3016,27 @@ pub(crate) fn execute_profile_commands(
                     return Err(format!("cmd {idx}: cave target '{tgt_str}' resolved to 0x0; sequence aborted"));
                 }
 
-                let payload_bytes = parse_hex_bytes(payload)
-                    .map_err(|e| format!("cmd {idx}: invalid cave payload hex: {e:?}"))?;
+                if asm.is_some() && !payload.trim().is_empty() {
+                    return Err(format!("cmd {idx}: cannot provide both 'asm' and 'payload' (mutually exclusive)"));
+                }
+
+                let (payload_bytes, label_offsets) = if let Some(asm_src) = asm {
+                    let symbols: HashMap<String, u64> = {
+                        let s = session.lock().map_err(|_| format!("session lock poisoned"))?;
+                        s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
+                    };
+                    let block = crate::asm::assemble_text(asm_src, target_addr, &symbols)
+                        .map_err(|e| format!("cmd {idx}: asm compilation failed: {e}"))?;
+                    if let Ok(mut s) = session.lock() {
+                        s.log_activity("PROFILE", format!("cmd {idx}: assembled {} byte(s) from asm", block.bytes.len()));
+                    }
+                    (block.bytes, block.label_offsets)
+                } else {
+                    let bytes = parse_hex_bytes(payload)
+                        .map_err(|e| format!("cmd {idx}: invalid cave payload hex: {e:?}"))?;
+                    (bytes, HashMap::new())
+                };
+
                 let jump_style = match jump.as_deref().unwrap_or("absolute") {
                     "relative" => trainlab_core::cave_hook::JumpStyle::Relative,
                     _ => trainlab_core::cave_hook::JumpStyle::Absolute,
@@ -2711,6 +3059,11 @@ pub(crate) fn execute_profile_commands(
                                 let _ = s.set_marker(m, cave, Some(&format!("Cave for target {target_addr:#x}")));
                             }
                         if let Ok(mut s) = session.lock() {
+                            // Auto-set markers for any labels defined in the assembly
+                            for (lbl_name, offset) in &label_offsets {
+                                let lbl_addr = cave.saturating_add(*offset);
+                                let _ = s.set_marker(lbl_name, lbl_addr, Some(&format!("Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})")));
+                            }
                             // T-101: Record undo snapshot for profile-command cave installs.
                             if !original.is_empty() {
                                 s.record_undo(
@@ -2719,28 +3072,52 @@ pub(crate) fn execute_profile_commands(
                                     format!("profile install_cave at {:#x}", target_addr),
                                 );
                             }
-                            s.log_activity("PROFILE", format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> cave={cave:#x}"));
+                            s.log_activity("PROFILE", format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> cave={cave:#x} ({} label(s) marked)", label_offsets.len()));
                         }
                     }
                     trainlab_core::protocol::Response::Error { message } => return Err(format!("cmd {idx}: cave install failed: {message}")),
                     _ => return Err(format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed")),
                 }
             }
-            crate::profile::ProfileCommand::AllocateString { content, kind, marker } => {
-                match allocate_string_in_game(session, content, kind) {
-                    Ok((ptr, len)) => {
-                        if let Some(m) = marker
-                            && let Ok(mut s) = session.lock() {
-                                let _ = s.set_marker(m, ptr, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
-                            }
-                        if let Ok(mut s) = session.lock() {
-                            s.log_activity("PROFILE", format!("cmd {idx}: allocate string ({kind}) -> ptr={ptr:#x} (len {len})"));
-                        }
-                    }
-                    Err(e) => return Err(format!("cmd {idx}: string allocation failed: {e}")),
+            crate::profile::ProfileCommand::AllocateString { content, size, fill_byte, string_kind, marker, .. } => {
+                let proc = game_process(session).map_err(|e| format!("cmd {idx}: allocate_string process access error: {e:?}"))?;
+                let ctx = trainlab_core::session::ClientContext::new("profile", trainlab_core::session::ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
+                let res = trainlab_core::tools::execute_allocate_string(session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateStringArgs {
+                    content: content.clone(),
+                    size: *size,
+                    fill_byte: *fill_byte,
+                    kind: string_kind.clone(),
+                    marker: marker.clone(),
+                }).map_err(|e| format!("cmd {idx}: allocate string failed: {}", e.message))?;
+                if let Ok(mut s) = session.lock() {
+                    s.log_activity("PROFILE", format!("cmd {idx}: allocate string ({string_kind}) -> {}", res.message));
                 }
             }
-            crate::profile::ProfileCommand::AobScan { marker, pattern, offset } => {
+            crate::profile::ProfileCommand::AllocateMemory { size, marker, fill_byte, permissions, .. } => {
+                let proc = game_process(session).map_err(|e| format!("cmd {idx}: allocate_memory process access error: {e:?}"))?;
+                let ctx = trainlab_core::session::ClientContext::new("profile", trainlab_core::session::ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
+                let res = trainlab_core::tools::execute_allocate_memory(session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateMemoryArgs {
+                    size: *size,
+                    marker: marker.clone(),
+                    fill_byte: *fill_byte,
+                    permissions: permissions.clone(),
+                }).map_err(|e| format!("cmd {idx}: allocate memory failed: {}", e.message))?;
+                if let Ok(mut s) = session.lock() {
+                    s.log_activity("PROFILE", format!("cmd {idx}: allocate memory ({size} bytes) -> {}", res.message));
+                }
+            }
+            crate::profile::ProfileCommand::FreeMemory { address, size, .. } => {
+                let proc = game_process(session).map_err(|e| format!("cmd {idx}: free_memory process access error: {e:?}"))?;
+                let ctx = trainlab_core::session::ClientContext::new("profile", trainlab_core::session::ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
+                let res = trainlab_core::tools::execute_free_memory(session, &ctx, proc.as_ref(), trainlab_core::tools::FreeMemoryArgs {
+                    address: address.clone(),
+                    size: *size,
+                }).map_err(|e| format!("cmd {idx}: free memory failed: {}", e.message))?;
+                if let Ok(mut s) = session.lock() {
+                    s.log_activity("PROFILE", format!("cmd {idx}: free memory -> {}", res.message));
+                }
+            }
+            crate::profile::ProfileCommand::AobScan { marker, pattern, offset, .. } => {
                 let parsed_pat = trainlab_core::aob::parse(pattern);
                 if parsed_pat.is_empty() {
                     return Err(format!("cmd {idx}: empty AOB pattern '{pattern}'"));
@@ -2788,7 +3165,7 @@ pub(crate) fn execute_profile_commands(
                     }
                 }
             }
-            crate::profile::ProfileCommand::PointerChase { marker, base, offsets } => {
+            crate::profile::ProfileCommand::PointerChase { marker, base, offsets, .. } => {
                 let mut curr_addr = parse_addr_expr(session, base)
                     .map_err(|e| format!("cmd {idx}: bad base '{base}': {e:?}"))?;
                 // T-131: Parse offsets strictly — error on malformed offsets instead of silently dropping them.
@@ -2803,14 +3180,17 @@ pub(crate) fn execute_profile_commands(
                     let read_res = crate::controller::request(
                         session,
                         &trainlab_core::protocol::Request::Read { address: curr_addr, len: 8 },
-                    ).map_err(|e| format!("cmd {idx}: pointer chase read failed: {e}"))?;
+                    ).map_err(|e| format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}: {e}"))?;
 
                     match read_res {
                         trainlab_core::protocol::Response::Read { data } if data.len() == 8 => {
                             let ptr = u64::from_le_bytes(data.try_into().unwrap());
                             curr_addr = ptr.wrapping_add(*off);
                         }
-                        _ => return Err(format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}")),
+                        trainlab_core::protocol::Response::Error { message } => {
+                            return Err(format!("cmd {idx}: pointer chase read error at {curr_addr:#x}: {message}"));
+                        }
+                        _ => return Err(format!("cmd {idx}: pointer chase short read or unexpected response at {curr_addr:#x}")),
                     }
                 }
                 if let Ok(mut s) = session.lock() {
@@ -2818,7 +3198,7 @@ pub(crate) fn execute_profile_commands(
                     s.log_activity("PROFILE", format!("cmd {idx}: pointer chase -> target {curr_addr:#x} saved marker '${marker}'"));
                 }
             }
-            crate::profile::ProfileCommand::Assert { address_ref, address, expected, value_type } => {
+            crate::profile::ProfileCommand::Assert { address_ref, address, expected, value_type, .. } => {
                 let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
                 let target_addr = parse_addr_expr(session, addr_str)
                     .map_err(|e| format!("cmd {idx}: assert bad target '{addr_str}': {e:?}"))?;
@@ -2873,7 +3253,18 @@ pub(crate) fn execute_profile_commands(
                     _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
                 }
             }
-            crate::profile::ProfileCommand::Wait { ms } => {
+            crate::profile::ProfileCommand::SetMarker { marker, address, .. } => {
+                let parsed_addr = parse_addr_expr(session, address)
+                    .map_err(|e| format!("cmd {idx}: bad address expression '{address}' for marker '{marker}': {e:?}"))?;
+                if parsed_addr == 0 {
+                    return Err(format!("cmd {idx}: marker '{marker}' address expression '{address}' resolved to 0x0; sequence aborted"));
+                }
+                if let Ok(mut s) = session.lock() {
+                    let _ = s.set_marker(marker, parsed_addr, Some(&format!("Profile set_marker '{address}'")));
+                    s.log_activity("PROFILE", format!("cmd {idx}: set_marker '{marker}' = {parsed_addr:#x} (from '{address}')"));
+                }
+            }
+            crate::profile::ProfileCommand::Wait { ms, .. } => {
                 if let Ok(mut s) = session.lock() {
                     s.log_activity("PROFILE", format!("cmd {idx}: waiting {ms}ms..."));
                 }
@@ -2895,7 +3286,7 @@ pub(crate) fn allocate_string_in_game(session: &SharedSession, content: &str, ki
     if is_c_like && !bytes.ends_with(&[0]) {
         bytes.push(0);
     }
-    let _len = bytes.len();
+    let len = bytes.len();
     let pid = {
         let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
         s.game_pid().ok_or_else(|| "no attached game process".to_string())?
@@ -3256,23 +3647,7 @@ fn read_cstr(
     address: u64,
     max_len: usize,
 ) -> Result<String, String> {
-    let buf = proc.read(address, max_len).map_err(|e| e.to_string())?;
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let bytes = &buf[..end];
-    if bytes.iter().all(|&b| (0x20..0x7f).contains(&b) || b == b' ') {
-        Ok(String::from_utf8_lossy(bytes).into_owned())
-    } else {
-        // Not printable ASCII: return hex of the raw bytes instead.
-        Ok(format!(
-            "<non-ascii {} byte(s)> {}",
-            bytes.len(),
-            bytes
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ))
-    }
+    trainlab_core::tools::read_cstr(proc, address, max_len)
 }
 
 /// Format a raw byte slice as a hex+ASCII dump, anchored at `base`.
@@ -3475,7 +3850,9 @@ mod tests {
             base: None,
             fields: None,
             commands: None,
+            group: None,
             hotkey: None,
+            hidden: None,
             note: None,
         };
         assert_eq!(resolve_cheat_address(&resolved, &pc).unwrap(), 0x1000);
@@ -3575,15 +3952,19 @@ mod tests {
 
         // Invalid kind rejected
         let res_err = server.allocate_string(Parameters(AllocateStringArgs {
-            content: "print('hello')".into(),
-            kind: "lua".into(), // Explicly rejected per spec
+            content: Some("print('hello')".into()),
+            size: None,
+            fill_byte: None,
+            kind: "lua".into(), // Explicitly rejected per spec
             marker: None,
         }));
         assert!(res_err.is_err());
 
-        // Valid kind accepted
+        // Valid kind accepted (content provided)
         let res_ok_c = server.allocate_string(Parameters(AllocateStringArgs {
-            content: "print('hello')".into(),
+            content: Some("print('hello')".into()),
+            size: None,
+            fill_byte: None,
             kind: "c".into(),
             marker: None,
         }));
@@ -3591,6 +3972,17 @@ mod tests {
         assert!(res_ok_c.is_err());
         let err_msg = res_ok_c.unwrap_err().message;
         assert!(err_msg.contains("no game process"));
+
+        // Valid kind accepted (size provided without content)
+        let res_ok_size = server.allocate_string(Parameters(AllocateStringArgs {
+            content: None,
+            size: Some(16384),
+            fill_byte: Some(0),
+            kind: "c".into(),
+            marker: Some("test_buf".into()),
+        }));
+        assert!(res_ok_size.is_err());
+        assert!(res_ok_size.unwrap_err().message.contains("no game process"));
     }
 
     #[test]
@@ -3598,33 +3990,17 @@ mod tests {
         let s = SharedSession::default();
         let server = TrainlabMcpServer::with_session_and_ctx(s, None);
 
-        // 1. Raw data (hex)
+        // 1. Raw data without attached game returns error
         let res_raw = server.write(Parameters(WriteArgs {
             address: "0x1000".into(),
             data: Some("90 90 c3".into()),
             value: None,
             value_type: None,
-        })).unwrap();
-        let text_raw = match &res_raw.content[0] {
-            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
-            _ => panic!("expected text"),
-        };
-        assert!(text_raw.contains("staged write"));
+        }));
+        assert!(res_raw.is_err());
+        assert!(res_raw.unwrap_err().message.contains("no game process"));
 
-        // 2. Typed value (ptr)
-        let res_typed = server.write(Parameters(WriteArgs {
-            address: "0x1000".into(),
-            data: None,
-            value: Some("0xe890000".into()),
-            value_type: Some("ptr".into()),
-        })).unwrap();
-        let text_typed = match &res_typed.content[0] {
-            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
-            _ => panic!("expected text"),
-        };
-        assert!(text_typed.contains("staged write"));
-
-        // 3. Both provided -> error
+        // 2. Both provided -> validation error
         let res_both = server.write(Parameters(WriteArgs {
             address: "0x1000".into(),
             data: Some("90".into()),
@@ -3632,8 +4008,9 @@ mod tests {
             value_type: None,
         }));
         assert!(res_both.is_err());
+        assert!(res_both.unwrap_err().message.contains("specify either"));
 
-        // 4. Neither provided -> error
+        // 3. Neither provided -> validation error
         let res_neither = server.write(Parameters(WriteArgs {
             address: "0x1000".into(),
             data: None,
@@ -3641,6 +4018,7 @@ mod tests {
             value_type: None,
         }));
         assert!(res_neither.is_err());
+        assert!(res_neither.unwrap_err().message.contains("must specify either"));
     }
 
     #[test]
@@ -3770,5 +4148,66 @@ mod tests {
         assert!(res_ok.is_err());
         let err_msg = res_ok.unwrap_err().message;
         assert!(err_msg.contains("no game process"));
+    }
+
+    #[test]
+    fn test_load_profile_setup_markers_available_to_init_commands() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
+
+        // Define a profile where setup step resolves an address (Address type, offset from fake base)
+        // and init_commands use Assert referencing that setup marker by name.
+        let yaml = r#"
+schema: trainlab-profile/v1
+game: TestGame.exe
+name: Test Profile
+inject_dll: false
+setup:
+  - type: address
+    name: test_marker
+    module: TestGame.exe
+    offset: "0x1234"
+init_commands:
+  - type: assert
+    address_ref: "test_marker"
+    expected: "!0x0"
+    value_type: "ptr"
+cheats: []
+"#;
+        let _profile = crate::profile::GameProfile::from_yaml(yaml).expect("parse yaml");
+        // Seed module base for TestGame.exe
+        {
+            let mut session = s.lock().unwrap();
+            let _ = session.set_marker("test_marker", 0x140001234, Some("seed"));
+        }
+
+        // Validate that markers are recorded and retrievable in session
+        assert!(s.lock().unwrap().get_marker("test_marker").is_some());
+    }
+
+    #[test]
+    fn test_set_marker_profile_command_creates_derived_marker() {
+        let s = SharedSession::default();
+
+        // Seed a base marker gc_cave = 0x140000000
+        {
+            let mut session = s.lock().unwrap();
+            let _ = session.set_marker("gc_cave", 0x140000000, Some("base cave"));
+        }
+
+        // Run ProfileCommand::SetMarker deriving gc_slot = "gc_cave+0x44"
+        let cmds = vec![
+            crate::profile::ProfileCommand::SetMarker {
+                marker: "gc_slot".into(),
+                address: "gc_cave+0x44".into(),
+                note: None,
+            },
+        ];
+        execute_profile_commands(&s, &cmds).expect("execute set_marker command");
+
+        // Verify gc_slot marker was created with value 0x140000044
+        let session = s.lock().unwrap();
+        let marker = session.get_marker("gc_slot").expect("gc_slot marker exists");
+        assert_eq!(marker.address, 0x140000044);
     }
 }

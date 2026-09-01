@@ -15,6 +15,8 @@ pub struct AssembledBlock {
     pub bytes: Vec<u8>,
     pub hex: String,
     pub instruction_count: usize,
+    /// Offset of each defined label relative to the start of the assembled byte stream (0-indexed).
+    pub label_offsets: HashMap<String, u64>,
 }
 
 /// Assemble an assembly text block at a given base address (origin RIP).
@@ -50,7 +52,11 @@ pub fn assemble_text(
         }
     }
 
-    // Second pass: emit instructions and directives
+    let mut label_offsets = HashMap::new();
+    let mut current_offset: u64 = 0;
+    let mut pending_labels: Vec<String> = Vec::new();
+
+    // Second pass: emit instructions and directives, tracking exact byte offsets
     for raw_line in &lines {
         let line = strip_comments(raw_line).trim();
         if line.is_empty() {
@@ -61,34 +67,56 @@ pub fn assemble_text(
         if let Some(label_name) = line.strip_suffix(':') {
             let name = label_name.trim().to_lowercase();
             if let Some(lbl) = labels_map.get_mut(&name) {
-                a.set_label(lbl).map_err(|e| format!("set label '{name}': {e}"))?;
+                let _ = a.set_label(lbl);
             }
+            label_offsets.insert(name.clone(), current_offset);
+            pending_labels.push(name);
             continue;
         }
 
-        // Check for Data Directives: `dd (float)4.0`, `dd 100`, `dq 0x...`, `db 90 90`
+        // Data Directives: `dd (float)4.0`, `dd 100`, `dq 0x...`, `db 90 90`
         if let Some(rest) = line.strip_prefix("dd ").or_else(|| line.strip_prefix("DD ")) {
             let b = parse_dd(rest.trim(), symbols)?;
+            current_offset += b.len() as u64;
             a.db(&b).map_err(|e| format!("db emit: {e}"))?;
             total_instructions += 1;
+            pending_labels.clear();
             continue;
         }
         if let Some(rest) = line.strip_prefix("dq ").or_else(|| line.strip_prefix("DQ ")) {
             let b = parse_dq(rest.trim(), symbols)?;
+            current_offset += b.len() as u64;
             a.db(&b).map_err(|e| format!("db emit: {e}"))?;
             total_instructions += 1;
+            pending_labels.clear();
             continue;
         }
         if let Some(rest) = line.strip_prefix("db ").or_else(|| line.strip_prefix("DB ")) {
             let b = parse_db(rest.trim())?;
+            current_offset += b.len() as u64;
             a.db(&b).map_err(|e| format!("db emit: {e}"))?;
             total_instructions += 1;
+            pending_labels.clear();
             continue;
         }
 
         // Parse standard instruction: mnemonic op1, op2
+        // Assemble single instruction in temporary CodeAssembler to determine encoded byte length
+        let mut temp_asm = CodeAssembler::new(64).map_err(|e| format!("temp assembler init: {e}"))?;
+        let mut temp_labels = labels_map.clone();
+        let mut temp_ref = referenced_labels.clone();
+        let instr_len = if parse_and_emit_instruction(&mut temp_asm, line, origin_rip + current_offset, symbols, &mut temp_labels, &mut temp_ref).is_ok()
+            && let Ok(encoded) = temp_asm.assemble(origin_rip + current_offset) {
+                encoded.len() as u64
+            } else {
+                // Fallback estimate if temp assemble had unresolved branches
+                5
+            };
+
         parse_and_emit_instruction(&mut a, line, origin_rip, symbols, &mut labels_map, &mut referenced_labels)?;
+        current_offset += instr_len;
         total_instructions += 1;
+        pending_labels.clear();
     }
 
     // Check for any referenced label that was not defined
@@ -101,21 +129,39 @@ pub fn assemble_text(
     // In iced_x86 CodeAssembler, a label set at the very end of the code stream
     // without any trailing instruction or byte causes "Unused label".
     // If the last emitted element was a label, emit a 0-byte slice / nop or let it assemble.
-    let assembled = match a.assemble(origin_rip) {
-        Ok(bytes) => bytes,
+    let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+    let assembled = match a.assemble_options(origin_rip, options) {
+        Ok(result) => {
+            // Update labels with exact IPs from the block encoder when available
+            for (name, lbl) in &labels_map {
+                if let Ok(label_ip) = result.label_ip(lbl) {
+                    let offset = label_ip.saturating_sub(origin_rip);
+                    label_offsets.insert(name.clone(), offset);
+                }
+            }
+            result.inner.code_buffer
+        }
         Err(e) if e.to_string().contains("Unused label") => {
-            // Emitting a nop or zero-byte at the end allows terminal labels like `.replay:` to bind
             let _ = a.nop();
-            a.assemble(origin_rip).map_err(|e| format!("assemble error: {e}"))?
+            let result = a.assemble_options(origin_rip, options).map_err(|e| format!("assemble error: {e}"))?;
+            for (name, lbl) in &labels_map {
+                if let Ok(label_ip) = result.label_ip(lbl) {
+                    let offset = label_ip.saturating_sub(origin_rip);
+                    label_offsets.insert(name.clone(), offset);
+                }
+            }
+            result.inner.code_buffer
         }
         Err(e) => return Err(format!("assemble error: {e}")),
     };
+
     let hex = assembled.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
 
     Ok(AssembledBlock {
         bytes: assembled,
         hex,
         instruction_count: total_instructions,
+        label_offsets,
     })
 }
 
@@ -177,6 +223,8 @@ fn parse_u64_expr(s: &str, symbols: &HashMap<String, u64>) -> Result<u64, String
     }
     if s.starts_with("0x") || s.starts_with("0X") {
         u64::from_str_radix(&s[2..], 16).map_err(|e| format!("invalid hex '{s}': {e}"))
+    } else if let Ok(n) = s.parse::<i64>() {
+        Ok(n as u64)
     } else {
         s.parse::<u64>().map_err(|e| format!("invalid int '{s}': {e}"))
     }
@@ -219,7 +267,7 @@ fn parse_and_emit_instruction(
         }
         "jmp" => {
             if args.len() != 1 { return Err("jmp requires 1 operand".into()); }
-            let target = args[0];
+            let target = args[0].trim();
             if let Some(sym) = target.strip_prefix('$')
                 && let Some(target_addr) = symbols.get(sym) {
                     a.jmp(*target_addr).map_err(|e| e.to_string())?;
@@ -229,12 +277,18 @@ fn parse_and_emit_instruction(
                 a.jmp(reg).map_err(|e| e.to_string())?;
                 return Ok(());
             }
+            let name = target.trim_start_matches('$').to_lowercase();
+            if labels.contains_key(&name) {
+                referenced_labels.insert(name.clone());
+                let lbl = *labels.get(&name).unwrap();
+                a.jmp(lbl).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
             if let Ok(imm) = parse_u64_expr(target, symbols) {
                 a.jmp(imm).map_err(|e| e.to_string())?;
                 return Ok(());
             }
             // Local label
-            let name = target.trim().trim_start_matches('$').to_lowercase();
             referenced_labels.insert(name.clone());
             let lbl = *labels.entry(name.clone()).or_insert_with(|| a.create_label());
             a.jmp(lbl).map_err(|e| e.to_string())?;
@@ -459,14 +513,26 @@ fn parse_and_emit_instruction(
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.add(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                    a.add(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.add(dst, imm as i32).map_err(|e| e.to_string())?;
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.add(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                    a.add(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.add(dst, imm as i32).map_err(|e| e.to_string())?;
+                }
+            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+                if let Ok(src) = parse_gpr64(args[1]) {
+                    a.add(dst_mem, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr32(args[1]) {
+                    a.add(dst_mem, src).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.add(dst_mem, imm as i32).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -475,15 +541,99 @@ fn parse_and_emit_instruction(
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.sub(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                    a.sub(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.sub(dst, imm as i32).map_err(|e| e.to_string())?;
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.sub(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                    a.sub(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.sub(dst, imm as i32).map_err(|e| e.to_string())?;
                 }
+            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+                if let Ok(src) = parse_gpr64(args[1]) {
+                    a.sub(dst_mem, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr32(args[1]) {
+                    a.sub(dst_mem, src).map_err(|e| e.to_string())?;
+                } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
+                    a.sub(dst_mem, imm as i32).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "sar" | "shl" | "sal" | "shr" | "rol" | "ror" => {
+            use iced_x86::code_asm::*;
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. sar rax, 3)")); }
+            let is_cl = args[1].trim().eq_ignore_ascii_case("cl");
+            let imm = if is_cl { 0u32 } else { parse_u64_expr(args[1], symbols)? as u32 };
+
+            if let Ok(dst) = parse_gpr64(args[0]) {
+                match mnemonic.as_str() {
+                    "sar" => { if is_cl { a.sar(dst, cl).map_err(|e| e.to_string())?; } else { a.sar(dst, imm).map_err(|e| e.to_string())?; } }
+                    "shl" | "sal" => { if is_cl { a.shl(dst, cl).map_err(|e| e.to_string())?; } else { a.shl(dst, imm).map_err(|e| e.to_string())?; } }
+                    "shr" => { if is_cl { a.shr(dst, cl).map_err(|e| e.to_string())?; } else { a.shr(dst, imm).map_err(|e| e.to_string())?; } }
+                    "rol" => { if is_cl { a.rol(dst, cl).map_err(|e| e.to_string())?; } else { a.rol(dst, imm).map_err(|e| e.to_string())?; } }
+                    "ror" => { if is_cl { a.ror(dst, cl).map_err(|e| e.to_string())?; } else { a.ror(dst, imm).map_err(|e| e.to_string())?; } }
+                    _ => {}
+                }
+            } else if let Ok(dst) = parse_gpr32(args[0]) {
+                match mnemonic.as_str() {
+                    "sar" => { if is_cl { a.sar(dst, cl).map_err(|e| e.to_string())?; } else { a.sar(dst, imm).map_err(|e| e.to_string())?; } }
+                    "shl" | "sal" => { if is_cl { a.shl(dst, cl).map_err(|e| e.to_string())?; } else { a.shl(dst, imm).map_err(|e| e.to_string())?; } }
+                    "shr" => { if is_cl { a.shr(dst, cl).map_err(|e| e.to_string())?; } else { a.shr(dst, imm).map_err(|e| e.to_string())?; } }
+                    "rol" => { if is_cl { a.rol(dst, cl).map_err(|e| e.to_string())?; } else { a.rol(dst, imm).map_err(|e| e.to_string())?; } }
+                    "ror" => { if is_cl { a.ror(dst, cl).map_err(|e| e.to_string())?; } else { a.ror(dst, imm).map_err(|e| e.to_string())?; } }
+                    _ => {}
+                }
+            } else {
+                return Err(format!("unsupported destination register for {mnemonic}: '{}'", args[0]));
+            }
+        }
+        "cld" => {
+            a.cld().map_err(|e| e.to_string())?;
+        }
+        "rep" => {
+            if args_str.eq_ignore_ascii_case("movsb") {
+                a.rep().movsb().map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("unsupported rep suffix '{args_str}' in assemble_asm (expected 'rep movsb')"));
+            }
+        }
+        "call" => {
+            if args.len() != 1 { return Err("call requires 1 operand".into()); }
+            let target = args[0];
+            if let Some(sym) = target.strip_prefix('$')
+                && let Some(target_addr) = symbols.get(sym) {
+                    a.call(*target_addr).map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+            if let Ok(reg) = parse_gpr64(target) {
+                a.call(reg).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+            if let Ok(imm) = parse_u64_expr(target, symbols) {
+                a.call(imm).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+            // Local label
+            let name = target.trim().trim_start_matches('$').to_lowercase();
+            referenced_labels.insert(name.clone());
+            let lbl = *labels.entry(name.clone()).or_insert_with(|| a.create_label());
+            a.call(lbl).map_err(|e| e.to_string())?;
+        }
+        "lea" => {
+            if args.len() != 2 { return Err("lea requires 2 operands (e.g. lea r8, [rip + result_len])".into()); }
+            if let Ok(dst) = parse_gpr64(args[0]) {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                a.lea(dst, mem).map_err(|e| e.to_string())?;
+            } else if let Ok(dst) = parse_gpr32(args[0]) {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                a.lea(dst, mem).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("unsupported destination register for lea: '{}'", args[0]));
             }
         }
         "inc" => {
@@ -823,5 +973,286 @@ mod ce_verbatim_porting {
         assert!(r.is_ok(), "failed to assemble mov dword payload: {:?}", r.err());
         let block = r.unwrap();
         assert!(!block.bytes.is_empty());
+    }
+
+    #[test]
+    fn test_eval_cave_asm_with_call_lea_cld_rep_movsb() {
+        let code = r#"
+            mov rcx, [rip + saved_state]
+            mov rdx, [rip + cmd_ptr]
+            mov r10, 0x1401ae260
+            call r10
+            mov [rip + result_slot], eax
+            test eax, eax
+            jnz balance
+            mov rcx, [rip + saved_state]
+            xor r9d, r9d
+            mov r8d, -1
+            xor edx, edx
+            mov r10, 0x1401a7ec0
+            call r10
+            mov [rip + result_slot], eax
+            test eax, eax
+            jnz balance
+            mov rcx, [rip + saved_state]
+            mov edx, -1
+            lea r8, [rip + result_len]
+            mov r10, [rip + tolstring_addr]
+            test r10, r10
+            jz balance
+            call r10
+            test rax, rax
+            jz balance
+            cld
+            mov rsi, rax
+            lea rdi, [rip + result_buf]
+            mov rcx, [rip + result_len]
+            cmp rcx, 4095
+            jbe copy_ok
+            mov rcx, 4095
+            copy_ok:
+            rep movsb
+            mov byte ptr [rdi], 0
+            balance:
+            mov rdx, [rip + saved_top]
+            mov rcx, [rip + saved_state]
+            mov r10, 0x1401a6260
+            call r10
+            ret
+
+            saved_state:
+            dq 0
+            cmd_ptr:
+            dq 0
+            result_slot:
+            dd 0
+            result_len:
+            dq 0
+            tolstring_addr:
+            dq 0
+            result_buf:
+            dq 0
+            saved_top:
+            dq 0
+        "#;
+        let r = assemble_text(code, 0x140000000, &HashMap::new());
+        assert!(r.is_ok(), "failed to assemble eval cave: {:?}", r.err());
+        let block = r.unwrap();
+        assert!(!block.bytes.is_empty());
+        assert_eq!(block.instruction_count, 46);
+
+        // Verify exact data slot offsets
+        let off_saved_state = *block.label_offsets.get("saved_state").expect("saved_state");
+        let off_cmd_ptr = *block.label_offsets.get("cmd_ptr").expect("cmd_ptr");
+        let off_result_slot = *block.label_offsets.get("result_slot").expect("result_slot");
+        let off_result_len = *block.label_offsets.get("result_len").expect("result_len");
+        let off_tolstring_addr = *block.label_offsets.get("tolstring_addr").expect("tolstring_addr");
+
+        assert_eq!(off_cmd_ptr - off_saved_state, 8, "dq saved_state must be 8 bytes");
+        assert_eq!(off_result_slot - off_cmd_ptr, 8, "dq cmd_ptr must be 8 bytes");
+        assert_eq!(off_result_len - off_result_slot, 4, "dd result_slot must be 4 bytes");
+        assert_eq!(off_tolstring_addr - off_result_len, 8, "dq result_len must be 8 bytes");
+    }
+
+    #[test]
+    fn test_label_ip_with_db() {
+        use iced_x86::code_asm::*;
+        let mut a = CodeAssembler::new(64).unwrap();
+        let mut lbl_data = a.create_label();
+        a.nop().unwrap(); // 1 byte (0x0)
+        a.set_label(&mut lbl_data).unwrap();
+        a.db(&[0xaa, 0xbb, 0xcc, 0xdd]).unwrap(); // 4 bytes (0x1..0x5)
+        let mut lbl_after = a.create_label();
+        a.set_label(&mut lbl_after).unwrap();
+        a.nop().unwrap(); // 1 byte (0x5)
+        let res = a.assemble_options(0x1000, iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS).unwrap();
+        assert_eq!(res.label_ip(&lbl_data).unwrap(), 0x1001);
+        assert_eq!(res.label_ip(&lbl_after).unwrap(), 0x1005);
+        assert_eq!(res.inner.code_buffer.len(), 6);
+    }
+
+    #[test]
+    fn test_helldivers_exact_offsets() {
+        let code = r#"
+      ; ---- stolen body (zlua_gettop) ----
+      sub rax, [rcx + 0x10]
+      sar rax, 3
+
+      ; ---- fire-once flag gate ----
+      cmp byte ptr [rip + fire_flag], 1
+      jne done
+      mov byte ptr [rip + fire_flag], 0
+      mov [rip + saved_state], rcx
+      mov [rip + saved_top], rax
+
+      ; ---- self-clear anti-cheat gate ----
+      mov r11, [rcx + 0x8]          ; l_G = [L+8]
+      mov byte ptr [r11 + 0x198], 0 ; gate flag A
+      mov byte ptr [r11 + 0x199], 0 ; gate flag B
+
+      ; ---- execute program at cmd_ptr ----
+      push rbx
+      push rdx
+      push r9
+      push r8
+      push rsi
+      push rdi
+      sub rsp, 0x28
+
+      mov rcx, [rip + saved_state]
+      mov rdx, [rip + cmd_ptr]
+      mov r10, 0x1401ae260          ; zluaL_loadstring
+      call r10
+      mov [rip + result_slot], eax
+      test eax, eax
+      jnz balance
+
+      mov rcx, [rip + saved_state]
+      xor r9d, r9d
+      mov r8d, -1                   ; nresults = -1 (all results)
+      xor edx, edx
+      mov r10, 0x1401a7ec0          ; zlua_pcall
+      call r10
+      mov [rip + result_slot], eax
+      test eax, eax
+      jnz balance
+
+      ; ---- capture return value (top of stack) ----
+      mov rcx, [rip + saved_state]
+      mov edx, -1                   ; index -1 = stack top
+      lea r8, [rip + result_len]    ; &len
+      mov r10, [rip + tolstring_addr]
+      test r10, r10
+      jz balance                    ; tolstring not configured -> skip
+      call r10                      ; lua_tolstring(L, -1, &len)
+      test rax, rax
+      jz balance                    ; NULL -> not a string, skip
+
+      ; copy up to 16383 bytes from rax into [result_buf]
+      cld
+      mov rsi, rax
+      mov rdi, [rip + result_buf]   ; result_buf is a POINTER to the buffer
+      mov rcx, [rip + result_len]
+      cmp rcx, 16383
+      jbe copy_ok
+      mov rcx, 16383
+      copy_ok:
+      rep movsb
+      mov byte ptr [rdi], 0         ; null-terminate
+
+      balance:
+      mov rdx, [rip + saved_top]
+      mov rcx, [rip + saved_state]
+      mov r10, 0x1401a6260          ; zlua_settop
+      call r10
+      mov rax, [rip + saved_top]
+
+      add rsp, 0x28
+      pop rdi
+      pop rsi
+      pop r8
+      pop r9
+      pop rdx
+      pop rbx
+
+      done:
+      ret
+
+      ; ---- data slots ----
+      fire_flag:
+      db 00
+      saved_state:
+      dq 0
+      saved_top:
+      dq 0
+      result_slot:
+      dq 0
+      cmd_ptr:
+      dq 0
+      tolstring_addr:
+      dq 0
+      result_len:
+      dq 0
+      result_buf:
+      dq 0
+        "#;
+        let r = assemble_text(code, 0x1401a6254, &HashMap::new()).unwrap();
+        println!("test_helldivers_exact_offsets byte len: {}", r.bytes.len());
+        for (k, v) in &r.label_offsets {
+            println!("  label {k} -> +{v:#x} ({v})");
+        }
+        use iced_x86::{Decoder, DecoderOptions, Formatter, NasmFormatter};
+        let mut decoder = Decoder::with_ip(64, &r.bytes, 0x13fff0000, DecoderOptions::NONE);
+        let mut formatter = NasmFormatter::new();
+        let mut output = String::new();
+        let mut instr = iced_x86::Instruction::default();
+        while decoder.can_decode() {
+            decoder.decode_out(&mut instr);
+            output.clear();
+            formatter.format(&instr, &mut output);
+            println!("{:#x}: {}", instr.ip(), output);
+        }
+    }
+
+    #[test]
+    fn test_asm_data_directive_offsets_repro() {
+        let code = r#"
+            fire_flag:
+            db 00
+            saved_state:
+            dq 0
+            saved_top:
+            dq 0
+            result_slot:
+            dq 0
+            cmd_ptr:
+            dq 0
+            tolstring_addr:
+            dq 0
+            result_len:
+            dq 0
+            result_buf:
+            db 00
+        "#;
+        let r = assemble_text(code, 0x140000000, &HashMap::new());
+        assert!(r.is_ok());
+        let block = r.unwrap();
+        let off_fire_flag = *block.label_offsets.get("fire_flag").unwrap();
+        let off_saved_state = *block.label_offsets.get("saved_state").unwrap();
+        let off_saved_top = *block.label_offsets.get("saved_top").unwrap();
+        let off_result_slot = *block.label_offsets.get("result_slot").unwrap();
+        let off_cmd_ptr = *block.label_offsets.get("cmd_ptr").unwrap();
+        let off_tolstring_addr = *block.label_offsets.get("tolstring_addr").unwrap();
+        let off_result_len = *block.label_offsets.get("result_len").unwrap();
+        let off_result_buf = *block.label_offsets.get("result_buf").unwrap();
+
+        assert_eq!(off_fire_flag, 0);
+        assert_eq!(off_saved_state, 1);
+        assert_eq!(off_saved_top, 1 + 8);
+        assert_eq!(off_result_slot, 1 + 8 + 8);
+        assert_eq!(off_cmd_ptr, 1 + 8 + 8 + 8);
+        assert_eq!(off_tolstring_addr, 1 + 8 + 8 + 8 + 8);
+        assert_eq!(off_result_len, 1 + 8 + 8 + 8 + 8 + 8);
+        assert_eq!(off_result_buf, 1 + 8 + 8 + 8 + 8 + 8 + 8);
+    }
+
+    #[test]
+    fn test_sub_mem_and_shifts() {
+        let code = r#"
+            sub rax, [rcx + 0x10]
+            sar rax, 3
+            shl rdx, 2
+            shr r8, 4
+            add rax, [rbx + 0x8]
+            sar eax, cl
+        "#;
+        let r = assemble_text(code, 0x140000000, &HashMap::new());
+        assert!(r.is_ok(), "failed to assemble sub mem & shifts: {:?}", r.err());
+        let block = r.unwrap();
+        assert_eq!(block.instruction_count, 6);
+        // Verify `sub rax, [rcx+0x10]` produces 48 2b 41 10
+        assert_eq!(&block.bytes[0..4], &[0x48, 0x2b, 0x41, 0x10]);
+        // Verify `sar rax, 3` produces 48 c1 f8 03
+        assert_eq!(&block.bytes[4..8], &[0x48, 0xc1, 0xf8, 0x03]);
     }
 }

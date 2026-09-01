@@ -2,7 +2,7 @@
 //! Translates controller bumpers and stick navigation into GUI tab and focus actions
 //! ONLY when the standalone window is focused.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]

@@ -121,8 +121,37 @@ pub fn start(port: u16) -> std::io::Result<u16> {
 /// disconnects.
 fn handle_connection(mut stream: TcpStream) {
     use std::io::Write;
+    use std::time::Duration;
     use trainlab_core::protocol::Message;
     let mem = SelfProcess;
+
+    // Proactively push initial OverlayReady event upon client connection
+    if let Ok(mut out) = render::overlay::OUTBOUND_EVENTS.lock() {
+        out.push(trainlab_core::protocol::Event::OverlayReady);
+    }
+
+    // Spawn a dedicated outbound push thread for this connection
+    let mut push_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = thread::Builder::new()
+        .name("trainlab-inject-push".into())
+        .spawn(move || {
+            loop {
+                let outbound = render::overlay::drain_outbound_events();
+                for evt in outbound {
+                    let evt_msg = Message::Event(evt);
+                    if let Ok(out) = protocol::encode(&evt_msg) {
+                        if push_stream.write_all(&out).is_err() {
+                            return; // Client disconnected or stream closed
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(16));
+            }
+        });
+
     loop {
         // Read the 4-byte length prefix.
         let mut len_buf = [0u8; 4];
@@ -156,16 +185,6 @@ fn handle_connection(mut stream: TcpStream) {
                     render::overlay::apply_event(event);
                 }
                 _ => {}
-            }
-
-            // Flush any outbound events produced by the overlay to the connected client
-            let outbound = render::overlay::drain_outbound_events();
-            for evt in outbound {
-                let evt_msg = Message::Event(evt);
-                if let Ok(out) = protocol::encode(&evt_msg)
-                    && stream.write_all(&out).is_err() {
-                        break;
-                    }
             }
             continue;
         }

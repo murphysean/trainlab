@@ -1,100 +1,59 @@
-# Agent Guide — How to work on `trainlab`
+# Trainlab External Agent Guide
 
-This guide tells a coding agent (or a human working with one) how to productively
-operate on this codebase. It captures the context, the gotchas, and the workflow
-so you don't have to re-derive them from scratch.
+This guide is for AI coding agents and external clients developing cheat profiles or driving memory discovery against a running `trainlab` instance over the Model Context Protocol (MCP).
 
-## 1. The big picture in one paragraph
+---
 
-`trainlab` is a Rust workspace for building game trainers for Windows games
-running under **Proton/Wine on Linux**, with a first-class **MCP interface** so
-an LLM can drive the reversing loop (scan, pointer-chase, code caves) live
-alongside a human. The three layers: **game** ←fast→ **Agent DLL** ←fast→
-**Trainer** ←MCP→ **LLM**. The LLM never talks to the DLL directly.
+## 1. Connecting to the MCP Server
 
-## 2. Read these first, in order
+Trainlab hosts a Streamable-HTTP MCP server on port **8123** (default endpoint: `http://<device-ip>:8123/mcp`).
 
-1. `README.md` — orientation, crate map, quickstart.
-2. `docs/ARCHITECTURE.md` — the target design (much not built yet). Read the
-   "code-cave mental model" section carefully — it's the conceptual core.
-3. `docs/DESIGN_DECISIONS.md` — *why* things are the way they are. If you're
-   about to "improve" something, check here first — it may be a deliberate
-   decision, not an oversight.
-4. `docs/TODO.md` — the ordered build plan. Work top-down; items build on each
-   other.
-5. `docs/CONCEPTS.md` — the game-hacking vocabulary (scanning, caves, Mono,
-   Wine, injection).
+### Goose / MCP Configuration Example
+```yaml
+extensions:
+  trainlab:
+    type: streamable_http
+    uri: http://<device-ip>:8123/mcp
+```
 
-## 3. Current state (important — set expectations)
+---
 
-This is **early scaffolding**, not a finished tool. Be aware:
+## 2. Core MCP Workflow for Cheat Creation
 
-- **It compiles on Linux** for the Linux paths. There is a **known build error**
-  right now: `crates/trainlab-inject/src/lib.rs:243` uses `#[no_mangle]`, which
-  edition 2024 rejects — must be `#[unsafe(no_mangle)]`. That's T-000.
-- The **Windows memory backend is a stub** (`trainlab-core::memory::windows`).
-  Real Windows work needs `windows-sys` and implementing `ReadProcessMemory`/
-  `WriteProcessMemory`/`VirtualQuery`.
-- `trainlab-scanner`'s `next` command is a **stub** (no persistent match set).
-- There is **no MCP server yet**, **no code-cave emitter**, **no pointer
-  chasing**, **no Mono support**. Those are the exciting parts, all TODO.
-- It's **not a git repo yet** (T-001). Consider initializing it.
+```mermaid
+flowchart LR
+    A["1. Attach to Game"] --> B["2. Memory Recon & Scans"]
+    B --> C["3. Assemble / Install Cave"]
+    C --> D["4. Add Cheats / Buttons"]
+    D --> E["5. Export YAML Profile"]
+```
 
-**So if the user asks you to "make the trainer find a value in Urbek," the honest
-answer is: the pieces for that aren't built yet.** The right move is to work the
-TODO list top-down, not to try to hack around missing foundations.
+### Step 1: Process Attachment
+- `find_games`: List candidate game processes.
+- `attach_game(game: "helldivers.exe")`: Injects `trainlab_inject.dll` into the game process and initiates the IPC channel.
 
-## 4. Workflow / how to help
+### Step 2: Memory Hunting & Pointer Tracing
+- `aob_scan(pattern: "48 8B 05 ?? ?? ?? ??")`: Scan executable code/data for signatures.
+- `pointer_chase(base: "helldivers.exe+0x1b42e9", offsets: ["0x10", "0x28"])`: Resolve multi-level pointer chains.
+- `read(address: "0x140001000", len: 16)` / `read_value(...)`: Inspect memory.
+- `dump_struct(address: "$player_base", fields: [...])`: Read structured object attributes.
 
-When asked to do something on `trainlab`:
+### Step 3: Allocation & Code Caves
+- `allocate_memory(size: 16384, permissions: "rw", marker: "my_buf")`: Allocate raw buffers.
+- `allocate_string(content: "...", kind: "c", marker: "prog_code")`: Allocate strings/scripts in game memory.
+- `install_cave(target_ref: "hook_site", hook: "override", jump: "relative", asm: "...")`: Install pure x86-64 assembly caves. Data slot labels defined in the assembly automatically become session markers.
 
-1. **Orient:** read the relevant doc (above). Check `docs/TODO.md` for whether
-   the task is already planned and where it fits.
-2. **Check the design decisions** before proposing a change — respect D1–D9.
-3. **Build incrementally, bottom-up:** `trainlab-core` first (memory, scan,
-   protocol), then consumers. Verify with `cargo build`/`cargo test` after each
-   unit of work.
-4. **When a change affects the protocol** (`trainlab-core::protocol`), update
-   *all* consumers (inject, scanner, gui) — the whole point of keeping the
-   protocol in core is that they can't drift.
-5. **Prefer adding to TODO.md** (with a T-number) over silently expanding scope.
-   Keep it a faithful, ordered plan.
+### Step 4: Adding Cheats to Session
+- `add_cheat(...)`: Register value, toggle, or command buttons into the live session.
+- Once added, cheats immediately appear in the **In-Game Overlay** and GUI.
 
-## 5. Key gotchas
+### Step 5: Exporting & Validating Cheat Profiles
+- `save_profile(filename: "cheats/my_game.yaml")`: Export session cheats into a restart-stable YAML profile.
+- `validate_profile(profile: "my_game.yaml")`: Verify that all AOB patterns, offsets, and address references are sound.
+- `list_profiles`: List all discovered profiles (including parse validation errors if any file has syntax issues).
 
-- **Edition 2024:** `#[no_mangle]` → `#[unsafe(no_mangle)]`.
-- **`trainlab-core` is the shared protocol crate.** Changes ripple everywhere.
-- **The fast channel uses TCP + bincode + 4-byte length framing** (see
-  `protocol.rs`). If you change it, change `encode`/`decode` and all callers
-  together.
-- **The memory layer is a `ProcessMemory` trait** with `LinuxProcess`/
-  `SelfProcess` impls. Windows impl is a stub. Keep the trait as the seam.
-- **Don't try to run a real Windows game from this Linux workspace.** Building
-  the `windows` backend and the inject crate for the Windows target requires
-  cross-compilation (or building on Windows/Wine). For now, develop and test the
-  Linux paths; the Windows paths are where the *real* game work happens later.
+---
 
-## 6. Safety principles (respect these in code)
+## 3. Creating Issues & Bug Reports
 
-- **Every mutation must be undoable.** Store original bytes. (D8)
-- **Mutating MCP tools need a confirmation gate** or dry-run. (D8)
-- **Never put complex logic in a code cave** — caves are minimal native
-  shellcode. (D4 / ARCHITECTURE §4)
-- **Scope scans to private heap** via region classification, don't scan the
-  whole address space. (D5)
-
-## 7. If the user is doing live reversing
-
-If a session is in progress (game running, trainer attached), your role is to
-drive the MCP recon tools and *dialogue* with the human about findings. Use the
-markers (`set_marker`/`get_markers`) to persist your progress — your context is
-ephemeral, the Trainer's state is not. Propose (don't silently execute) any
-mutation, and always confirm.
-
-## 8. Definition of done for a unit of work
-
-- Compiles (`cargo build`) and tests pass (`cargo test`).
-- Protocol changes ripple to all consumers.
-- Design decisions respected (check DESIGN_DECISIONS).
-- TODO.md updated (item checked off / new T-number).
-- New behavior is documented (at least a code comment; a doc section if notable).
+When encountering edge-case game crashes, unhandled x86 opcodes, or GUI/protocol bugs, drop an issue report into `inbox/` using [`docs/ISSUE_TEMPLATE.md`](ISSUE_TEMPLATE.md).

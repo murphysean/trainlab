@@ -47,11 +47,33 @@ if [ -f "$TARGET_EXE" ] && [ -n "$PROTON_RUNNER" ] && [ -x "$PROTON_RUNNER" ]; t
     TRAINER_PID=$!
 fi
 
-# 4. Wait for the main game process to exit
-wait "$GAME_PID"
+# 4. Cleanup routine to aggressively tear down all child/helper processes
+cleanup() {
+    # Terminate Trainlab GUI
+    if [ -n "$TRAINER_PID" ]; then
+        kill -9 "$TRAINER_PID" 2>/dev/null
+    fi
+    pkill -9 -f trainlab-gui.exe 2>/dev/null
 
-# 5. Clean up Trainlab GUI process when the game exits so Steam exits cleanly
-if [ -n "$TRAINER_PID" ]; then
-    kill -9 "$TRAINER_PID" 2>/dev/null
-fi
-pkill -9 -f trainlab-gui.exe 2>/dev/null
+    # If the game process is still alive when cleanup is triggered (e.g. Steam Stop button)
+    if [ -n "$GAME_PID" ] && kill -0 "$GAME_PID" 2>/dev/null; then
+        kill -9 "$GAME_PID" 2>/dev/null
+    fi
+
+    # Terminate any orphaned Wine helper processes left behind in this session
+    pkill -9 -f xalia.exe 2>/dev/null
+    pkill -9 -f tabtip.exe 2>/dev/null
+    pkill -9 -f explorer.exe 2>/dev/null
+    pkill -9 -f winedevice.exe 2>/dev/null
+    pkill -9 -f services.exe 2>/dev/null
+    pkill -9 -f plugplay.exe 2>/dev/null
+    pkill -9 -f rpcss.exe 2>/dev/null
+}
+
+trap cleanup EXIT INT TERM HUP
+
+# 5. Monitor game process: wait on GAME_PID or exit if the game process disappears
+wait "$GAME_PID" 2>/dev/null
+
+# 6. Run cleanup explicitly upon exit
+cleanup

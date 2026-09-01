@@ -13,12 +13,22 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use crate::{cave_hook, protocol, scan};
 
-/// A labeled address the agent persists across turns (D7).
-#[derive(Debug, Clone)]
+/// A labeled address (or address region) the agent persists across turns (D7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Marker {
     pub address: u64,
+    /// Optional byte size of the marked region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
     pub label: String,
     pub note: Option<String>,
+}
+
+impl Marker {
+    /// Returns the end address if this is a region marker (exclusive: address + size).
+    pub fn end_address(&self) -> Option<u64> {
+        self.size.map(|s| self.address.saturating_add(s as u64))
+    }
 }
 
 /// A user-facing, adjustable game option ("cheat") discovered by the agent and
@@ -37,8 +47,12 @@ pub struct Cheat {
     pub label: String,
     /// The kind of cheat.
     pub kind: CheatKind,
+    /// Optional grouping/category name (e.g. "In Menu", "In Session", "Player", "Weapons").
+    pub group: Option<String>,
     /// Optional hotkey string binding (e.g. "Num 1", "Shift+Alt+K").
     pub hotkey: Option<String>,
+    /// Whether this cheat is hidden from user-facing GUI and overlay.
+    pub hidden: bool,
     /// Optional human note / description.
     pub note: Option<String>,
 }
@@ -161,6 +175,7 @@ pub enum PendingKind {
     InstallCave {
         hook: cave_hook::CaveHook,
         marker: Option<String>,
+        label_offsets: std::collections::HashMap<String, u64>,
     },
     /// Revert a previously-applied mutation by writing `original_bytes` back.
     Undo { original_bytes: Vec<u8> },
@@ -198,7 +213,7 @@ pub struct ClientContext {
     /// Context-scoped active memory scan (so different web tabs or agents don't overwrite each other).
     pub scan: Option<scan::Scan>,
     /// Private event subscriber channel.
-    pub event_rx: tokio::sync::broadcast::Receiver<crate::event::SessionEvent>,
+    pub event_rx: tokio::sync::broadcast::Receiver<crate::event::BusEvent>,
 }
 
 impl ClientContext {
@@ -338,7 +353,7 @@ impl SessionState {
         };
 
         self.lifecycle = lifecycle;
-        self.event_bus.emit(crate::event::SessionEvent::LifecycleChanged {
+        self.event_bus.emit_session(crate::event::SessionEvent::LifecycleChanged {
             state: state_name.to_string(),
             pid,
             exe,
@@ -361,6 +376,11 @@ impl SessionState {
         }
         false
     }
+    /// Publish an arbitrary event onto the session event bus.
+    pub fn publish_event(&self, event: crate::event::BusEvent) {
+        self.event_bus.emit(event);
+    }
+
     /// Log an activity entry tagged by source (e.g., "UI", "MCP").
     pub fn log_activity(&mut self, source: &str, msg: impl Into<String>) {
         let msg_str = msg.into();
@@ -383,7 +403,18 @@ impl SessionState {
         if self.activity_log.len() > 1000 {
             self.activity_log.remove(0);
         }
-        self.event_bus.emit(crate::event::SessionEvent::ActivityLogged { entry: formatted });
+        
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        self.publish_event(crate::event::BusEvent::Log(crate::event::LogEvent {
+            source: source.to_string(),
+            message: msg_str,
+            timestamp_ms: now_ms,
+        }));
+        self.publish_event(crate::event::BusEvent::Session(crate::event::SessionEvent::ActivityLogged { entry: formatted }));
     }
 
     /// Access the event bus for subscribing or emitting events.
@@ -400,7 +431,7 @@ impl SessionState {
     pub fn request_window_cmd(&mut self, cmd: impl Into<String>) {
         let cmd_str = cmd.into();
         self.log_activity("WINDOW", format!("remote requested window command: {cmd_str}"));
-        self.event_bus.emit(crate::event::SessionEvent::WindowVisibility { command: cmd_str.clone() });
+        self.event_bus.emit_session(crate::event::SessionEvent::WindowVisibility { command: cmd_str.clone() });
         self.pending_window_cmd = Some(cmd_str);
     }
 
@@ -457,7 +488,7 @@ impl SessionState {
         self.record_tracked_app(&name, Some(pid), Some(app_path));
         self.log_activity("LAUNCH", format!("successfully spawned '{name}' (PID {pid})"));
 
-        self.event_bus.emit(crate::event::SessionEvent::AppLaunched {
+        self.event_bus.emit_session(crate::event::SessionEvent::AppLaunched {
             name: name.clone(),
             path: app_path.to_string(),
             pid: Some(pid),
@@ -527,7 +558,7 @@ impl SessionState {
                 self.set_lifecycle(SessionLifecycle::Idle);
             }
         }
-        self.event_bus.emit(crate::event::SessionEvent::ConnectionChanged {
+        self.event_bus.emit_session(crate::event::SessionEvent::ConnectionChanged {
             connected,
             game_name: self.game_name.clone(),
         });
@@ -583,6 +614,17 @@ impl SessionState {
         address: u64,
         note: Option<&str>,
     ) -> Result<(), String> {
+        self.set_marker_region(label, address, None, note)
+    }
+
+    /// Set (create or overwrite) a marker by label with an optional region size.
+    pub fn set_marker_region(
+        &mut self,
+        label: &str,
+        address: u64,
+        size: Option<usize>,
+        note: Option<&str>,
+    ) -> Result<(), String> {
         let label = label.trim().to_string();
         if label.is_empty() {
             return Err("marker label cannot be empty".into());
@@ -591,13 +633,17 @@ impl SessionState {
             label.clone(),
             Marker {
                 address,
+                size,
                 label: label.clone(),
                 note: note.map(|s| s.to_string()),
             },
         );
-        self.event_bus.emit(crate::event::SessionEvent::MarkerSet {
+        self.event_bus.emit_session(crate::event::SessionEvent::MarkerSet {
             name: label.clone(),
-            address: format!("{address:#x}"),
+            address: match size {
+                Some(sz) => format!("{address:#x}..{:#x} (+{sz:#x})", address.saturating_add(sz as u64)),
+                None => format!("{address:#x}"),
+            },
             note: note.map(|s| s.to_string()),
         });
         Ok(())
@@ -732,13 +778,40 @@ impl SessionState {
         hotkey: Option<&str>,
         note: Option<&str>,
     ) -> u64 {
+        self.add_cheat_group(label, kind, None, hotkey, false, note)
+    }
+
+    /// Add a cheat with explicit hidden flag and return its id.
+    pub fn add_cheat_ext(
+        &mut self,
+        label: &str,
+        kind: CheatKind,
+        hotkey: Option<&str>,
+        hidden: bool,
+        note: Option<&str>,
+    ) -> u64 {
+        self.add_cheat_group(label, kind, None, hotkey, hidden, note)
+    }
+
+    /// Add a cheat with an optional grouping category and hidden flag.
+    pub fn add_cheat_group(
+        &mut self,
+        label: &str,
+        kind: CheatKind,
+        group: Option<&str>,
+        hotkey: Option<&str>,
+        hidden: bool,
+        note: Option<&str>,
+    ) -> u64 {
         let id = self.next_cheat_id;
         self.next_cheat_id += 1;
         self.cheats.push(Cheat {
             id,
             label: label.trim().to_string(),
             kind,
+            group: group.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
             hotkey: hotkey.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            hidden,
             note: note.map(|s| s.to_string()),
         });
         id
@@ -782,7 +855,7 @@ impl SessionState {
             match &mut c.kind {
                 CheatKind::Toggle { enabled: e, .. } => {
                     *e = enabled;
-                    self.event_bus.emit(crate::event::SessionEvent::CheatUpdated {
+                    self.event_bus.emit_session(crate::event::SessionEvent::CheatUpdated {
                         id,
                         label,
                         enabled: Some(enabled),
@@ -792,7 +865,7 @@ impl SessionState {
                 }
                 CheatKind::Patch { enabled: e, .. } => {
                     *e = enabled;
-                    self.event_bus.emit(crate::event::SessionEvent::CheatUpdated {
+                    self.event_bus.emit_session(crate::event::SessionEvent::CheatUpdated {
                         id,
                         label,
                         enabled: Some(enabled),
@@ -845,6 +918,7 @@ impl SessionState {
     pub fn export_overlay_cheats(&self) -> Vec<protocol::OverlayCheatDto> {
         self.cheats
             .iter()
+            .filter(|c| !c.hidden)
             .map(|c| {
                 let (address, kind_str, enabled) = match &c.kind {
                     CheatKind::Value { address, .. } => (*address, "value".to_string(), false),
@@ -860,6 +934,7 @@ impl SessionState {
                     kind_str,
                     enabled,
                     current_value: None,
+                    group: c.group.clone(),
                     hotkey: c.hotkey.clone(),
                     pinned_bytes: None,
                 }
@@ -872,7 +947,7 @@ impl SessionState {
         let count = scan.len();
         let vt = format!("{:?}", scan.value_type());
         self.scan = Some(scan);
-        self.event_bus.emit(crate::event::SessionEvent::ScanUpdated {
+        self.event_bus.emit_session(crate::event::SessionEvent::ScanUpdated {
             count,
             value_type: vt,
         });
@@ -966,6 +1041,7 @@ mod tests {
                     jump: crate::cave_hook::JumpStyle::Absolute,
                 },
                 marker: None,
+                label_offsets: std::collections::HashMap::new(),
             },
             "install cave".into(),
         );
@@ -1125,7 +1201,7 @@ mod tests {
         // Contexts receive broadcast events
         let mut got_lifecycle = false;
         while let Ok(event) = ctx_mcp.event_rx.recv().await {
-            if let crate::event::SessionEvent::LifecycleChanged { state, pid, exe } = event {
+            if let crate::event::BusEvent::Session(crate::event::SessionEvent::LifecycleChanged { state, pid, exe }) = event {
                 assert_eq!(state, "target_attached");
                 assert_eq!(pid, Some(12345));
                 assert_eq!(exe, "DRGSurvivor.exe");

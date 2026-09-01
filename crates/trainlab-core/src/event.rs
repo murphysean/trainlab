@@ -2,11 +2,31 @@
 //!
 //! Provides a decoupled `tokio::sync::broadcast` pub/sub channel for all session events.
 //! Mutating operations (cheats, markers, profile, scan, log, window) emit typed
-//! `SessionEvent`s onto the bus. Independent subscribers (native egui UI, SSE web stream)
+//! `BusEvent`s onto the bus. Independent subscribers (native egui UI, SSE web stream, IPC tasks)
 //! consume these events asynchronously.
 
 use serde::Serialize;
 use tokio::sync::broadcast;
+
+/// A structured log entry emitted whenever session activity is recorded.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEvent {
+    pub source: String,
+    pub message: String,
+    pub timestamp_ms: u64,
+}
+
+/// The unified event type carried across the session event bus.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BusEvent {
+    /// High-level session state mutation (cheat toggled, marker set, lifecycle, etc.)
+    Session(SessionEvent),
+    /// Raw wire event from or destined to the DLL / in-game overlay.
+    Protocol(crate::protocol::Event),
+    /// Activity log entry.
+    Log(LogEvent),
+}
 
 /// Typed event representing any session state mutation.
 #[derive(Debug, Clone, Serialize)]
@@ -66,12 +86,12 @@ pub enum SessionEvent {
 /// Event bus holding the broadcast sender.
 #[derive(Debug, Clone)]
 pub struct EventBus {
-    sender: broadcast::Sender<SessionEvent>,
+    sender: broadcast::Sender<BusEvent>,
 }
 
 impl Default for EventBus {
     fn default() -> Self {
-        let (sender, _) = broadcast::channel(256);
+        let (sender, _) = broadcast::channel(512);
         Self { sender }
     }
 }
@@ -83,12 +103,18 @@ impl EventBus {
     }
 
     /// Emit an event onto the bus. Silently succeeds if there are no active subscribers.
-    pub fn emit(&self, event: SessionEvent) {
+    pub fn emit(&self, event: BusEvent) {
         let _ = self.sender.send(event);
     }
 
+    /// Convenience helper to emit a high-level SessionEvent.
+    pub fn emit_session(&self, event: SessionEvent) {
+        self.emit(BusEvent::Session(event));
+    }
+
     /// Subscribe to receiving events from the bus.
-    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<BusEvent> {
         self.sender.subscribe()
     }
 }
+

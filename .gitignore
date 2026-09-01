@@ -2,8 +2,21 @@
 /target
 **/*.rs.bk
 
-# trainlab runtime artifacts (cheat profiles are generated at runtime)
-/cheats/
+# trainlab runtime cheat tables (keep example template tracked)
+/cheats/*
+!/cheats/example.yaml
+/inbox/*
+!/inbox/.gitkeep
+
+# Local overrides and private notes
+*.local.md
+*.local.sh
+
+# Temporary scratch and helper tools
+set_launch_apps*.py
+set_launch_option.py
+clean_inject.py
+sdtool/
 
 # Editor / OS
 .DS_Store

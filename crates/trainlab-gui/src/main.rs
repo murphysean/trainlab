@@ -114,10 +114,10 @@ struct TrainlabApp {
     auto_init: bool,
     // Window visibility state for toggle hotkey
     window_visible: bool,
-    // Last broadcasted overlay visibility mask to avoid 20 Hz event spam
-    last_synced_mask: Option<bool>,
     // In-flight attachment / initialization indicator & lock
     is_attaching: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // Event bus receiver to subscribe to all unified session/wire/log events
+    bus_rx: tokio::sync::broadcast::Receiver<trainlab_core::event::BusEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +145,6 @@ enum ActiveTab {
     ActivityLog,
 }
 
-
 impl Default for TrainlabApp {
     fn default() -> Self {
         Self::new(std::sync::Arc::new(std::sync::Mutex::new(SessionState::new())))
@@ -156,6 +155,7 @@ impl TrainlabApp {
     fn new(session: SharedSession) -> Self {
         // The game executable to inject into. Overridable via TRAINLAB_GAME env var.
         let game_name = std::env::var("TRAINLAB_GAME").unwrap_or_default();
+        let bus_rx = session.lock().unwrap().event_bus().subscribe();
         let mut app = Self {
             session,
             host: "127.0.0.1".into(),
@@ -187,8 +187,8 @@ impl TrainlabApp {
             active_tab: ActiveTab::Cheats,
             auto_init: true,
             window_visible: true,
-            last_synced_mask: None,
             is_attaching: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus_rx,
         };
         app.auto_match_profile();
         app.sync_registered_hotkeys();
@@ -277,12 +277,31 @@ impl TrainlabApp {
                     }
 
                     if auto_init {
-                        let profiles = profile::discover_profiles();
-                        if let Some((file, _p)) = profile::find_profile_for_game(&profiles, &game_name) {
+                        let all_discovered = profile::discover_all_profiles();
+                        let mut matched = None;
+                        for dp in &all_discovered {
+                            match dp {
+                                profile::DiscoveredProfile::Valid { file, profile } => {
+                                    if profile.game.eq_ignore_ascii_case(&game_name) {
+                                        matched = Some(file.clone());
+                                        break;
+                                    }
+                                }
+                                profile::DiscoveredProfile::Invalid { file, error } => {
+                                    if file.to_lowercase().contains(&game_name.to_lowercase().replace(".exe", "")) {
+                                        if let Ok(mut s) = session.lock() {
+                                            s.log_activity("PROFILE", format!("WARNING: candidate profile '{file}' for '{game_name}' FAILED to parse: {error}"));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(file) = matched {
                             if let Ok(mut s) = session.lock() {
                                 s.log_activity("UI", format!("starting sequential profile initialization for '{file}'..."));
                             }
-                            match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(file, true) {
+                            match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(&file, true) {
                                 Ok(detail) => {
                                     if let Ok(mut s) = session.lock() {
                                         s.log_activity("UI", format!("profile '{file}' loaded: {detail}"));
@@ -582,21 +601,21 @@ impl TrainlabApp {
                         s.remove_cheat(id);
                     }
                     // T-150: Emit event for clearing all cheats.
-                    s.event_bus().emit(crate::event::SessionEvent::ProfileLoaded {
+                    s.publish_event(trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::ProfileLoaded {
                         name: String::new(),
                         game: String::new(),
                         cheats_count: 0,
-                    });
+                    }));
                 }
                 self.cheat_values.clear();
             }
         });
         ui.separator();
 
-        // Snapshot the cheats to avoid holding the lock across UI.
+        // Snapshot the visible cheats to avoid holding the lock across UI.
         let cheats: Vec<Cheat> = {
             let s = self.session.lock().unwrap();
-            s.list_cheats().into_iter().cloned().collect()
+            s.list_cheats().into_iter().filter(|c| !c.hidden).cloned().collect()
         };
 
         if cheats.is_empty() {
@@ -604,298 +623,302 @@ impl TrainlabApp {
             return;
         }
 
-        for cheat in &cheats {
-            ui.horizontal(|ui| {
-                match &cheat.kind {
-                    CheatKind::Value { address, value_type, address_expr } => {
-                        // Dynamically re-evaluate address expression if present (e.g. nested pointer dereference)
-                        let target_addr = if let Some(expr) = address_expr {
-                            mcp::parse_addr_expr(&self.session, expr).unwrap_or(*address)
-                        } else {
-                            *address
-                        };
+        // Group cheats by category (preserving insertion order of groups).
+        let mut grouped: std::collections::BTreeMap<String, Vec<&Cheat>> = std::collections::BTreeMap::new();
+        let mut has_ungrouped = false;
+        for c in &cheats {
+            let grp = c.group.clone().unwrap_or_else(|| {
+                has_ungrouped = true;
+                "General".to_string()
+            });
+            grouped.entry(grp).or_default().push(c);
+        }
 
-                        // Live-read the current value (debounced cache).
-                        let current = if target_addr != 0 {
-                            self.read_cached(target_addr, value_type.size())
-                                .map(|d| format_value(&d, *value_type))
-                                .unwrap_or_else(|| "?".into())
-                        } else {
-                            "? (null ptr)".into()
-                        };
+        let only_one_group = grouped.len() == 1 && !has_ungrouped;
 
-                        ui.label(&cheat.label);
-                        if let Some(n) = &cheat.note {
-                            ui.label(format!("({n})"));
-                        }
-                        if let Some(expr) = address_expr {
-                            ui.monospace(format!("{expr} -> {target_addr:#x}"));
-                        } else {
-                            ui.label(format!("@ {target_addr:#x}"));
-                        }
-                        ui.label(format!("now: {current}"));
+        for (group_name, group_cheats) in &grouped {
+            let render_group_body = |ui: &mut egui::Ui, self_ptr: &mut Self| {
+                for cheat in group_cheats {
+                    ui.horizontal(|ui| {
+                        match &cheat.kind {
+                            CheatKind::Value { address, value_type, address_expr } => {
+                                // Dynamically re-evaluate address expression if present (e.g. nested pointer dereference)
+                                let target_addr = if let Some(expr) = address_expr {
+                                    mcp::parse_addr_expr(&self_ptr.session, expr).unwrap_or(*address)
+                                } else {
+                                    *address
+                                };
 
-                        // Editable field (persisted per cheat id).
-                        let field = self
-                            .cheat_values
-                            .entry(cheat.id)
-                            .or_insert_with(|| current.clone());
-                        ui.text_edit_singleline(field);
+                                // Live-read the current value (debounced cache).
+                                let current = if target_addr != 0 {
+                                    self_ptr.read_cached(target_addr, value_type.size())
+                                        .map(|d| format_value(&d, *value_type))
+                                        .unwrap_or_else(|| "?".into())
+                                } else {
+                                    "? (null ptr)".into()
+                                };
 
-                        if ui.button("Apply").clicked() {
-                            if target_addr != 0 {
-                                let field_val = field.clone();
-                                let data = parse_value_bytes(&field_val, *value_type);
-                                match data {
-                                    Ok(bytes) => {
-                                        let r = self.request(&Request::Write {
-                                            address: target_addr,
-                                            data: bytes,
+                                ui.label(&cheat.label);
+                                if let Some(n) = &cheat.note {
+                                    ui.label(format!("({n})"));
+                                }
+                                if let Some(expr) = address_expr {
+                                    ui.monospace(format!("{expr} -> {target_addr:#x}"));
+                                } else {
+                                    ui.label(format!("@ {target_addr:#x}"));
+                                }
+                                ui.label(format!("now: {current}"));
+
+                                // Editable field (persisted per cheat id).
+                                let field = self_ptr
+                                    .cheat_values
+                                    .entry(cheat.id)
+                                    .or_insert_with(|| current.clone());
+                                ui.text_edit_singleline(field);
+
+                                if ui.button("Apply").clicked() {
+                                    if target_addr != 0 {
+                                        let field_val = field.clone();
+                                        let data = parse_value_bytes(&field_val, *value_type);
+                                        match data {
+                                            Ok(bytes) => {
+                                                let r = self_ptr.request(&Request::Write {
+                                                    address: target_addr,
+                                                    data: bytes,
+                                                });
+                                                match r {
+                                                    Some(Response::Write { bytes_written }) => {
+                                                        self_ptr.log(format!(
+                                                            "cheat '{}' set to {} ({bytes_written} bytes)",
+                                                            cheat.label, field_val
+                                                        ));
+                                                        // Emit CheatUpdated so SSE dashboard reflects the new value.
+                                                        if let Ok(s) = self_ptr.session.lock() {
+                                                            s.publish_event(trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::CheatUpdated {
+                                                                id: cheat.id,
+                                                                label: cheat.label.clone(),
+                                                                enabled: None,
+                                                                value: Some(field_val.clone()),
+                                                            }));
+                                                        }
+                                                    }
+                                                    _ => self_ptr.log(format!(
+                                                        "cheat '{}' write failed",
+                                                        cheat.label
+                                                    )),
+                                                }
+                                            }
+                                            Err(e) => self_ptr.log(format!("bad value for '{}': {e}", cheat.label)),
+                                        }
+                                    } else {
+                                        self_ptr.log(format!("cannot apply cheat '{}': pointer chain resolved to null", cheat.label));
+                                    }
+                                }
+                            }
+                            CheatKind::Struct { base_address, base_expr, fields } => {
+                                let base_addr = if !base_expr.is_empty() {
+                                    mcp::parse_addr_expr(&self_ptr.session, base_expr).unwrap_or(*base_address)
+                                } else {
+                                    *base_address
+                                };
+
+                                ui.vertical(|ui| {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.heading(format!("📦 {}", cheat.label));
+                                            if !base_expr.is_empty() {
+                                                ui.monospace(format!("({base_expr} -> {base_addr:#x})"));
+                                            } else {
+                                                ui.monospace(format!("(@ {base_addr:#x})"));
+                                            }
+                                            if let Some(n) = &cheat.note {
+                                                ui.label(format!("({n})"));
+                                            }
+                                        });
+                                        ui.separator();
+                                        for (idx, field_def) in fields.iter().enumerate() {
+                                            let field_expr = if field_def.offset_expr.starts_with('[') {
+                                                field_def.offset_expr.clone()
+                                            } else if base_addr != 0 {
+                                                format!("{base_addr:#x} + {}", field_def.offset_expr)
+                                            } else {
+                                                format!("{base_expr} + {}", field_def.offset_expr)
+                                            };
+
+                                            let field_target = mcp::parse_addr_expr(&self_ptr.session, &field_expr).unwrap_or(0);
+                                            let current = if field_target != 0 {
+                                                self_ptr.read_cached(field_target, field_def.value_type.size())
+                                                    .map(|d| format_value(&d, field_def.value_type))
+                                                    .unwrap_or_else(|| "?".into())
+                                            } else {
+                                                "? (null ptr)".into()
+                                            };
+
+                                            let field_key = cheat.id * 1000 + idx as u64;
+                                            let mut edit_val = self_ptr.cheat_values.get(&field_key).cloned().unwrap_or_else(|| current.clone());
+                                            let mut do_write = false;
+
+                                            ui.horizontal(|ui| {
+                                                ui.label(format!("• {}:", field_def.label));
+                                                ui.monospace(format!("@ {field_target:#x}"));
+                                                ui.label(format!("now: {current}"));
+                                                let text_edit = ui.add(egui::TextEdit::singleline(&mut edit_val).desired_width(70.0));
+                                                if text_edit.changed() {
+                                                    self_ptr.cheat_values.insert(field_key, edit_val.clone());
+                                                }
+                                                if ui.button("Apply").clicked() {
+                                                    do_write = true;
+                                                }
+                                            });
+
+                                            if do_write && field_target != 0
+                                                && let Ok(bytes) = parse_value_bytes(&edit_val, field_def.value_type) {
+                                                    let r = self_ptr.request(&Request::Write { address: field_target, data: bytes });
+                                                    if let Some(Response::Write { bytes_written }) = r {
+                                                        self_ptr.log(format!("struct field '{}.{}' set to {edit_val} ({bytes_written} bytes)", cheat.label, field_def.label));
+                                                    }
+                                                }
+                                        }
+                                    });
+                                });
+                            }
+                            CheatKind::Toggle { target, enabled, original_bytes, .. } => {
+                                let mut on = *enabled;
+                                if ui.checkbox(&mut on, &cheat.label).changed() {
+                                    if on {
+                                        if let Ok(mut s) = self_ptr.session.lock() {
+                                            s.set_cheat_toggle(cheat.id, true);
+                                        }
+                                        self_ptr.log(format!(
+                                            "toggle '{}' ENABLED (@ {target:#x})",
+                                            cheat.label
+                                        ));
+                                    } else if !original_bytes.is_empty() {
+                                        let r = self_ptr.request(&Request::Write {
+                                            address: *target,
+                                            data: original_bytes.clone(),
                                         });
                                         match r {
                                             Some(Response::Write { bytes_written }) => {
-                                                self.log(format!(
-                                                    "cheat '{}' set to {} ({bytes_written} bytes)",
-                                                    cheat.label, field_val
-                                                ));
-                                                // Emit CheatUpdated so SSE dashboard reflects the new value.
-                                                if let Ok(s) = self.session.lock() {
-                                                    s.event_bus().emit(crate::event::SessionEvent::CheatUpdated {
-                                                        id: cheat.id,
-                                                        label: cheat.label.clone(),
-                                                        enabled: None,
-                                                        value: Some(field_val.clone()),
-                                                    });
+                                                if let Ok(mut s) = self_ptr.session.lock() {
+                                                    s.set_cheat_toggle(cheat.id, false);
                                                 }
+                                                self_ptr.log(format!(
+                                                    "toggle '{}' DISABLED (restored {bytes_written} bytes @ {target:#x})",
+                                                    cheat.label
+                                                ));
                                             }
-                                            _ => self.log(format!(
-                                                "cheat '{}' write failed",
+                                            _ => self_ptr.log(format!(
+                                                "toggle '{}' disable FAILED (restore @ {target:#x})",
                                                 cheat.label
                                             )),
                                         }
-                                    }
-                                    Err(e) => self.log(format!("bad value for '{}': {e}", cheat.label)),
-                                }
-                            } else {
-                                self.log(format!("cannot apply cheat '{}': pointer chain resolved to null", cheat.label));
-                            }
-                        }
-                    }
-                    CheatKind::Struct { base_address, base_expr, fields } => {
-                        let base_addr = if !base_expr.is_empty() {
-                            mcp::parse_addr_expr(&self.session, base_expr).unwrap_or(*base_address)
-                        } else {
-                            *base_address
-                        };
-
-                        ui.vertical(|ui| {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.heading(format!("📦 {}", cheat.label));
-                                    if !base_expr.is_empty() {
-                                        ui.monospace(format!("({base_expr} -> {base_addr:#x})"));
                                     } else {
-                                        ui.monospace(format!("(@ {base_addr:#x})"));
-                                    }
-                                    if let Some(n) = &cheat.note {
-                                        ui.label(format!("({n})"));
-                                    }
-                                });
-                                ui.separator();
-
-                                for (idx, field_def) in fields.iter().enumerate() {
-                                    let field_expr = if field_def.offset_expr.starts_with('[') {
-                                        // If already bracketed, evaluate directly
-                                        field_def.offset_expr.clone()
-                                    } else if base_addr != 0 {
-                                        format!("{base_addr:#x} + {}", field_def.offset_expr)
-                                    } else {
-                                        format!("{base_expr} + {}", field_def.offset_expr)
-                                    };
-
-                                    let field_target = mcp::parse_addr_expr(&self.session, &field_expr).unwrap_or(0);
-                                    let current = if field_target != 0 {
-                                        self.read_cached(field_target, field_def.value_type.size())
-                                            .map(|d| format_value(&d, field_def.value_type))
-                                            .unwrap_or_else(|| "?".into())
-                                    } else {
-                                        "?".into()
-                                    };
-
-                                    let field_key = cheat.id * 1000 + idx as u64;
-                                    let mut edit_val = self.cheat_values.get(&field_key).cloned().unwrap_or_else(|| current.clone());
-                                    let mut do_write = false;
-
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("• {}:", field_def.label));
-                                        ui.monospace(format!("@ {field_target:#x}"));
-                                        ui.label(format!("now: {current}"));
-                                        let text_edit = ui.add(egui::TextEdit::singleline(&mut edit_val).desired_width(70.0));
-                                        if text_edit.changed() {
-                                            self.cheat_values.insert(field_key, edit_val.clone());
-                                        }
-                                        if ui.button("Apply").clicked() {
-                                            do_write = true;
-                                        }
-                                    });
-
-                                    if do_write && field_target != 0
-                                        && let Ok(bytes) = parse_value_bytes(&edit_val, field_def.value_type) {
-                                            let r = self.request(&Request::Write { address: field_target, data: bytes });
-                                            if let Some(Response::Write { bytes_written }) = r {
-                                                self.log(format!("struct field '{}.{}' set to {edit_val} ({bytes_written} bytes)", cheat.label, field_def.label));
-                                            }
-                                        }
-                                }
-                            });
-                        });
-                    }
-                    CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
-                        let mut on = *enabled;
-                        if ui.checkbox(&mut on, &cheat.label).changed() {
-                            // T-112: GUI toggle drives the real cave — install on enable, restore on disable.
-                            if on {
-                                // Enable: install the cave directly (user is the human confirmation).
-                                let r = self.request(&Request::InstallCave {
-                                    target: *target,
-                                    hook: hook.clone(),
-                                });
-                                match r {
-                                    Some(Response::CaveInstalled { cave, original, .. }) => {
-                                        // Store original bytes for later disable.
-                                        if let Ok(mut s) = self.session.lock() {
-                                            s.set_toggle_cave_info(cheat.id, original.clone(), cave);
-                                            s.set_cheat_toggle(cheat.id, true);
-                                        }
-                                        self.log(format!(
-                                            "toggle '{}' ENABLED (cave @ {cave:#x}, target {target:#x})",
+                                        self_ptr.log(format!(
+                                            "toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
                                             cheat.label
                                         ));
                                     }
-                                    _ => self.log(format!(
-                                        "toggle '{}' enable FAILED (cave @ {target:#x})",
-                                        cheat.label
-                                    )),
                                 }
-                            } else {
-                                // Disable: restore original bytes if we have them.
-                                if !original_bytes.is_empty() {
-                                    let r = self.request(&Request::Write {
-                                        address: *target,
-                                        data: original_bytes.clone(),
-                                    });
-                                    match r {
-                                        Some(Response::Write { bytes_written }) => {
-                                            if let Ok(mut s) = self.session.lock() {
-                                                s.set_cheat_toggle(cheat.id, false);
+                                ui.label(format!("@ {target:#x}"));
+                            }
+                            CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+                                let mut on = *enabled;
+                                let desc = cave_ref.as_deref().unwrap_or("fast patch");
+                                if ui.checkbox(&mut on, &cheat.label).changed() {
+                                    let bytes_to_write = if on { patch_bytes } else { original_bytes };
+                                    if !bytes_to_write.is_empty() {
+                                        let r = self_ptr.request(&Request::Write {
+                                            address: *target,
+                                            data: bytes_to_write.clone(),
+                                        });
+                                        match r {
+                                            Some(Response::Write { bytes_written }) => {
+                                                if let Ok(mut s) = self_ptr.session.lock() {
+                                                    s.set_cheat_toggle(cheat.id, on);
+                                                }
+                                                self_ptr.log(format!(
+                                                    "patch '{}' -> {} ({bytes_written} bytes @ {target:#x}, {desc})",
+                                                    cheat.label,
+                                                    if on { "ENABLED" } else { "DISABLED" }
+                                                ));
                                             }
-                                            self.log(format!(
-                                                "toggle '{}' DISABLED (restored {bytes_written} bytes @ {target:#x})",
-                                                cheat.label
-                                            ));
+                                            _ => self_ptr.log(format!(
+                                                "patch '{}' {} FAILED (@ {target:#x})",
+                                                cheat.label,
+                                                if on { "enable" } else { "disable" }
+                                            )),
                                         }
-                                        _ => self.log(format!(
-                                            "toggle '{}' disable FAILED (restore @ {target:#x})",
-                                            cheat.label
-                                        )),
                                     }
-                                } else {
-                                    // No original bytes stored — can't restore via GUI.
-                                    // Try via the MCP toggle path (stages it).
-                                    self.log(format!(
-                                        "toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
-                                        cheat.label
-                                    ));
+                                }
+                                ui.label(format!("@ {target:#x} ({desc})"));
+                            }
+                            CheatKind::Button { commands } => {
+                                if ui.button(format!("▶ {}", cheat.label)).clicked() {
+                                    self_ptr.log(format!("button '{}' clicked: running {} command(s)...", cheat.label, commands.len()));
+                                    let session = self_ptr.session.clone();
+                                    let label = cheat.label.clone();
+                                    let cmds = commands.clone();
+                                    std::thread::spawn(move || {
+                                        if let Err(e) = mcp::execute_profile_commands(&session, &cmds)
+                                            && let Ok(mut s) = session.lock() {
+                                                s.log_activity("UI", format!("button '{label}' failed: {e}"));
+                                            }
+                                    });
+                                }
+                                if let Some(n) = &cheat.note {
+                                    ui.label(format!("({n})"));
                                 }
                             }
                         }
-                        ui.label(format!("@ {target:#x}"));
-                    }
-                    CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
-                        let mut on = *enabled;
-                        let desc = cave_ref.as_deref().unwrap_or("fast patch");
-                        if ui.checkbox(&mut on, &cheat.label).changed() {
-                            let bytes_to_write = if on { patch_bytes } else { original_bytes };
-                            if !bytes_to_write.is_empty() {
-                                let r = self.request(&Request::Write {
-                                    address: *target,
-                                    data: bytes_to_write.clone(),
-                                });
-                                match r {
-                                    Some(Response::Write { bytes_written }) => {
-                                        if let Ok(mut s) = self.session.lock() {
-                                            s.set_cheat_toggle(cheat.id, on);
+
+                        // Hotkey assignment input & button
+                        ui.separator();
+                        ui.label("Hotkey:");
+                        let hk_field = self_ptr
+                            .cheat_hotkey_inputs
+                            .entry(cheat.id)
+                            .or_insert_with(|| cheat.hotkey.clone().unwrap_or_default());
+                        ui.add(egui::TextEdit::singleline(hk_field).hint_text("e.g. Num1, Shift+Alt+K"));
+
+                        if ui.button("Bind").clicked() {
+                            let text = hk_field.trim().to_string();
+                            if text.is_empty() {
+                                if let Ok(mut s) = self_ptr.session.lock() {
+                                    s.set_cheat_hotkey(cheat.id, None);
+                                }
+                                self_ptr.sync_registered_hotkeys();
+                                self_ptr.log(format!("cleared hotkey for '{}'", cheat.label));
+                            } else {
+                                match hotkeys::HotkeySpec::parse(&text) {
+                                    Ok(spec) => {
+                                        let display = spec.display_string();
+                                        if let Ok(mut s) = self_ptr.session.lock() {
+                                            s.set_cheat_hotkey(cheat.id, Some(display.clone()));
                                         }
-                                        self.log(format!(
-                                            "patch '{}' -> {} ({bytes_written} bytes @ {target:#x}, {desc})",
-                                            cheat.label,
-                                            if on { "ENABLED" } else { "DISABLED" }
-                                        ));
+                                        *hk_field = display.clone();
+                                        self_ptr.sync_registered_hotkeys();
+                                        self_ptr.log(format!("bound '{}' to hotkey '{display}'", cheat.label));
                                     }
-                                    _ => self.log(format!(
-                                        "patch '{}' {} FAILED (@ {target:#x})",
-                                        cheat.label,
-                                        if on { "enable" } else { "disable" }
-                                    )),
+                                    Err(e) => {
+                                        self_ptr.log(format!("invalid hotkey format for '{}': {e}", cheat.label));
+                                    }
                                 }
                             }
                         }
-                        ui.label(format!("@ {target:#x} ({desc})"));
-                    }
-                    CheatKind::Button { commands } => {
-                        if ui.button(format!("▶ {}", cheat.label)).clicked() {
-                            self.log(format!("button '{}' clicked: running {} command(s)...", cheat.label, commands.len()));
-                            let session = self.session.clone();
-                            let label = cheat.label.clone();
-                            let cmds = commands.clone();
-                            std::thread::spawn(move || {
-                                if let Err(e) = mcp::execute_profile_commands(&session, &cmds)
-                                    && let Ok(mut s) = session.lock() {
-                                        s.log_activity("UI", format!("button '{label}' failed: {e}"));
-                                    }
-                            });
-                        }
-                        if let Some(n) = &cheat.note {
-                            ui.label(format!("({n})"));
-                        }
-                    }
+                    });
                 }
+            };
 
-                // Hotkey assignment input & button
-                ui.separator();
-                ui.label("Hotkey:");
-                let hk_field = self
-                    .cheat_hotkey_inputs
-                    .entry(cheat.id)
-                    .or_insert_with(|| cheat.hotkey.clone().unwrap_or_default());
-                ui.add(egui::TextEdit::singleline(hk_field).hint_text("e.g. Num1, Shift+Alt+K"));
-
-                if ui.button("Bind").clicked() {
-                    let text = hk_field.trim().to_string();
-                    if text.is_empty() {
-                        if let Ok(mut s) = self.session.lock() {
-                            s.set_cheat_hotkey(cheat.id, None);
-                        }
-                        self.sync_registered_hotkeys();
-                        self.log(format!("cleared hotkey for '{}'", cheat.label));
-                    } else {
-                        match hotkeys::HotkeySpec::parse(&text) {
-                            Ok(spec) => {
-                                let display = spec.display_string();
-                                if let Ok(mut s) = self.session.lock() {
-                                    s.set_cheat_hotkey(cheat.id, Some(display.clone()));
-                                }
-                                *hk_field = display.clone();
-                                self.sync_registered_hotkeys();
-                                self.log(format!("bound '{}' to hotkey '{display}'", cheat.label));
-                            }
-                            Err(e) => {
-                                self.log(format!("invalid hotkey format for '{}': {e}", cheat.label));
-                            }
-                        }
-                    }
-                }
-            });
+            if only_one_group {
+                render_group_body(ui, self);
+            } else {
+                egui::CollapsingHeader::new(format!("📁 {} ({})", group_name, group_cheats.len()))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        render_group_body(ui, self);
+                    });
+            }
         }
     }
 
@@ -950,8 +973,14 @@ impl TrainlabApp {
         }
     }
 
-    /// Trigger a cheat by id (e.g. from hotkey or UI).
-    fn trigger_cheat(&mut self, cheat_id: u64) {
+    fn log_with_source(&mut self, source: &str, msg: impl Into<String>) {
+        if let Ok(mut s) = self.session.lock() {
+            s.log_activity(source, msg);
+        }
+    }
+
+    /// Trigger a cheat by id with a specific origin source (e.g. "HOTKEY", "OVERLAY", "UI").
+    fn trigger_cheat_with_source(&mut self, cheat_id: u64, source: &str) {
         let (label, kind) = match self.session.lock() {
             Ok(s) => match s.get_cheat(cheat_id) {
                 Some(c) => (c.label.clone(), c.kind.clone()),
@@ -962,7 +991,7 @@ impl TrainlabApp {
 
         match kind {
             CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
-                // T-112: Hotkey toggle drives the real cave — install on enable, restore on disable.
+                // T-112: Hotkey/Overlay toggle drives the real cave — install on enable, restore on disable.
                 let new_state = !enabled;
                 if new_state {
                     // Enable: install the cave.
@@ -976,13 +1005,13 @@ impl TrainlabApp {
                                 s.set_toggle_cave_info(cheat_id, original.clone(), cave);
                                 s.set_cheat_toggle(cheat_id, true);
                             }
-                            self.log(format!(
-                                "hotkey toggled '{}' -> ENABLED (cave @ {cave:#x}, target {target:#x})",
+                            self.log_with_source(source, format!(
+                                "toggled '{}' -> ENABLED (cave @ {cave:#x}, target {target:#x})",
                                 label
                             ));
                         }
-                        _ => self.log(format!(
-                            "hotkey toggle '{}' enable FAILED (cave @ {target:#x})",
+                        _ => self.log_with_source(source, format!(
+                            "toggle '{}' enable FAILED (cave @ {target:#x})",
                             label
                         )),
                     }
@@ -998,19 +1027,19 @@ impl TrainlabApp {
                                 if let Ok(mut s) = self.session.lock() {
                                     s.set_cheat_toggle(cheat_id, false);
                                 }
-                                self.log(format!(
-                                    "hotkey toggled '{}' -> DISABLED (restored {bytes_written} bytes @ {target:#x})",
+                                self.log_with_source(source, format!(
+                                    "toggled '{}' -> DISABLED (restored {bytes_written} bytes @ {target:#x})",
                                     label
                                 ));
                             }
-                            _ => self.log(format!(
-                                "hotkey toggle '{}' disable FAILED (restore @ {target:#x})",
+                            _ => self.log_with_source(source, format!(
+                                "toggle '{}' disable FAILED (restore @ {target:#x})",
                                 label
                             )),
                         }
                     } else {
-                        self.log(format!(
-                            "hotkey toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
+                        self.log_with_source(source, format!(
+                            "toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
                             label
                         ));
                     }
@@ -1030,14 +1059,14 @@ impl TrainlabApp {
                             if let Ok(mut s) = self.session.lock() {
                                 s.set_cheat_toggle(cheat_id, new_state);
                             }
-                            self.log(format!(
-                                "hotkey toggled patch '{}' -> {} ({bytes_written} bytes @ {target:#x}, {desc})",
+                            self.log_with_source(source, format!(
+                                "toggled patch '{}' -> {} ({bytes_written} bytes @ {target:#x}, {desc})",
                                 label,
                                 if new_state { "ENABLED" } else { "DISABLED" }
                             ));
                         }
-                        _ => self.log(format!(
-                            "hotkey toggle patch '{}' {} FAILED (@ {target:#x})",
+                        _ => self.log_with_source(source, format!(
+                            "toggle patch '{}' {} FAILED (@ {target:#x})",
                             label,
                             if new_state { "enable" } else { "disable" }
                         )),
@@ -1045,9 +1074,9 @@ impl TrainlabApp {
                 }
             }
             CheatKind::Button { commands } => {
-                self.log(format!("hotkey triggered button '{}': running {} command(s)...", label, commands.len()));
+                self.log_with_source(source, format!("triggered button '{}': running {} command(s)...", label, commands.len()));
                 if let Err(e) = self.run_cheat_commands(&commands) {
-                    self.log(format!("hotkey button '{}' failed: {e}", label));
+                    self.log_with_source(source, format!("button '{}' failed: {e}", label));
                 }
             }
             CheatKind::Value { address, value_type, address_expr } => {
@@ -1065,9 +1094,9 @@ impl TrainlabApp {
                         });
                         match r {
                             Some(Response::Write { bytes_written }) => {
-                                self.log(format!("hotkey applied '{}' = {val_str} ({bytes_written} bytes)", label));
+                                self.log_with_source(source, format!("applied '{}' = {val_str} ({bytes_written} bytes)", label));
                             }
-                            _ => self.log(format!("hotkey apply for '{}' failed", label)),
+                            _ => self.log_with_source(source, format!("apply for '{}' failed", label)),
                         }
                     }
             }
@@ -1077,9 +1106,14 @@ impl TrainlabApp {
                 } else {
                     base_address
                 };
-                self.log(format!("hotkey triggered struct '{}' (@ {base_addr:#x}): {} field(s)", label, fields.len()));
+                self.log_with_source(source, format!("triggered struct '{}' (@ {base_addr:#x}): {} field(s)", label, fields.len()));
             }
         }
+    }
+
+    /// Trigger a cheat by id with default "UI" source.
+    fn trigger_cheat(&mut self, cheat_id: u64) {
+        self.trigger_cheat_with_source(cheat_id, "UI");
     }
 
     /// Auto-discover running game processes and match against YAML cheat profiles.
@@ -1371,7 +1405,7 @@ impl TrainlabApp {
                     ui.label("No active matches.");
                 } else {
                     egui::ScrollArea::vertical()
-                        .max_height(180.0)
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for (addr, val) in &matches_sample {
                                 ui.horizontal(|ui| {
@@ -1479,7 +1513,7 @@ fn main() -> eframe::Result<()> {
 
                             // Forward relevant session mutations as protocol::Event to the DLL
                             match &evt {
-                                crate::event::SessionEvent::CheatUpdated { id, enabled, value, .. } => {
+                                trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::CheatUpdated { id, enabled, value, .. }) => {
                                     if let Some(en) = enabled {
                                         controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::CheatToggled { id: *id, enabled: *en });
                                     }
@@ -1496,7 +1530,7 @@ fn main() -> eframe::Result<()> {
                                         });
                                     }
                                 }
-                                crate::event::SessionEvent::ProfileLoaded { .. } => {
+                                trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::ProfileLoaded { .. }) => {
                                     let cheats_dto = if let Ok(s) = event_session.lock() {
                                         s.export_overlay_cheats()
                                     } else {
@@ -1510,7 +1544,7 @@ fn main() -> eframe::Result<()> {
                             // Handle window visibility directly via Win32 so it works
                             // even when the window is backgrounded / hidden.
                             #[cfg(windows)]
-                            if let crate::event::SessionEvent::WindowVisibility { command } = &evt {
+                            if let trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::WindowVisibility { command }) = &evt {
                                 use windows_sys::Win32::UI::WindowsAndMessaging::{
                                     FindWindowA, SetForegroundWindow, ShowWindow,
                                     EnumWindows, GetWindowTextA,
@@ -1607,19 +1641,7 @@ impl eframe::App for TrainlabApp {
         // Prefer Win32 foreground PID check if available, falling back to egui viewport focus.
         let is_focused = is_trainer_focused().unwrap_or_else(|| ctx.input(|i| i.viewport().focused.unwrap_or(true)));
 
-        // Sync focus/visibility state to injected DLL so XInput controller inputs
-        // are masked from the background game only when state transitions.
-        if self.connected {
-            let active_mask = is_focused && self.window_visible;
-            if self.last_synced_mask != Some(active_mask) {
-                self.last_synced_mask = Some(active_mask);
-                controller::emit_event_to_dll(&self.session, trainlab_core::protocol::Event::OverlayVisibilityChanged {
-                    visible: active_mask,
-                });
-            }
-        }
-
-        // Process remote window visibility commands from REST API / MCP / Web Dashboard
+        // Process remote window visibility commands from REST API / MCP / Web Dashboard / Overlay
         if let Ok(mut s) = self.session.lock()
             && let Some(cmd) = s.take_window_cmd() {
                 if cmd == "show" {
@@ -1650,7 +1672,7 @@ impl eframe::App for TrainlabApp {
                 }
             } else if let Some(reg) = self.registered_hotkeys.get(&hotkey_id) {
                 let cheat_id = reg.cheat_id;
-                self.trigger_cheat(cheat_id);
+                self.trigger_cheat_with_source(cheat_id, "HOTKEY");
             }
         }
 
@@ -1686,8 +1708,50 @@ impl eframe::App for TrainlabApp {
             });
         }
 
-        // Refresh connection display from the shared session (which the MCP
-        // server may also update) so the GUI always reflects current state.
+        // Drain incoming unified events from the session event bus
+        while let Ok(evt) = self.bus_rx.try_recv() {
+            match evt {
+                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::CheatTriggered { id }) => {
+                    self.trigger_cheat_with_source(id, "OVERLAY");
+                }
+                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::CheatToggled { id, enabled }) => {
+                    let should_toggle = if let Ok(s) = self.session.lock()
+                        && let Some(c) = s.get_cheat(id) {
+                            let cur_enabled = match &c.kind {
+                                CheatKind::Toggle { enabled: e, .. } => *e,
+                                CheatKind::Patch { enabled: e, .. } => *e,
+                                _ => false,
+                            };
+                            cur_enabled != enabled
+                        } else {
+                            false
+                        };
+                    if should_toggle {
+                        self.trigger_cheat_with_source(id, "OVERLAY");
+                    }
+                }
+                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::WindowCommand { command }) => {
+                    if command == "show" {
+                        self.window_visible = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    } else if command == "hide" {
+                        self.window_visible = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    }
+                }
+                trainlab_core::event::BusEvent::Log(_) => {
+                    ctx.request_repaint();
+                }
+                trainlab_core::event::BusEvent::Session(trainlab_core::event::SessionEvent::ConnectionChanged { connected, .. }) => {
+                    self.connected = connected;
+                }
+                _ => {}
+            }
+        }
+
         if let Ok(s) = self.session.lock() {
             self.connected = s.connected();
             if self.connected {
@@ -1754,8 +1818,10 @@ impl eframe::App for TrainlabApp {
         if !self.connected {
             // State 1: Welcome & Attach Screen
             egui::CentralPanel::default().show(ctx, |ui| {
-                egui::ScrollArea::both().show(ui, |ui| {
-                    ui.add_space(20.0);
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(20.0);
                     ui.vertical_centered(|ui| {
                         ui.heading("Welcome to trainlab");
                         ui.label("The MCP-enabled control room for process memory analysis & injection.");
@@ -1895,8 +1961,10 @@ impl eframe::App for TrainlabApp {
                 });
 
             egui::CentralPanel::default().show(ctx, |ui| {
-                egui::ScrollArea::both().show(ui, |ui| {
-                    match self.active_tab {
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        match self.active_tab {
                         ActiveTab::Cheats => {
                             self.show_cheats_panel(ui, ctx);
                         }
@@ -2131,7 +2199,7 @@ impl eframe::App for TrainlabApp {
                                 }
                             }
                             egui::ScrollArea::vertical()
-                                .max_height(200.0)
+                                .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     for r in &self.regions {
                                         let perms = format!(
@@ -2164,7 +2232,7 @@ impl eframe::App for TrainlabApp {
                                 .map(|s| s.list_activity_log())
                                 .unwrap_or_default();
                             egui::ScrollArea::both()
-                                .max_height(500.0)
+                                .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     for line in &activity_log {
                                         if line.starts_with("UI:") {

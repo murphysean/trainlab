@@ -149,9 +149,15 @@ pub struct ProfileCheat {
     /// For button cheats: a sequence of commands to execute when pressed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<Vec<ProfileCommand>>,
+    /// Optional grouping/category name (e.g. "In Menu", "In Session", "Player", "Weapons").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Optional hotkey binding string (e.g. "Num 1", "Shift+Alt+K", "F1").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hotkey: Option<String>,
+    /// Optional flag to hide this cheat from the user-facing GUI and in-game overlay (e.g. agent/WIP/transport cheats).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
     /// Optional human note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -173,6 +179,9 @@ pub enum ProfileCommand {
         /// Optional value_type (e.g. "i32", "f32", "ptr").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_type: Option<String>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Install or toggle a code cave hook.
     InstallCave {
@@ -187,23 +196,67 @@ pub enum ProfileCommand {
         /// Jump style ("absolute" for 14-byte long jump, "relative" for 5-byte short jump).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         jump: Option<String>,
-        /// Shellcode payload hex string.
+        /// Shellcode payload hex string (mutually exclusive with asm).
         #[serde(default)]
         payload: String,
+        /// Optional assembly source text (mutually exclusive with payload).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        asm: Option<String>,
         /// Optional marker label to store the cave address under.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         marker: Option<String>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Allocate a string inside target memory.
     AllocateString {
-        /// String text content.
-        content: String,
+        /// String text content (optional if size is provided).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        /// Buffer size in bytes (optional if content is provided).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<usize>,
+        /// Optional byte to fill allocated buffer with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill_byte: Option<u8>,
         /// Layout kind ("c", "rust", "json", "yaml", "xml", "js", "config").
-        #[serde(default = "default_string_kind")]
-        kind: String,
+        #[serde(default = "default_string_kind", rename = "kind")]
+        string_kind: String,
         /// Optional marker label to store the allocated string pointer under.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         marker: Option<String>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Allocate raw memory buffer of a specified size in bytes.
+    AllocateMemory {
+        /// Buffer size in bytes.
+        size: usize,
+        /// Optional marker label to store the allocated memory address under.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        marker: Option<String>,
+        /// Optional fill byte value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fill_byte: Option<u8>,
+        /// Optional protection permissions ("rw", "rwx", "rx", "r").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permissions: Option<String>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Free / deallocate a previously allocated memory region or buffer.
+    FreeMemory {
+        /// Address expression or marker name to free (e.g. "$scratch_buf").
+        address: String,
+        /// Optional size in bytes to decommit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<usize>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Perform an AOB pattern scan and optionally store the first match in a marker.
     AobScan {
@@ -214,6 +267,9 @@ pub enum ProfileCommand {
         /// Optional offset added to the match address.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         offset: Option<i64>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Perform a pointer chase and store the final target address in a marker.
     PointerChase {
@@ -224,6 +280,9 @@ pub enum ProfileCommand {
         /// Pointer offsets (e.g. ["0x10", "0x28"]).
         #[serde(default)]
         offsets: Vec<String>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Assert that memory at an address matches an expected value/expression (aborts sequence if failed).
     Assert {
@@ -237,11 +296,27 @@ pub enum ProfileCommand {
         /// Optional value type ("i32", "f32", "ptr", "u32").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_type: Option<String>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Set or compute a marker address in the session (e.g. derived slot from another marker).
+    SetMarker {
+        /// Name of the marker to create or update.
+        marker: String,
+        /// Address expression (marker + offset, module + offset, raw hex/dec).
+        address: String,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// Sleep/delay execution for a specified duration in milliseconds.
     Wait {
         /// Delay duration in milliseconds (e.g. 5000 for 5 seconds).
         ms: u64,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
 }
 
@@ -271,11 +346,23 @@ impl GameProfile {
 /// The default directory (relative to the GUI exe) where profiles live.
 pub const PROFILES_DIR: &str = "cheats";
 
-/// Discover profile files in the `cheats/` directory next to the executable.
-///
-/// Returns a list of `(file_name, profile)` for every `*.yaml`/`*.yml` file
-/// that parses as a `GameProfile`.
-pub fn discover_profiles() -> Vec<(String, GameProfile)> {
+/// Result of attempting to discover and load a profile file from disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DiscoveredProfile {
+    /// Successfully parsed profile.
+    Valid {
+        file: String,
+        profile: GameProfile,
+    },
+    /// Failed to parse profile YAML, containing the parse error.
+    Invalid {
+        file: String,
+        error: String,
+    },
+}
+
+/// Discover all profile files in `cheats/`, returning both valid profiles and any invalid files with errors.
+pub fn discover_all_profiles() -> Vec<DiscoveredProfile> {
     let dir = profiles_dir_path();
     let mut out = Vec::new();
     let entries = match std::fs::read_dir(&dir) {
@@ -292,12 +379,38 @@ pub fn discover_profiles() -> Vec<(String, GameProfile)> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(profile) = GameProfile::from_yaml(&text) {
-                out.push((name, profile));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match GameProfile::from_yaml(&text) {
+                Ok(profile) => out.push(DiscoveredProfile::Valid { file: name, profile }),
+                Err(err) => {
+                    eprintln!("[PROFILE] failed to parse cheats/{name}: {err}");
+                    out.push(DiscoveredProfile::Invalid { file: name, error: err });
+                }
+            },
+            Err(e) => {
+                eprintln!("[PROFILE] failed to read cheats/{name}: {e}");
+                out.push(DiscoveredProfile::Invalid {
+                    file: name,
+                    error: format!("file read error: {e}"),
+                });
             }
+        }
     }
     out
+}
+
+/// Discover profile files in the `cheats/` directory next to the executable.
+///
+/// Returns a list of `(file_name, profile)` for every `*.yaml`/`*.yml` file
+/// that parses as a valid `GameProfile`.
+pub fn discover_profiles() -> Vec<(String, GameProfile)> {
+    discover_all_profiles()
+        .into_iter()
+        .filter_map(|dp| match dp {
+            DiscoveredProfile::Valid { file, profile } => Some((file, profile)),
+            DiscoveredProfile::Invalid { .. } => None,
+        })
+        .collect()
 }
 
 /// The absolute path to the profiles directory (next to the GUI exe).
@@ -366,7 +479,9 @@ mod tests {
                 base: None,
                 fields: None,
                 commands: None,
+                group: None,
                 hotkey: None,
+                hidden: None,
                 note: Some("wood stock".into()),
             }],
         };
@@ -431,7 +546,9 @@ mod tests {
                 base: None,
                 fields: None,
                 commands: None,
+                group: Some("Speed".into()),
                 hotkey: None,
+                hidden: None,
                 note: Some("mining speed test".into()),
             }],
         };
@@ -444,5 +561,82 @@ mod tests {
         // The asm source must round-trip exactly.
         let expected_asm = "miningSpeedValue:\n  dd (float)4.0\ndivss xmm2, [rip + miningSpeedValue]";
         assert_eq!(c.asm.as_deref(), Some(expected_asm));
+    }
+
+    #[test]
+    fn set_marker_command_roundtrips_yaml() {
+        let yaml = r#"
+schema: trainlab-profile/v1
+game: DRG Survivor.exe
+name: Test SetMarker
+inject_dll: true
+init_commands:
+  - type: set_marker
+    marker: gc_slot
+    address: "gc_cave+0x44"
+cheats: []
+"#;
+        let profile = GameProfile::from_yaml(yaml).expect("parse yaml");
+        let init_cmds = profile.init_commands.as_ref().expect("init commands");
+        assert_eq!(init_cmds.len(), 1);
+        match &init_cmds[0] {
+            ProfileCommand::SetMarker { marker, address, .. } => {
+                assert_eq!(marker, "gc_slot");
+                assert_eq!(address, "gc_cave+0x44");
+            }
+            _ => panic!("expected SetMarker variant"),
+        }
+        let serialized = profile.to_yaml().expect("serialize");
+        let back = GameProfile::from_yaml(&serialized).expect("roundtrip parse");
+        assert_eq!(back.name, "Test SetMarker");
+    }
+
+    #[test]
+    fn install_cave_with_asm_roundtrips_yaml() {
+        let yaml = r#"
+schema: trainlab-profile/v1
+game: helldivers.exe
+name: Test InstallCave ASM
+inject_dll: true
+init_commands:
+  - type: install_cave
+    target_ref: zlua_gettop
+    hook: override
+    jump: relative
+    asm: |
+      sub rax, [rcx + 0x10]
+      sar rax, 3
+      ret
+    marker: eval_cave
+cheats: []
+"#;
+        let profile = GameProfile::from_yaml(yaml).expect("parse yaml");
+        let init_cmds = profile.init_commands.as_ref().expect("init commands");
+        assert_eq!(init_cmds.len(), 1);
+        match &init_cmds[0] {
+            ProfileCommand::InstallCave { target_ref, hook, jump, asm, marker, .. } => {
+                assert_eq!(target_ref.as_deref(), Some("zlua_gettop"));
+                assert_eq!(hook, "override");
+                assert_eq!(jump.as_deref(), Some("relative"));
+                assert!(asm.is_some());
+                assert_eq!(marker.as_deref(), Some("eval_cave"));
+            }
+            _ => panic!("expected InstallCave variant"),
+        }
+        let serialized = profile.to_yaml().expect("serialize");
+        let back = GameProfile::from_yaml(&serialized).expect("roundtrip parse");
+        assert_eq!(back.name, "Test InstallCave ASM");
+    }
+
+    #[test]
+    fn test_helldivers_yaml_with_command_notes_parses_cleanly() {
+        let helldivers_yaml_path = std::path::Path::new("/home/sean/Documents/Gaming/helldivers/helldivers.yaml");
+        if helldivers_yaml_path.exists() {
+            let content = std::fs::read_to_string(helldivers_yaml_path).expect("read helldivers.yaml");
+            let profile = GameProfile::from_yaml(&content).expect("helldivers.yaml must parse cleanly");
+            assert_eq!(profile.game, "helldivers.exe");
+            assert!(profile.init_commands.is_some());
+            assert!(!profile.cheats.is_empty());
+        }
     }
 }

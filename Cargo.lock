@@ -4442,7 +4442,6 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "libc",
- "tokio",
  "tracing",
  "trainlab-cave",
  "trainlab-core",

@@ -104,9 +104,38 @@ pub struct SnapshotArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllocateStringArgs {
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_byte: Option<u8>,
+    #[serde(default = "default_string_kind")]
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker: Option<String>,
+}
+
+fn default_string_kind() -> String {
+    "c".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocateMemoryArgs {
+    pub size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_byte: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FreeMemoryArgs {
+    pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +158,9 @@ pub struct ScanStartArgs {
     pub max: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment: Option<usize>,
+    /// Optional region marker name (e.g. "game_heap") or address expression to bound the scan to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +186,9 @@ pub struct ScanAobArgs {
     pub offset: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker: Option<String>,
+    /// Optional region marker name (e.g. "game_heap") or address expression to bound the search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +228,9 @@ pub struct UndoRevertArgs {
 pub struct SetMarkerArgs {
     pub label: String,
     pub address: String,
+    /// Optional byte size if this marks a memory region (e.g. 0x10000000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
     pub note: Option<String>,
 }
 
@@ -208,7 +246,9 @@ pub struct AddCheatArgs {
     pub kind: String,
     pub address: Option<String>,
     pub value_type: Option<String>,
+    pub group: Option<String>,
     pub hotkey: Option<String>,
+    pub hidden: Option<bool>,
     pub note: Option<String>,
 }
 
@@ -249,7 +289,10 @@ pub struct StageWriteArgs {
 pub struct InstallCaveArgs {
     pub target: String,
     pub hook: String,
+    #[serde(default)]
     pub payload: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asm: Option<String>,
     #[serde(default = "default_absolute")]
     pub jump: String,
     pub marker: Option<String>,
@@ -399,9 +442,54 @@ pub fn read_f64_val(proc: &dyn ProcessMemory, addr: u64) -> Result<String, Strin
 }
 
 pub fn read_cstr(proc: &dyn ProcessMemory, addr: u64, max_len: usize) -> Result<String, String> {
-    let data = proc.read(addr, max_len).map_err(|e| e.to_string())?;
-    let len = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-    String::from_utf8(data[..len].to_vec()).map_err(|e| format!("invalid utf-8: {e}"))
+    if addr == 0 {
+        return Ok(String::new());
+    }
+    let max = max_len.min(65536);
+    let data = proc.read(addr, max).map_err(|e| e.to_string())?;
+    if data.is_empty() || data[0] == 0 {
+        return Ok(String::new());
+    }
+    let (slice, has_nul) = match data.iter().position(|&b| b == 0) {
+        Some(pos) => (&data[..pos], true),
+        None => (&data[..], false),
+    };
+    if slice.is_empty() {
+        return Ok(String::new());
+    }
+    if slice.iter().all(|&b| (0x20..=0x7e).contains(&b) || b == b'\t' || b == b'\n' || b == b'\r') {
+        if slice.len() > 1024 {
+            // Write oversized string to a snapshot file
+            let _ = std::fs::create_dir_all("snapshots");
+            let file_name = format!("cstr_{addr:#x}_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+            let file_path = format!("snapshots/{file_name}");
+            if let Ok(mut f) = std::fs::File::create(&file_path) {
+                use std::io::Write;
+                let _ = f.write_all(slice);
+            }
+            let preview = String::from_utf8_lossy(&slice[..256]);
+            Ok(format!("{preview}... [{} bytes total, saved to snapshots/{file_name}]", slice.len()))
+        } else {
+            Ok(String::from_utf8_lossy(slice).into_owned())
+        }
+    } else {
+        // Binary / non-printable: if no null terminator or raw binary, save full snapshot and return URL/preview
+        let _ = std::fs::create_dir_all("snapshots");
+        let file_name = format!("bin_{addr:#x}_{}.bin", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let file_path = format!("snapshots/{file_name}");
+        if let Ok(mut f) = std::fs::File::create(&file_path) {
+            use std::io::Write;
+            let _ = f.write_all(slice);
+        }
+        let display_len = slice.len().min(32);
+        let hex_preview = slice[..display_len]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let nul_note = if !has_nul { " (no null terminator found)" } else { "" };
+        Ok(format!("<non-ascii {} bytes{nul_note}> {hex_preview}... [saved to snapshots/{file_name}]", slice.len()))
+    }
 }
 
 /// Format a memory buffer as hex + ASCII text view.
@@ -452,7 +540,7 @@ pub fn eval_addr_expr(
 ) -> Result<u64, ToolError> {
     let s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let resolve_marker = |name: &str| s.get_marker(name).map(|m| m.address);
-    let resolve_module = |_name: &str| {
+    let resolve_module = |name: &str| {
         if let Some(pid) = s.game_pid() {
             #[cfg(windows)]
             {
@@ -485,16 +573,49 @@ pub fn execute_read(
         "hex" | "bytes" => {
             let len = args.len.unwrap_or(16);
             let bytes = mem.read(target_addr, len).map_err(|e| err(e.to_string()))?;
-            let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-            Ok(ToolResult::with_data(
-                hex.clone(),
-                serde_json::json!({
-                    "address": target_addr,
-                    "hex": hex,
-                    "bytes_read": bytes.len(),
-                    "client_id": ctx.id,
-                }),
-            ))
+            if bytes.iter().all(|&b| b == 0) {
+                let msg = format!("all 0s ({} bytes @ {target_addr:#x})", bytes.len());
+                return Ok(ToolResult::with_data(
+                    msg,
+                    serde_json::json!({
+                        "address": target_addr,
+                        "all_zero": true,
+                        "bytes_read": bytes.len(),
+                        "client_id": ctx.id,
+                    }),
+                ));
+            }
+            if bytes.len() > 512 {
+                let _ = std::fs::create_dir_all("snapshots");
+                let file_name = format!("read_hex_{target_addr:#x}_{}.bin", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+                let file_path = format!("snapshots/{file_name}");
+                if let Ok(mut f) = std::fs::File::create(&file_path) {
+                    use std::io::Write;
+                    let _ = f.write_all(&bytes);
+                }
+                let preview = bytes[..64].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                let text = format!("{preview}... [{} bytes total, saved to snapshots/{file_name}]", bytes.len());
+                Ok(ToolResult::with_data(
+                    text,
+                    serde_json::json!({
+                        "address": target_addr,
+                        "bytes_read": bytes.len(),
+                        "snapshot_file": file_name,
+                        "client_id": ctx.id,
+                    }),
+                ))
+            } else {
+                let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                Ok(ToolResult::with_data(
+                    hex.clone(),
+                    serde_json::json!({
+                        "address": target_addr,
+                        "hex": hex,
+                        "bytes_read": bytes.len(),
+                        "client_id": ctx.id,
+                    }),
+                ))
+            }
         }
         "ptr" | "pointer" => {
             let val = read_u64(mem, target_addr).map_err(err)?;
@@ -606,16 +727,50 @@ pub fn execute_dump(
 ) -> Result<ToolResult, ToolError> {
     let target_addr = eval_addr_expr(session, &args.address, Some(mem))?;
     let data = mem.read(target_addr, args.len).map_err(|e| err(format!("dump failed: {e}")))?;
-    let text = format_dump(target_addr, &data);
 
-    Ok(ToolResult::with_data(
-        text,
-        serde_json::json!({
-            "address": target_addr,
-            "bytes_read": data.len(),
-            "client_id": ctx.id,
-        }),
-    ))
+    if data.iter().all(|&b| b == 0) {
+        return Ok(ToolResult::with_data(
+            format!("all 0s ({} bytes @ {target_addr:#x})", data.len()),
+            serde_json::json!({
+                "address": target_addr,
+                "all_zero": true,
+                "bytes_read": data.len(),
+                "client_id": ctx.id,
+            }),
+        ));
+    }
+
+    if data.len() > 1024 {
+        let _ = std::fs::create_dir_all("snapshots");
+        let file_name = format!("dump_{target_addr:#x}_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let file_path = format!("snapshots/{file_name}");
+        let full_text = format_dump(target_addr, &data);
+        if let Ok(mut f) = std::fs::File::create(&file_path) {
+            use std::io::Write;
+            let _ = f.write_all(full_text.as_bytes());
+        }
+        let preview = format_dump(target_addr, &data[..256]);
+        let text = format!("{preview}\n... [{} bytes total, full dump saved to snapshots/{file_name}]", data.len());
+        Ok(ToolResult::with_data(
+            text,
+            serde_json::json!({
+                "address": target_addr,
+                "bytes_read": data.len(),
+                "snapshot_file": file_name,
+                "client_id": ctx.id,
+            }),
+        ))
+    } else {
+        let text = format_dump(target_addr, &data);
+        Ok(ToolResult::with_data(
+            text,
+            serde_json::json!({
+                "address": target_addr,
+                "bytes_read": data.len(),
+                "client_id": ctx.id,
+            }),
+        ))
+    }
 }
 
 /// Execute a multi-field typed struct inspection.
@@ -779,14 +934,21 @@ pub fn execute_allocate_string(
     args: AllocateStringArgs,
 ) -> Result<ToolResult, ToolError> {
     let kind = args.kind.trim().to_lowercase();
-    let mut bytes = args.content.as_bytes().to_vec();
-
     let is_rust = kind == "rust";
     let is_c_like = matches!(kind.as_str(), "c" | "json" | "yaml" | "xml" | "js" | "config");
 
     if !is_rust && !is_c_like {
         return Err(err(format!("unknown string kind '{kind}' (expected 'c', 'rust', 'json', 'yaml', 'xml', 'js', or 'config')")));
     }
+
+    let mut bytes = if let Some(content) = args.content {
+        content.into_bytes()
+    } else if let Some(size) = args.size {
+        let fill = args.fill_byte.unwrap_or(0);
+        vec![fill; size]
+    } else {
+        return Err(err("either 'content' or 'size' must be provided for allocate_string"));
+    };
 
     if is_c_like && !bytes.ends_with(&[0]) {
         bytes.push(0);
@@ -828,7 +990,7 @@ pub fn execute_allocate_string(
         let _ = ctx;
         let _ = mem;
         let _ = len;
-        Err(err("string allocation is only supported on Windows"))
+        return Err(err("string allocation is only supported on Windows"));
     }
 
     #[cfg(windows)]
@@ -855,6 +1017,161 @@ pub fn execute_allocate_string(
     }
 }
 
+/// Execute arbitrary memory buffer allocation in target process.
+pub fn execute_allocate_memory(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: &dyn ProcessMemory,
+    args: AllocateMemoryArgs,
+) -> Result<ToolResult, ToolError> {
+    if args.size == 0 {
+        return Err(err("size must be greater than 0"));
+    }
+    let size = args.size;
+
+    #[cfg(windows)]
+    let (alloc_addr, prot_flags) = {
+        use windows_sys::Win32::System::Memory::{
+            VirtualAllocEx, MEM_COMMIT, MEM_RESERVE,
+            PAGE_READWRITE, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_READ, PAGE_READONLY
+        };
+        let prot = match args.permissions.as_deref().unwrap_or("rw").trim().to_lowercase().as_str() {
+            "rwx" | "wx" | "exec_rw" => PAGE_EXECUTE_READWRITE,
+            "rx" | "exec_r" => PAGE_EXECUTE_READ,
+            "r" | "ro" => PAGE_READONLY,
+            _ => PAGE_READWRITE,
+        };
+
+        let pid = {
+            let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+            s.game_pid().ok_or_else(|| err("no attached game process to allocate memory in"))?
+        };
+        let proc_handle = unsafe {
+            windows_sys::Win32::System::Threading::OpenProcess(
+                windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION
+                    | windows_sys::Win32::System::Threading::PROCESS_VM_WRITE
+                    | windows_sys::Win32::System::Threading::PROCESS_VM_READ,
+                0,
+                pid,
+            )
+        };
+        if proc_handle.is_null() {
+            return Err(err("failed to open process for allocation"));
+        }
+        let ptr = unsafe {
+            VirtualAllocEx(proc_handle, std::ptr::null(), size, MEM_COMMIT | MEM_RESERVE, prot)
+        };
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+        if ptr.is_null() {
+            return Err(err("VirtualAllocEx failed in target process"));
+        }
+        (ptr as u64, prot)
+    };
+
+    #[cfg(not(windows))]
+    {
+        let _ = session;
+        let _ = ctx;
+        let _ = mem;
+        let _ = size;
+        return Err(err("memory allocation is only supported on Windows"));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(fill) = args.fill_byte {
+            let buf = vec![fill; size];
+            let _ = mem.write(alloc_addr, &buf);
+        }
+
+        if let Ok(mut s) = session.lock() {
+            s.log_activity(&ctx.id, format!("allocated memory ({size} bytes) at {alloc_addr:#x}"));
+            if let Some(m) = &args.marker {
+                let _ = s.set_marker(m, alloc_addr, Some(&format!("Allocated memory buffer ({size} bytes)")));
+            }
+        }
+
+        Ok(ToolResult::with_data(
+            format!("allocated {size} bytes at {alloc_addr:#x}"),
+            serde_json::json!({
+                "ptr": format!("{alloc_addr:#x}"),
+                "address": alloc_addr,
+                "size": size,
+                "client_id": ctx.id,
+            }),
+        ))
+    }
+}
+
+/// Free a previously allocated memory buffer or string in target process.
+pub fn execute_free_memory(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: &dyn ProcessMemory,
+    args: FreeMemoryArgs,
+) -> Result<ToolResult, ToolError> {
+    let target_addr = eval_addr_expr(session, &args.address, Some(mem))?;
+    if target_addr == 0 {
+        return Err(err("cannot free null address 0x0"));
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Memory::{VirtualFreeEx, MEM_RELEASE, MEM_DECOMMIT};
+        let pid = {
+            let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+            s.game_pid().ok_or_else(|| err("no attached game process to free memory in"))?
+        };
+        let proc_handle = unsafe {
+            windows_sys::Win32::System::Threading::OpenProcess(
+                windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION,
+                0,
+                pid,
+            )
+        };
+        if proc_handle.is_null() {
+            return Err(err("failed to open process to free memory"));
+        }
+
+        // MEM_RELEASE requires size to be 0
+        let (free_size, free_type) = if let Some(s) = args.size {
+            (s, MEM_DECOMMIT)
+        } else {
+            (0, MEM_RELEASE)
+        };
+
+        let res = unsafe {
+            VirtualFreeEx(proc_handle, target_addr as *mut _, free_size, free_type)
+        };
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+
+        if res == 0 {
+            return Err(err(format!("VirtualFreeEx failed for address {target_addr:#x}")));
+        }
+
+        if let Ok(mut s) = session.lock() {
+            s.log_activity(&ctx.id, format!("freed memory at {target_addr:#x}"));
+        }
+
+        Ok(ToolResult::with_data(
+            format!("freed memory at {target_addr:#x}"),
+            serde_json::json!({
+                "freed_address": target_addr,
+                "address": format!("{target_addr:#x}"),
+                "client_id": ctx.id,
+            }),
+        ))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = session;
+        let _ = ctx;
+        let _ = target_addr;
+        Err(err("free_memory is only supported on Windows"))
+    }
+}
+
 /// Start a new value memory scan within the caller's `ClientContext`.
 pub fn execute_scan_start(
     session: &SharedSession,
@@ -872,7 +1189,41 @@ pub fn execute_scan_start(
         None => crate::scan::ScanOp::Exact { value: args.value },
     };
 
-    let regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+    let regions = {
+        let all_regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        if let Some(r_name) = &args.region {
+            let (r_start, r_end) = {
+                let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+                if let Some(m) = s.get_marker(r_name) {
+                    let end = m.end_address().unwrap_or(m.address.saturating_add(0x1000));
+                    (m.address, end)
+                } else {
+                    drop(s);
+                    // Try evaluating as address expression
+                    let start = eval_addr_expr(session, r_name, Some(mem))?;
+                    (start, start.saturating_add(0x1000))
+                }
+            };
+            let filtered: Vec<_> = all_regions
+                .into_iter()
+                .filter_map(|mut r| {
+                    if r.end <= r_start || r.start >= r_end {
+                        None
+                    } else {
+                        r.start = r.start.max(r_start);
+                        r.end = r.end.min(r_end);
+                        Some(r)
+                    }
+                })
+                .collect();
+            if filtered.is_empty() {
+                return Err(err(format!("specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages")));
+            }
+            filtered
+        } else {
+            all_regions
+        }
+    };
     let mut scan = crate::scan::Scan::new(vt).with_alignment(alignment);
     scan.first_scan(mem, &regions, op).map_err(|e| err(format!("scan failed: {e}")))?;
 
@@ -1082,7 +1433,40 @@ pub fn execute_scan_aob(
         return Err(err("empty or invalid AOB pattern"));
     }
 
-    let regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+    let regions = {
+        let all_regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        if let Some(r_name) = &args.region {
+            let (r_start, r_end) = {
+                let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+                if let Some(m) = s.get_marker(r_name) {
+                    let end = m.end_address().unwrap_or(m.address.saturating_add(0x1000));
+                    (m.address, end)
+                } else {
+                    drop(s);
+                    let start = eval_addr_expr(session, r_name, Some(mem))?;
+                    (start, start.saturating_add(0x1000))
+                }
+            };
+            let filtered: Vec<_> = all_regions
+                .into_iter()
+                .filter_map(|mut r| {
+                    if r.end <= r_start || r.start >= r_end {
+                        None
+                    } else {
+                        r.start = r.start.max(r_start);
+                        r.end = r.end.min(r_end);
+                        Some(r)
+                    }
+                })
+                .collect();
+            if filtered.is_empty() {
+                return Err(err(format!("specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages")));
+            }
+            filtered
+        } else {
+            all_regions
+        }
+    };
     let mut matches = Vec::new();
 
     for r in regions {
@@ -1217,14 +1601,20 @@ pub fn execute_set_marker(
 ) -> Result<ToolResult, ToolError> {
     let target_addr = eval_addr_expr(session, &args.address, mem)?;
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
-    s.set_marker(&args.label, target_addr, args.note.as_deref()).map_err(err)?;
-    s.log_activity(&ctx.id, format!("saved marker '${}' = {target_addr:#x}", args.label));
+    s.set_marker_region(&args.label, target_addr, args.size, args.note.as_deref()).map_err(err)?;
+    let size_msg = match args.size {
+        Some(sz) => format!(" (region: {target_addr:#x}..{:#x}, {sz:#x} bytes)", target_addr.saturating_add(sz as u64)),
+        None => String::new(),
+    };
+    s.log_activity(&ctx.id, format!("saved marker '${}' = {target_addr:#x}{size_msg}", args.label));
 
     Ok(ToolResult::with_data(
-        format!("saved marker '${}' = {target_addr:#x}", args.label),
+        format!("saved marker '${}' = {target_addr:#x}{size_msg}", args.label),
         serde_json::json!({
             "label": args.label,
             "address": target_addr,
+            "size": args.size,
+            "end_address": args.size.map(|s| target_addr.saturating_add(s as u64)),
             "client_id": ctx.id,
         }),
     ))
@@ -1240,12 +1630,18 @@ pub fn execute_get_marker(
     match s.get_marker(&args.label) {
         Some(m) => {
             let note = m.note.as_deref().unwrap_or("");
-            let text = format!("{} = {:#018x}{}", m.label, m.address, if note.is_empty() { String::new() } else { format!("  ({note})") });
+            let region_str = match m.size {
+                Some(sz) => format!("..{:#x} (+{sz:#x})", m.address.saturating_add(sz as u64)),
+                None => String::new(),
+            };
+            let text = format!("{} = {:#018x}{}{}", m.label, m.address, region_str, if note.is_empty() { String::new() } else { format!("  ({note})") });
             Ok(ToolResult::with_data(
                 text,
                 serde_json::json!({
                     "label": m.label,
                     "address": m.address,
+                    "size": m.size,
+                    "end_address": m.end_address(),
                     "note": m.note,
                     "client_id": ctx.id,
                 }),
@@ -1272,14 +1668,24 @@ pub fn execute_list_markers(
         .iter()
         .map(|m| {
             let note = m.note.as_deref().unwrap_or("");
-            format!("{:<20} {:#018x}{}", m.label, m.address, if note.is_empty() { String::new() } else { format!("  ({note})") })
+            let region_str = match m.size {
+                Some(sz) => format!("..{:#x} (+{sz:#x})", m.address.saturating_add(sz as u64)),
+                None => String::new(),
+            };
+            format!("{:<20} {:#018x}{}{}", m.label, m.address, region_str, if note.is_empty() { String::new() } else { format!("  ({note})") })
         })
         .collect();
 
     Ok(ToolResult::with_data(
         lines.join("\n"),
         serde_json::json!({
-            "markers": markers.iter().map(|m| serde_json::json!({ "label": m.label, "address": m.address, "note": m.note })).collect::<Vec<_>>(),
+            "markers": markers.iter().map(|m| serde_json::json!({
+                "label": m.label,
+                "address": m.address,
+                "size": m.size,
+                "end_address": m.end_address(),
+                "note": m.note,
+            })).collect::<Vec<_>>(),
             "client_id": ctx.id,
         }),
     ))
@@ -1388,14 +1794,20 @@ pub fn execute_add_cheat(
     };
 
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
-    let id = s.add_cheat(&args.label, cheat_kind, args.hotkey.as_deref(), args.note.as_deref());
-    s.log_activity(&ctx.id, format!("added cheat '{}' (id {id})", args.label));
+    let is_hidden = args.hidden.unwrap_or(false);
+    let id = s.add_cheat_group(&args.label, cheat_kind, args.group.as_deref(), args.hotkey.as_deref(), is_hidden, args.note.as_deref());
+    let group_str = match &args.group {
+        Some(g) => format!(" [group: '{g}']"),
+        None => String::new(),
+    };
+    s.log_activity(&ctx.id, format!("added cheat '{}' (id {id}{group_str}{})", args.label, if is_hidden { ", hidden" } else { "" }));
 
     Ok(ToolResult::with_data(
-        format!("added cheat '{}' (id {id})", args.label),
+        format!("added cheat '{}' (id {id}{group_str})", args.label),
         serde_json::json!({
             "id": id,
             "label": args.label,
+            "group": args.group,
             "client_id": ctx.id,
         }),
     ))
@@ -1417,6 +1829,10 @@ pub fn execute_list_cheats(
     let lines: Vec<String> = cheats
         .iter()
         .map(|c| {
+            let group_tag = match &c.group {
+                Some(g) => format!(" [{g}]"),
+                None => String::new(),
+            };
             let kind = match &c.kind {
                 CheatKind::Value { address, value_type, address_expr } => {
                     if let Some(expr) = address_expr {
@@ -1439,7 +1855,7 @@ pub fn execute_list_cheats(
                     format!("button ({} cmd(s))", commands.len())
                 }
             };
-            format!("[{}] {} — {kind}", c.id, c.label)
+            format!("[{}]{} {} — {kind}", c.id, group_tag, c.label)
         })
         .collect();
 
@@ -1451,7 +1867,7 @@ pub fn execute_list_cheats(
                     CheatKind::Toggle { enabled, .. } | CheatKind::Patch { enabled, .. } => Some(*enabled),
                     _ => None,
                 };
-                serde_json::json!({ "id": c.id, "label": c.label, "enabled": enabled })
+                serde_json::json!({ "id": c.id, "label": c.label, "group": c.group, "enabled": enabled })
             }).collect::<Vec<_>>(),
             "client_id": ctx.id,
         }),
@@ -1498,7 +1914,7 @@ pub fn execute_set_cheat_toggle(
             let pid = if args.enabled {
                 s.stage_op_with_cheat(
                     target,
-                    PendingKind::InstallCave { hook, marker: None },
+                    PendingKind::InstallCave { hook, marker: None, label_offsets: std::collections::HashMap::new() },
                     format!("enable toggle cheat {} at {:#x}", args.id, target),
                     Some(args.id),
                 )
@@ -1656,22 +2072,43 @@ pub fn execute_list_profiles(
     _session: &SharedSession,
     ctx: &ClientContext,
 ) -> Result<ToolResult, ToolError> {
-    let profiles = crate::profile::discover_profiles();
-    if profiles.is_empty() {
+    let all_profiles = crate::profile::discover_all_profiles();
+    if all_profiles.is_empty() {
         return Ok(ToolResult::with_data(
             "(no profiles found in cheats/)",
             serde_json::json!({ "profiles": [], "client_id": ctx.id }),
         ));
     }
-    let lines: Vec<String> = profiles
-        .iter()
-        .map(|(f, p)| format!("{} — game: {} ({}) v{}", f, p.game, p.name, p.version))
-        .collect();
+    let mut lines = Vec::new();
+    let mut json_list = Vec::new();
+
+    for dp in &all_profiles {
+        match dp {
+            crate::profile::DiscoveredProfile::Valid { file, profile } => {
+                lines.push(format!("{} — game: {} ({}) v{}", file, profile.game, profile.name, profile.version));
+                json_list.push(serde_json::json!({
+                    "file": file,
+                    "valid": true,
+                    "game": profile.game,
+                    "name": profile.name,
+                    "version": profile.version,
+                }));
+            }
+            crate::profile::DiscoveredProfile::Invalid { file, error } => {
+                lines.push(format!("{} — UNPARSEABLE / INVALID: {}", file, error));
+                json_list.push(serde_json::json!({
+                    "file": file,
+                    "valid": false,
+                    "error": error,
+                }));
+            }
+        }
+    }
 
     Ok(ToolResult::with_data(
         lines.join("\n"),
         serde_json::json!({
-            "profiles": profiles.iter().map(|(f, p)| serde_json::json!({ "file": f, "game": p.game, "name": p.name, "version": p.version })).collect::<Vec<_>>(),
+            "profiles": json_list,
             "client_id": ctx.id,
         }),
     ))
@@ -1742,7 +2179,9 @@ pub fn execute_save_profile(
                         CheatKind::Button { commands } => Some(commands.clone()),
                         _ => None,
                     },
+                    group: c.group.clone(),
                     hotkey: c.hotkey.clone(),
+                    hidden: if c.hidden { Some(true) } else { None },
                     note: c.note.clone(),
                 }
             })
@@ -1855,12 +2294,33 @@ pub fn execute_assemble_asm(
 
     let disasm_lines = crate::disasm::disassemble(origin_rip, &assembled.bytes, Some(50));
 
-    let output = format!(
-        "assembled {} byte(s) (origin {origin_rip:#x}):\nhex: \"{}\"\n\ndisassembled:\n{}",
+    // If origin_rip is non-zero, automatically set markers for defined labels
+    if origin_rip != 0 && !assembled.label_offsets.is_empty() {
+        if let Ok(mut s) = session.lock() {
+            for (lbl_name, offset) in &assembled.label_offsets {
+                let lbl_addr = origin_rip.saturating_add(*offset);
+                let _ = s.set_marker(lbl_name, lbl_addr, Some(&format!("Label from assembly at +{offset:#x}")));
+            }
+        }
+    }
+
+    let mut output = format!(
+        "assembled {} byte(s) (origin {origin_rip:#x}):\nhex: \"{}\"\n",
         assembled.bytes.len(),
         assembled.hex,
-        disasm_lines.join("\n")
     );
+
+    if !assembled.label_offsets.is_empty() {
+        output.push_str("\nlabels:\n");
+        let mut sorted_labels: Vec<_> = assembled.label_offsets.iter().collect();
+        sorted_labels.sort_by_key(|(_, off)| *off);
+        for (lbl, off) in sorted_labels {
+            let addr = origin_rip.saturating_add(*off);
+            output.push_str(&format!("  • {lbl} -> +{off:#x} ({addr:#x})\n"));
+        }
+    }
+
+    output.push_str(&format!("\ndisassembled:\n{}", disasm_lines.join("\n")));
 
     Ok(ToolResult::with_data(
         output,
@@ -1869,6 +2329,7 @@ pub fn execute_assemble_asm(
             "hex": assembled.hex,
             "instruction_count": assembled.instruction_count,
             "origin": origin_rip,
+            "labels": assembled.label_offsets,
             "disassembly": disasm_lines,
             "client_id": ctx.id,
         }),
@@ -2036,7 +2497,22 @@ pub fn execute_stage_install_cave(
     use crate::cave_hook::{CaveHook, JumpStyle};
     use crate::session::PendingKind;
     let target = eval_addr_expr(session, &args.target, mem)?;
-    let payload = crate::expr::parse_hex_bytes(&args.payload).map_err(err)?;
+
+    if args.asm.is_some() && !args.payload.trim().is_empty() {
+        return Err(err("cannot provide both 'asm' and 'payload' (mutually exclusive)"));
+    }
+
+    let (payload, label_offsets) = if let Some(asm_src) = &args.asm {
+        let symbols: std::collections::HashMap<String, u64> = {
+            let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+            s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
+        };
+        let block = crate::asm::assemble_text(asm_src, target, &symbols).map_err(err)?;
+        (block.bytes, block.label_offsets)
+    } else {
+        (crate::expr::parse_hex_bytes(&args.payload).map_err(err)?, std::collections::HashMap::new())
+    };
+
     let jump = match args.jump.to_lowercase().as_str() {
         "absolute" => JumpStyle::Absolute,
         "relative" | "short" => JumpStyle::Relative,
@@ -2057,7 +2533,7 @@ pub fn execute_stage_install_cave(
         .map_err(|_| err("session lock poisoned"))?;
     let id = s.stage_op(
         target,
-        PendingKind::InstallCave { hook, marker: args.marker.clone() },
+        PendingKind::InstallCave { hook, marker: args.marker.clone(), label_offsets },
         format!(
             "install {kind_desc} cave at {:#x}, payload={} byte(s){}",
             target,
@@ -2162,15 +2638,24 @@ mod tests {
         assert!(jmp_res.message.contains("relative jump from 0x140000000 to 0x140001000"));
         assert!(jmp_res.message.contains("padded to 7 bytes"));
 
-        // 2. Test assemble asm with named marker
+        // 2. Test assemble asm with named marker and defined labels
         session.lock().unwrap().set_marker("cave_target", 0x140002000, None).unwrap();
 
         let asm_res = execute_assemble_asm(&session, &ctx, None, AssembleAsmArgs {
-            code: "mov rax, 0x1234\njmp $cave_target".into(),
+            code: "mov rax, 0x1234\nfire_flag:\ndb 01\ncmd_ptr:\ndq 0x12345678\njmp $cave_target".into(),
             origin: Some("0x140000000".into()),
         }).unwrap();
         assert!(asm_res.message.contains("assembled"));
         assert!(asm_res.message.contains("disassembled"));
+        assert!(asm_res.message.contains("fire_flag"));
+
+        // Check markers were automatically registered in session
+        let s = session.lock().unwrap();
+        let fire_flag = s.get_marker("fire_flag").expect("fire_flag marker");
+        let cmd_ptr = s.get_marker("cmd_ptr").expect("cmd_ptr marker");
+        assert!(fire_flag.address > 0x140000000);
+        assert!(cmd_ptr.address > fire_flag.address);
+        drop(s);
     }
 
     struct MockMem {
@@ -2288,6 +2773,7 @@ mod tests {
             value: 100.0,
             max: None,
             alignment: Some(4),
+            region: None,
         }).unwrap();
         assert!(res1.message.contains("2 match(es)"));
 
@@ -2363,6 +2849,7 @@ mod tests {
         let m_set = execute_set_marker(&session, &ctx, Some(&mem), SetMarkerArgs {
             label: "gold_addr".into(),
             address: "0x20".into(),
+            size: None,
             note: Some("gold currency".into()),
         }).unwrap();
         assert!(m_set.message.contains("saved marker '$gold_addr' = 0x20"));
@@ -2381,7 +2868,9 @@ mod tests {
             kind: "value".into(),
             address: Some("gold_addr".into()),
             value_type: Some("i32".into()),
+            group: None,
             hotkey: None,
+            hidden: None,
             note: None,
         }).unwrap();
         assert!(c_add.message.contains("added cheat 'Gold Cheat' (id 0)"));

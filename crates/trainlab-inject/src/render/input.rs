@@ -59,7 +59,6 @@ pub unsafe extern "system" fn hooked_wndproc(
             let y = ((lparam >> 16) & 0xFFFF) as i16 as f32;
             if overlay_active {
                 super::overlay::push_pointer_event(x, y, Some(true));
-                super::overlay::handle_click(x as i32, y as i32);
                 return 0; // Block game from receiving the click
             }
         }

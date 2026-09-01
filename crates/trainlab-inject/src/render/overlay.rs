@@ -12,7 +12,7 @@ pub static OUTBOUND_EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 // Queued raw events destined for egui
 static PENDING_EGUI_EVENTS: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
 
-// Navigation state: Active tab (0 = Cheats/Toggles, 1 = Memory/Pinned Values, 2 = Window Control)
+// Navigation state: Active tab (0 = Cheats/Toggles, 1 = Window Control)
 static ACTIVE_TAB: AtomicU64 = AtomicU64::new(0);
 
 // Selected item index in the current active tab
@@ -21,6 +21,11 @@ static SELECTED_INDEX: AtomicU64 = AtomicU64::new(0);
 // Stick debounce / trigger state
 static STICK_TRIGGERED_Y: AtomicBool = AtomicBool::new(false);
 static STICK_TRIGGERED_X: AtomicBool = AtomicBool::new(false);
+
+// Active trigger flash feedback: (cheat_id, Instant of trigger)
+static TRIGGER_FLASH: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
+// Status toast message: (Message text, is_success, Instant of event)
+static STATUS_TOAST: Mutex<Option<(String, bool, std::time::Instant)>> = Mutex::new(None);
 
 // XInput Button Bitmasks
 pub const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
@@ -38,17 +43,38 @@ pub const XINPUT_GAMEPAD_B: u16 = 0x2000;
 pub const XINPUT_GAMEPAD_X: u16 = 0x4000;
 pub const XINPUT_GAMEPAD_Y: u16 = 0x8000;
 
+fn get_categories(cheats: &[OverlayCheatDto]) -> Vec<Option<String>> {
+    let mut cats = Vec::new();
+    // Tab 0 is always "All"
+    cats.push(None);
+    for c in cheats {
+        if (c.kind_str == "toggle" || c.kind_str == "button")
+            && let Some(g) = &c.group {
+                let g_str = g.trim().to_string();
+                if !g_str.is_empty() && !cats.iter().any(|existing| existing.as_deref() == Some(g_str.as_str())) {
+                    cats.push(Some(g_str));
+                }
+            }
+    }
+    cats
+}
+
 fn get_active_tab_item_count() -> usize {
     let tab = ACTIVE_TAB.load(Ordering::Relaxed);
     let cheats = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
-    if tab == 0 {
-        // Toggle / Button cheats
-        cheats.iter().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").count().max(1)
-    } else if tab == 1 {
-        // Value / Pinned memory cheats
-        cheats.iter().filter(|c| c.kind_str == "value").count().max(1)
+    let categories = get_categories(&cheats);
+    let total_tabs = categories.len() + 1; // + 1 for Window Controls tab
+
+    if (tab as usize) < categories.len() {
+        let cat = &categories[tab as usize];
+        cheats.iter().filter(|c| {
+            (c.kind_str == "toggle" || c.kind_str == "button") && match cat {
+                Some(g) => c.group.as_deref() == Some(g),
+                None => true,
+            }
+        }).count().max(1)
     } else {
-        // Tab 2: Window actions (Show GUI, Hide GUI, Disconnect)
+        // Window actions (Show GUI, Hide GUI, Disconnect)
         3
     }
 }
@@ -56,17 +82,20 @@ fn get_active_tab_item_count() -> usize {
 /// Push controller button state changes and analog stick deflection into egui events.
 pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
     let mut events = Vec::new();
+    let cheats_snap = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
+    let categories = get_categories(&cheats_snap);
+    let total_tabs = (categories.len() + 1) as u64;
 
-    // 1. Tab Switching via Bumpers (LB / RB across 3 tabs: 0 -> 1 -> 2 -> 0)
+    // 1. Tab Switching via Bumpers (LB / RB across dynamic groups + Window tab)
     if (just_pressed & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0 {
         let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-        let new_tab = if cur_tab == 0 { 2 } else { cur_tab - 1 };
+        let new_tab = if cur_tab == 0 { total_tabs.saturating_sub(1) } else { cur_tab - 1 };
         ACTIVE_TAB.store(new_tab, Ordering::Relaxed);
         SELECTED_INDEX.store(0, Ordering::Relaxed);
     }
     if (just_pressed & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0 {
         let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-        let new_tab = (cur_tab + 1) % 3;
+        let new_tab = (cur_tab + 1) % total_tabs.max(1);
         ACTIVE_TAB.store(new_tab, Ordering::Relaxed);
         SELECTED_INDEX.store(0, Ordering::Relaxed);
     }
@@ -147,33 +176,7 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
 
     let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
 
-    // 4. Left / Right Value Adjustment in Memory Tab
-    if cur_tab == 1 && (move_left || move_right) {
-        let sel = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
-        let delta: i64 = if move_right { 10 } else { -10 };
-        if let Ok(mut cheats) = CHEATS.lock() {
-            let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
-            if sel < val_cheats.len() {
-                let cheat = &mut val_cheats[sel];
-                let current: i64 = cheat.current_value.as_deref().unwrap_or("0").parse().unwrap_or(0);
-                let new_val = (current + delta).max(0);
-                let new_str = new_val.to_string();
-                cheat.current_value = Some(new_str.clone());
-                cheat.pinned_bytes = Some(new_val.to_le_bytes().to_vec());
-
-                // Broadcast Event::CheatValueChanged
-                if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                    out.push(Event::CheatValueChanged {
-                        id: cheat.id,
-                        value_str: new_str,
-                        pinned_bytes: cheat.pinned_bytes.clone(),
-                    });
-                }
-            }
-        }
-    }
-
-    // 5. A Button (Cross / Enter) -> Toggle, Pin, or Window Command
+    // 4. A Button (Cross / Enter) -> Toggle, Button Trigger, or Window Command
     if (just_pressed & XINPUT_GAMEPAD_A) != 0 {
         events.push(egui::Event::Key {
             key: egui::Key::Enter,
@@ -184,41 +187,55 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         });
 
         let sel = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
-        if cur_tab == 0 {
-            // Cheats / Toggles Tab
+        let cheats_snap = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
+        let categories = get_categories(&cheats_snap);
+
+        if (cur_tab as usize) < categories.len() {
+            let cat = &categories[cur_tab as usize];
             if let Ok(mut cheats) = CHEATS.lock() {
-                let mut toggles: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").collect();
+                let mut toggles: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| {
+                    (c.kind_str == "toggle" || c.kind_str == "button") && match cat {
+                        Some(g) => c.group.as_deref() == Some(g),
+                        None => true,
+                    }
+                }).collect();
                 if sel < toggles.len() {
                     let cheat = &mut toggles[sel];
-                    cheat.enabled = !cheat.enabled;
                     let id = cheat.id;
-                    let enabled = cheat.enabled;
+                    let is_button = cheat.kind_str == "button";
 
-                    // Emit Event::CheatToggled
-                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                        out.push(Event::CheatToggled { id, enabled });
+                    if is_button {
+                        // Button cheat: emit CheatTriggered event
+                        if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                            out.push(Event::CheatTriggered { id });
+                        }
+                        if let Ok(mut tf) = TRIGGER_FLASH.lock() {
+                            *tf = Some((id, std::time::Instant::now()));
+                        }
+                        if let Ok(mut toast) = STATUS_TOAST.lock() {
+                            *toast = Some((format!("Triggered '{}'", cheat.label), true, std::time::Instant::now()));
+                        }
+                        tracing::info!("Overlay triggered button cheat #{} '{}'", id, cheat.label);
+                    } else {
+                        cheat.enabled = !cheat.enabled;
+                        let enabled = cheat.enabled;
+                        // Emit Event::CheatToggled
+                        if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                            out.push(Event::CheatToggled { id, enabled });
+                        }
+                        if let Ok(mut toast) = STATUS_TOAST.lock() {
+                            *toast = Some((
+                                format!("{} -> {}", cheat.label, if enabled { "ENABLED" } else { "DISABLED" }),
+                                enabled,
+                                std::time::Instant::now(),
+                            ));
+                        }
+                        tracing::info!("Overlay toggled cheat #{} '{}' -> {}", id, cheat.label, enabled);
                     }
-                    tracing::info!("Overlay toggled cheat #{} '{}' -> {}", id, cheat.label, enabled);
-                }
-            }
-        } else if cur_tab == 1 {
-            // Memory / Pinned Values Tab
-            if let Ok(mut cheats) = CHEATS.lock() {
-                let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
-                if sel < val_cheats.len() {
-                    let cheat = &mut val_cheats[sel];
-                    cheat.enabled = !cheat.enabled;
-                    let id = cheat.id;
-                    let enabled = cheat.enabled;
-
-                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                        out.push(Event::CheatToggled { id, enabled });
-                    }
-                    tracing::info!("Overlay toggled pin on memory item #{} '{}' -> {}", id, cheat.label, enabled);
                 }
             }
         } else {
-            // Tab 2: Window Controls (0 = Show GUI, 1 = Hide GUI, 2 = Toggle GUI)
+            // Window Controls (0 = Show GUI, 1 = Hide GUI, 2 = Toggle GUI)
             let cmd = match sel {
                 0 => "show",
                 1 => "hide",
@@ -226,6 +243,9 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
             };
             if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
                 out.push(Event::WindowCommand { command: cmd.to_string() });
+            }
+            if let Ok(mut toast) = STATUS_TOAST.lock() {
+                *toast = Some((format!("Executed Window: {cmd}"), true, std::time::Instant::now()));
             }
             tracing::info!("Overlay requested main window command: {}", cmd);
         }
@@ -328,69 +348,6 @@ pub fn drain_outbound_events() -> Vec<Event> {
     }
 }
 
-/// Handle a mouse/touch click inside the in-game overlay bounds.
-pub fn handle_click(x: i32, y: i32) {
-    let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-    // Tab header clicks (y: 30..70)
-    if (30..=75).contains(&y) {
-        if (30..=140).contains(&x) {
-            ACTIVE_TAB.store(0, Ordering::Relaxed);
-            SELECTED_INDEX.store(0, Ordering::Relaxed);
-            return;
-        } else if (145..=255).contains(&x) {
-            ACTIVE_TAB.store(1, Ordering::Relaxed);
-            SELECTED_INDEX.store(0, Ordering::Relaxed);
-            return;
-        } else if (260..=370).contains(&x) {
-            ACTIVE_TAB.store(2, Ordering::Relaxed);
-            SELECTED_INDEX.store(0, Ordering::Relaxed);
-            return;
-        }
-    }
-
-    // List item clicks (y >= 140)
-    if (30..=380).contains(&x) && y >= 140 {
-        let item_idx = ((y - 140) / 48) as usize;
-        SELECTED_INDEX.store(item_idx as u64, Ordering::Relaxed);
-        if cur_tab == 0 {
-            if let Ok(mut cheats) = CHEATS.lock() {
-                let mut toggles: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").collect();
-                if item_idx < toggles.len() {
-                    let cheat = &mut toggles[item_idx];
-                    cheat.enabled = !cheat.enabled;
-                    let id = cheat.id;
-                    let enabled = cheat.enabled;
-                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                        out.push(Event::CheatToggled { id, enabled });
-                    }
-                }
-            }
-        } else if cur_tab == 1 {
-            if let Ok(mut cheats) = CHEATS.lock() {
-                let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
-                if item_idx < val_cheats.len() {
-                    let cheat = &mut val_cheats[item_idx];
-                    cheat.enabled = !cheat.enabled;
-                    let id = cheat.id;
-                    let enabled = cheat.enabled;
-                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                        out.push(Event::CheatToggled { id, enabled });
-                    }
-                }
-            }
-        } else {
-            let cmd = match item_idx {
-                0 => "show",
-                1 => "hide",
-                _ => "show",
-            };
-            if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                out.push(Event::WindowCommand { command: cmd.to_string() });
-            }
-        }
-    }
-}
-
 /// Execute on-frame value pinning for any pinned cheats.
 pub fn execute_pinning_cadence() {
     if let Ok(cheats) = CHEATS.lock() {
@@ -454,129 +411,198 @@ pub fn render_in_game_egui(
             .resizable(false)
             .show(ctx, |ui| {
                 let mut active_tab = ACTIVE_TAB.load(Ordering::Relaxed);
+                let mut cheats = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
+                let categories = get_categories(&cheats);
+                let window_tab_idx = categories.len();
 
-                // 1. Tab Selector with 3 Tabs (Cheats, Memory, Window)
-                ui.horizontal(|ui| {
-                    let tab0_btn = if active_tab == 0 {
-                        egui::Button::new("🎮 Cheats").fill(egui::Color32::from_rgb(20, 90, 160))
-                    } else {
-                        egui::Button::new("🎮 Cheats").fill(egui::Color32::from_rgb(30, 35, 45))
-                    };
-                    if ui.add_sized([105.0, 28.0], tab0_btn).clicked() {
-                        active_tab = 0;
-                        ACTIVE_TAB.store(0, Ordering::Relaxed);
-                        SELECTED_INDEX.store(0, Ordering::Relaxed);
+                // 1. Dynamic Tab Selector across categories + Window Controls
+                ui.horizontal_wrapped(|ui| {
+                    for (cat_idx, cat) in categories.iter().enumerate() {
+                        let label = match cat {
+                            Some(name) => format!("🎮 {name}"),
+                            None => "🎮 All".to_string(),
+                        };
+                        let is_active = active_tab as usize == cat_idx;
+                        let btn = if is_active {
+                            egui::Button::new(&label).fill(egui::Color32::from_rgb(20, 90, 160))
+                        } else {
+                            egui::Button::new(&label).fill(egui::Color32::from_rgb(30, 35, 45))
+                        };
+                        if ui.add_sized([110.0, 26.0], btn).clicked() {
+                            active_tab = cat_idx as u64;
+                            ACTIVE_TAB.store(active_tab, Ordering::Relaxed);
+                            SELECTED_INDEX.store(0, Ordering::Relaxed);
+                        }
                     }
 
-                    let tab1_btn = if active_tab == 1 {
-                        egui::Button::new("🧠 Memory").fill(egui::Color32::from_rgb(20, 90, 160))
-                    } else {
-                        egui::Button::new("🧠 Memory").fill(egui::Color32::from_rgb(30, 35, 45))
-                    };
-                    if ui.add_sized([105.0, 28.0], tab1_btn).clicked() {
-                        active_tab = 1;
-                        ACTIVE_TAB.store(1, Ordering::Relaxed);
-                        SELECTED_INDEX.store(0, Ordering::Relaxed);
-                    }
-
-                    let tab2_btn = if active_tab == 2 {
+                    let is_win_active = active_tab as usize == window_tab_idx;
+                    let win_btn = if is_win_active {
                         egui::Button::new("🖥 Window").fill(egui::Color32::from_rgb(20, 90, 160))
                     } else {
                         egui::Button::new("🖥 Window").fill(egui::Color32::from_rgb(30, 35, 45))
                     };
-                    if ui.add_sized([105.0, 28.0], tab2_btn).clicked() {
-                        active_tab = 2;
-                        ACTIVE_TAB.store(2, Ordering::Relaxed);
+                    if ui.add_sized([110.0, 26.0], win_btn).clicked() {
+                        active_tab = window_tab_idx as u64;
+                        ACTIVE_TAB.store(active_tab, Ordering::Relaxed);
                         SELECTED_INDEX.store(0, Ordering::Relaxed);
                     }
                 });
 
                 ui.separator();
                 let selected_idx = SELECTED_INDEX.load(Ordering::Relaxed) as usize;
-                let mut cheats = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
 
-                if active_tab == 0 {
-                    // TAB 0: Cheats & Toggles
-                    ui.colored_label(egui::Color32::LIGHT_GREEN, "● Active Cheats & Toggles");
-                    ui.label("• LB/RB: Switch Tab | D-Pad: Move | A: Toggle");
+                // Toast / action notification banner if active (< 2.5s)
+                let toast_opt = STATUS_TOAST.lock().ok().and_then(|t| t.clone());
+                if let Some((msg, is_ok, time)) = toast_opt {
+                    let elapsed = time.elapsed().as_secs_f32();
+                    if elapsed < 2.5 {
+                        let alpha = ((2.5 - elapsed) / 0.5).clamp(0.0, 1.0);
+                        let bg_color = if is_ok {
+                            egui::Color32::from_rgba_premultiplied(10, 80, 40, (180.0 * alpha) as u8)
+                        } else {
+                            egui::Color32::from_rgba_premultiplied(120, 30, 30, (180.0 * alpha) as u8)
+                        };
+                        let text_color = if is_ok {
+                            egui::Color32::from_rgba_premultiplied(150, 255, 180, (255.0 * alpha) as u8)
+                        } else {
+                            egui::Color32::from_rgba_premultiplied(255, 180, 180, (255.0 * alpha) as u8)
+                        };
+
+                        egui::Frame::none()
+                            .fill(bg_color)
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.colored_label(text_color, format!("✔ {msg}"));
+                            });
+                        ui.add_space(2.0);
+                    }
+                }
+
+                if (active_tab as usize) < categories.len() {
+                    let cat = &categories[active_tab as usize];
+                    let header_title = match cat {
+                        Some(name) => format!("● Cheats: {name}"),
+                        None => "● All Cheats & Actions".to_string(),
+                    };
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, header_title);
+                    ui.label("• LB/RB: Switch Category | D-Pad: Move | A: Toggle/Trigger");
                     ui.separator();
 
-                    let mut toggle_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "toggle" || c.kind_str == "button").collect();
+                    let mut toggle_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| {
+                        (c.kind_str == "toggle" || c.kind_str == "button") && match cat {
+                            Some(g) => c.group.as_deref() == Some(g),
+                            None => true,
+                        }
+                    }).collect();
 
                     if toggle_cheats.is_empty() {
-                        ui.colored_label(egui::Color32::GRAY, "No toggle cheats registered yet.");
+                        ui.colored_label(egui::Color32::GRAY, "No cheats or buttons registered yet.");
                         ui.label("Add cheats in trainlab-gui, load a profile, or use an AI agent.");
                     } else {
+                        // Check if an item is actively flashing from a trigger
+                        let active_flash = TRIGGER_FLASH.lock().ok().and_then(|f| *f);
+
                         for (idx, cheat) in toggle_cheats.iter_mut().enumerate() {
                             let is_selected = idx == selected_idx;
-                            let text = format!("{} {}", if cheat.enabled { "🟢" } else { "⚪" }, cheat.label);
+                            let is_btn = cheat.kind_str == "button";
+                            let cheat_id = cheat.id;
+                            let cur_enabled = cheat.enabled;
 
-                            if is_selected {
-                                egui::Frame::none()
-                                    .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
-                                    .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)))
-                                    .rounding(egui::Rounding::same(6.0))
-                                    .inner_margin(egui::Margin::symmetric(8.0, 5.0))
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(text);
-                                        });
-                                    });
-                            } else {
-                                ui.horizontal(|ui| {
-                                    ui.label(text);
-                                });
-                            }
-                            ui.separator();
-                        }
-                    }
-                } else if active_tab == 1 {
-                    // TAB 1: Memory Locations & Value Pinning
-                    ui.colored_label(egui::Color32::from_rgb(0, 210, 255), "● Tracked Memory & Value Pinning");
-                    ui.label("• Left/Right: Adjust Value | A: Toggle Pin (📌/🔓)");
-                    ui.separator();
-
-                    let mut val_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| c.kind_str == "value").collect();
-
-                    if val_cheats.is_empty() {
-                        ui.colored_label(egui::Color32::GRAY, "No memory items registered yet.");
-                        ui.label("Add value cheats in trainlab-gui or run a memory scan.");
-                    } else {
-                        for (idx, cheat) in val_cheats.iter_mut().enumerate() {
-                            let is_selected = idx == selected_idx;
-                            let pin_icon = if cheat.enabled { "📌 PINNED" } else { "🔓 Unpinned" };
-                            let pin_color = if cheat.enabled { egui::Color32::LIGHT_GREEN } else { egui::Color32::GRAY };
-                            let val_display = cheat.current_value.as_deref().unwrap_or("?");
-
-                            let row_content = |ui: &mut egui::Ui| {
-                                ui.horizontal(|ui| {
-                                    ui.vertical(|ui| {
-                                        ui.label(format!("{} [{:#x}]", cheat.label, cheat.address));
-                                        ui.colored_label(pin_color, pin_icon);
-                                    });
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.heading(val_display);
-                                    });
-                                });
+                            // Calculate flash animation (0.6s flash duration)
+                            let is_flashing = match active_flash {
+                                Some((id, t)) if id == cheat_id && t.elapsed().as_secs_f32() < 0.6 => true,
+                                _ => false,
                             };
 
-                            if is_selected {
-                                egui::Frame::none()
-                                    .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
-                                    .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)))
-                                    .rounding(egui::Rounding::same(6.0))
-                                    .inner_margin(egui::Margin::symmetric(8.0, 5.0))
-                                    .show(ui, |ui| {
-                                        row_content(ui);
-                                    });
+                            let icon = if is_flashing {
+                                "⚡"
+                            } else if is_btn {
+                                "▶"
+                            } else if cheat.enabled {
+                                "🟢"
                             } else {
-                                row_content(ui);
+                                "⚪"
+                            };
+
+                            let text = format!("{icon} {}", cheat.label);
+                            let mut clicked = false;
+
+                            let (fill_col, stroke) = if is_flashing {
+                                (
+                                    egui::Color32::from_rgba_premultiplied(40, 200, 100, 180),
+                                    egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(100, 255, 180)),
+                                )
+                            } else if is_selected {
+                                (
+                                    egui::Color32::from_rgba_premultiplied(30, 140, 230, 100),
+                                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)),
+                                )
+                            } else {
+                                (
+                                    egui::Color32::from_rgba_premultiplied(20, 25, 35, 80),
+                                    egui::Stroke::NONE,
+                                )
+                            };
+
+                            let resp = egui::Frame::none()
+                                .fill(fill_col)
+                                .stroke(stroke)
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        if is_flashing {
+                                            ui.colored_label(egui::Color32::WHITE, egui::RichText::new(&text).strong());
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.colored_label(egui::Color32::LIGHT_GREEN, "FIRED!");
+                                            });
+                                        } else {
+                                            ui.label(text);
+                                        }
+                                    })
+                                });
+
+                            if resp.response.interact(egui::Sense::click()).clicked() {
+                                clicked = true;
+                                if !is_selected {
+                                    SELECTED_INDEX.store(idx as u64, Ordering::Relaxed);
+                                }
+                            }
+
+                            if clicked {
+                                if is_btn {
+                                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                                        out.push(Event::CheatTriggered { id: cheat_id });
+                                    }
+                                    if let Ok(mut tf) = TRIGGER_FLASH.lock() {
+                                        *tf = Some((cheat_id, std::time::Instant::now()));
+                                    }
+                                    if let Ok(mut toast) = STATUS_TOAST.lock() {
+                                        *toast = Some((format!("Triggered '{}'", cheat.label), true, std::time::Instant::now()));
+                                    }
+                                    tracing::info!("Overlay clicked button cheat #{} '{}'", cheat_id, cheat.label);
+                                } else {
+                                    cheat.enabled = !cur_enabled;
+                                    let new_en = cheat.enabled;
+                                    if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                                        out.push(Event::CheatToggled { id: cheat_id, enabled: new_en });
+                                    }
+                                    if let Ok(mut toast) = STATUS_TOAST.lock() {
+                                        *toast = Some((
+                                            format!("{} -> {}", cheat.label, if new_en { "ENABLED" } else { "DISABLED" }),
+                                            new_en,
+                                            std::time::Instant::now(),
+                                        ));
+                                    }
+                                    tracing::info!("Overlay clicked toggle cheat #{} '{}' -> {}", cheat_id, cheat.label, new_en);
+                                }
                             }
                             ui.separator();
                         }
                     }
                 } else {
-                    // TAB 2: Window Actions
+                    // TAB 1: Window Actions
                     ui.colored_label(egui::Color32::from_rgb(255, 180, 0), "● GUI Window Controls");
                     ui.label("• LB/RB: Switch Tab | D-Pad: Move | A: Execute");
                     ui.separator();
@@ -596,8 +622,9 @@ pub fn render_in_game_egui(
                             });
                         };
 
+                        let mut clicked_action = false;
                         if is_selected {
-                            egui::Frame::none()
+                            let resp = egui::Frame::none()
                                 .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
                                 .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)))
                                 .rounding(egui::Rounding::same(6.0))
@@ -605,12 +632,36 @@ pub fn render_in_game_egui(
                                 .show(ui, |ui| {
                                     row_content(ui);
                                 });
+                            if resp.response.interact(egui::Sense::click()).clicked() {
+                                clicked_action = true;
+                            }
                         } else {
-                            egui::Frame::none()
+                            let resp = egui::Frame::none()
+                                .fill(egui::Color32::from_rgba_premultiplied(20, 25, 35, 80))
+                                .rounding(egui::Rounding::same(6.0))
                                 .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                                 .show(ui, |ui| {
                                     row_content(ui);
                                 });
+                            if resp.response.interact(egui::Sense::click()).clicked() {
+                                clicked_action = true;
+                                SELECTED_INDEX.store(idx as u64, Ordering::Relaxed);
+                            }
+                        }
+
+                        if clicked_action {
+                            let cmd = match idx {
+                                0 => "show",
+                                1 => "hide",
+                                _ => "show",
+                            };
+                            if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
+                                out.push(Event::WindowCommand { command: cmd.to_string() });
+                            }
+                            if let Ok(mut toast) = STATUS_TOAST.lock() {
+                                *toast = Some((format!("Executed Window: {cmd}"), true, std::time::Instant::now()));
+                            }
+                            tracing::info!("Overlay clicked window action #{} -> '{}'", idx, cmd);
                         }
                         ui.separator();
                     }

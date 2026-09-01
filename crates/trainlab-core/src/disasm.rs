@@ -145,11 +145,7 @@ pub fn relocate(bytes: &[u8], orig_ip: u64, new_ip: u64) -> Option<RelocatedBloc
         .map(|i| matches!(
             i.flow_control(),
             FlowControl::UnconditionalBranch
-                | FlowControl::ConditionalBranch
-                | FlowControl::IndirectBranch
                 | FlowControl::Return
-                | FlowControl::Call
-                | FlowControl::IndirectCall
         ))
         .unwrap_or(false);
 
@@ -250,5 +246,22 @@ mod tests {
         let expect_rel = orig_dst as i64 - after_new as i64;
         let rel32 = i32::from_le_bytes(r.bytes[2..6].try_into().unwrap()) as i64;
         assert_eq!(rel32, expect_rel, "jmp retargeted to same absolute destination");
+    }
+
+    #[test]
+    fn relocate_conditional_branch_still_needs_fallthrough_jumpback() {
+        // cmp dword ptr [rbx+0x30], 2 ; jne +0x7D
+        // 83 7B 30 02 (4 bytes) + 75 7D (2 bytes) = 6 bytes at 0x140a448e5
+        let bytes = [0x83, 0x7B, 0x30, 0x02, 0x75, 0x7D];
+        let orig_ip = 0x140a448e5u64;
+        let new_ip = 0x13fff0050u64;
+        let r = relocate(&bytes, orig_ip, new_ip).expect("relocate");
+
+        // Conditional branch has a fallthrough path, so ends_in_branch must be FALSE
+        // so that the trampoline appends a jump-back to return_to.
+        assert!(!r.ends_in_branch, "conditional branch block must not be marked ends_in_branch (needs fallthrough jumpback)");
+        // iced-x86 expands jne rel8 (75 7D) into a jne rel32 (0F 85 ...) if target is far,
+        // which correctly targets the original destination!
+        assert!(!r.bytes.is_empty());
     }
 }

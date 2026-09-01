@@ -1,0 +1,104 @@
+# ==============================================================================
+# Trainlab Cheat Profile Example Template (v1)
+# ==============================================================================
+# Schema Version: trainlab-profile/v1
+# Purpose: Template and reference profile demonstrating setup discovery,
+#          memory assertions, code caves, action buttons, and value cheats.
+# Documentation: docs/CHEAT_PROFILE.md
+# ==============================================================================
+
+schema: trainlab-profile/v1
+game: example_game.exe
+name: "Example Game — Starter Cheat Profile"
+version: "1.0.0"
+inject_dll: true
+author: "Trainlab Community"
+date: "2026-08-31"
+
+# ------------------------------------------------------------------------------
+# 1. SETUP STEPS
+# Resolves restart-stable base addresses and code hooks across game restarts.
+# ------------------------------------------------------------------------------
+setup:
+  # A. AOB Scan: Scans executable memory for a byte signature with wildcards (??)
+  - type: aob_scan
+    name: player_health_hook
+    pattern: "48 89 5C 24 08 57 48 83 EC 20 8B 59 08"
+    offset: 0
+
+  # B. Pointer Chain: Chases multi-level pointer offsets from a module base
+  - type: pointer_chain
+    name: player_resources
+    module: example_game.exe
+    base: "example_game.exe+0x1A2B3C"
+    offsets: ["0x10", "0x38", "0x120"]
+
+  # C. Direct Module Address: Fixed module-relative offset
+  - type: address
+    name: game_tick_rate
+    module: example_game.exe
+    offset: "0x4F80A0"
+
+# ------------------------------------------------------------------------------
+# 2. INITIALIZATION COMMANDS (Optional)
+# Executed automatically in sequence after setup steps resolve.
+# ------------------------------------------------------------------------------
+init_commands:
+  # Validate that the discovered hook address is non-null before touching memory
+  - type: assert
+    address_ref: "player_health_hook"
+    expected: "!0x0"
+    value_type: "ptr"
+    note: "Safety check: ensure hook site resolved"
+
+  # Optional delay for memory/engine initialization to settle
+  - type: wait
+    ms: 500
+
+  # Pre-allocate a memory buffer or string script
+  - type: allocate_memory
+    size: 4096
+    marker: scratch_buffer
+    permissions: "rwx"
+    note: "Scratch workspace for custom payload execution"
+
+# ------------------------------------------------------------------------------
+# 3. CHEATS & ACTIONS
+# User-facing controls rendered in the in-game overlay, GUI, and Web dashboard.
+# ------------------------------------------------------------------------------
+cheats:
+  # --- Value Cheat ---
+  - id: player_gold
+    label: "Gold / Currency"
+    kind: value
+    group: "Resources"
+    value_type: i32
+    address_ref: "player_resources"
+    value: "99999"
+    note: "Directly edits or sets player gold in memory"
+
+  # --- Toggle / Code Cave Cheat ---
+  - id: infinite_health
+    label: "God Mode (Infinite Health)"
+    kind: toggle
+    group: "Player — God Mode"
+    target_ref: "player_health_hook"
+    hook: override
+    jump: relative
+    asm: |
+      ; Stolen instruction simulation / zero out damage register
+      xor ebx, ebx
+      ret
+    note: "Prevents health subtraction by zeroing incoming damage"
+
+  # --- Action / Button Cheat ---
+  - id: add_100_gold_btn
+    label: "Quick Add +1000 Gold"
+    kind: button
+    group: "Actions"
+    commands:
+      - type: write
+        address_ref: "player_resources"
+        value: "99999"
+        value_type: i32
+    note: "Fire-and-forget action button triggered via Gamepad A or UI click"

@@ -118,6 +118,8 @@ pub struct MarkerDto {
     pub address: String,
     #[serde(skip_serializing)]
     pub address_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
     pub note: Option<String>,
 }
 
@@ -125,6 +127,8 @@ pub struct MarkerDto {
 pub struct SetMarkerReq {
     pub name: String,
     pub address: String,
+    #[serde(default)]
+    pub size: Option<usize>,
     pub note: Option<String>,
 }
 
@@ -422,6 +426,7 @@ async fn get_markers(State(state): State<ApiState>) -> Result<Json<Vec<MarkerDto
             name: m.label.clone(),
             address: format!("{:#x}", m.address),
             address_hex: format!("{:#x}", m.address),
+            size: m.size,
             note: m.note.clone(),
         }
     }).collect();
@@ -436,6 +441,7 @@ async fn set_marker(
     mcp_srv.set_marker(rmcp::handler::server::wrapper::Parameters(mcp::SetMarkerArgs {
         label: req.name.clone(),
         address: req.address.clone(),
+        size: req.size,
         note: req.note.clone(),
     })).map_err(|e| err(e.message))?;
 
@@ -509,6 +515,7 @@ async fn first_scan(
         value_type: req.value_type.clone(),
         max: val_max_f64,
         alignment: None,
+        region: None,
     })).map_err(|e| err(e.message))?;
 
     let count = {
