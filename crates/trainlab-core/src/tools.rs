@@ -2267,6 +2267,7 @@ pub fn execute_save_profile(
         author: None,
         setup: vec![],
         init_commands: None,
+        render: None,
         cheats: profile_cheats.clone(),
     };
 

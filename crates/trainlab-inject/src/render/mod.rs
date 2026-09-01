@@ -98,15 +98,31 @@ pub fn init() {
             }
         }
 
-        // Spawn background thread to wait for game window & hook DXGI / D3D
-        std::thread::spawn(|| {
-            dxgi::init_dxgi_hook();
-        });
+        let disable_overlay = std::env::var("TRAINLAB_DISABLE_OVERLAY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        // Spawn background thread for controller combo hook (Select + Start)
-        std::thread::spawn(|| {
-            xinput::init_xinput_hook();
-        });
+        let disable_xinput = std::env::var("TRAINLAB_DISABLE_XINPUT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if !disable_overlay {
+            // Spawn background thread to wait for game window & hook DXGI / D3D
+            std::thread::spawn(|| {
+                dxgi::init_dxgi_hook();
+            });
+        } else {
+            tracing::info!("In-game DXGI overlay hooking disabled via configuration");
+        }
+
+        if !disable_xinput {
+            // Spawn background thread for controller combo hook (Select + Start)
+            std::thread::spawn(|| {
+                xinput::init_xinput_hook();
+            });
+        } else {
+            tracing::info!("XInput controller hooking disabled via configuration");
+        }
     }
 }
 

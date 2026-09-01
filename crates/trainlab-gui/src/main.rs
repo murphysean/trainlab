@@ -26,6 +26,7 @@ use crate::session::{Cheat, CheatKind, SharedSession, SessionState};
 
 mod api;
 use trainlab_core::asm;
+mod config;
 mod event;
 mod controller;
 mod hotkeys;
@@ -153,19 +154,20 @@ impl Default for TrainlabApp {
 
 impl TrainlabApp {
     fn new(session: SharedSession) -> Self {
+        let config = config::AppConfig::load();
         // The game executable to inject into. Overridable via TRAINLAB_GAME env var.
         let game_name = std::env::var("TRAINLAB_GAME").unwrap_or_default();
         let bus_rx = session.lock().unwrap().event_bus().subscribe();
         let mut app = Self {
             session,
-            host: "127.0.0.1".into(),
-            port: "31337".into(),
+            host: config.inject.dll_host.clone(),
+            port: config.inject.dll_port.to_string(),
             connected: false,
             status: "not connected".into(),
             game_name,
-            dll_path: "trainlab_inject.dll".into(),
+            dll_path: config.inject.dll_path.clone(),
             game_candidates: Vec::new(),
-            mcp_addr: format!("127.0.0.1:{MCP_DEFAULT_PORT}"),
+            mcp_addr: format!("{}:{}", config.server.mcp_host, config.server.mcp_port),
             mem_ops: vec![MemOp::default()],
             aob_scans: vec![AobScan::default()],
             regions: Vec::new(),
@@ -1441,6 +1443,8 @@ impl TrainlabApp {
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
+    let config = config::AppConfig::load();
+
     // Check if startup delay is requested via TRAINLAB_STARTUP_DELAY env var
     if let Ok(delay_str) = std::env::var("TRAINLAB_STARTUP_DELAY")
         && let Ok(delay_secs) = delay_str.parse::<u64>()
@@ -1458,18 +1462,21 @@ fn main() -> eframe::Result<()> {
     let is_gamescope = std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok()
         || std::env::var("SteamGamepadUI").is_ok()
         || std::env::var("STEAM_DECK").is_ok()
-        || std::env::var("TRAINLAB_FULLSCREEN").map(|v| v == "1" || v == "true").unwrap_or(false);
+        || config.gui.fullscreen;
+
+    let win_w = config.gui.width;
+    let win_h = config.gui.height;
 
     let viewport_builder = egui::ViewportBuilder::default()
         .with_title("trainlab")
-        .with_inner_size([1280.0, 800.0])
+        .with_inner_size([win_w, win_h])
         .with_min_inner_size([800.0, 540.0]);
 
     let viewport_builder = if is_gamescope {
         // Dedicated display / Gamescope mode: expand edge-to-edge without letterboxing
         viewport_builder.with_fullscreen(true).with_maximized(true)
     } else {
-        // Desktop windowing mode: natural 1280x800 floating window
+        // Desktop windowing mode: natural floating window
         viewport_builder.with_maximized(false)
     };
 
@@ -1478,18 +1485,23 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let app_config = config.clone();
+
     eframe::run_native(
         "trainlab",
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
 
+            // Apply custom DPI / UI scale factor (pixels_per_point) to fix tiny text on high-DPI displays
+            if app_config.gui.scale != 1.0 {
+                ctx.set_pixels_per_point(app_config.gui.scale);
+                tracing::info!("Applied GUI DPI scale factor: {}", app_config.gui.scale);
+            }
+
             // Start the MCP server on a background tokio runtime.
-            let mcp_host = std::env::var("TRAINLAB_MCP_HOST").unwrap_or_else(|_| "0.0.0.0".into());
-            let mcp_port = std::env::var("TRAINLAB_MCP_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(MCP_DEFAULT_PORT);
+            let mcp_host = app_config.server.mcp_host.clone();
+            let mcp_port = app_config.server.mcp_port;
             let mcp_session = session.clone();
             let event_ctx = cc.egui_ctx.clone();
             let event_session = session.clone();

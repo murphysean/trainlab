@@ -81,9 +81,17 @@ pub fn start(port: u16) -> std::io::Result<u16> {
         return Ok(port);
     }
 
-    let listener = TcpListener::bind(("127.0.0.1", port))?;
+    // Default to localhost ("127.0.0.1"), or allow binding to all interfaces ("0.0.0.0") if requested
+    let bind_addr = if std::env::var("TRAINLAB_DLL_BIND_ALL").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+        || std::env::var("TRAINLAB_DLL_HOST").map(|v| v == "0.0.0.0").unwrap_or(false) {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    };
+
+    let listener = TcpListener::bind((bind_addr, port))?;
     let actual = listener.local_addr()?.port();
-    tracing::info!(port = actual, "trainlab-inject listening");
+    tracing::info!(host = bind_addr, port = actual, "trainlab-inject listening");
 
     // Initialize graphics API detection and render loop hooks
     render::init();

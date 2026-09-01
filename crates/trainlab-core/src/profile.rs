@@ -40,9 +40,26 @@ pub struct GameProfile {
     /// Optional initialization commands executed automatically when profile attaches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init_commands: Option<Vec<ProfileCommand>>,
+    /// Optional render & overlay configuration for the injected DLL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<RenderConfig>,
     /// The cheats that show up in the GUI Cheats panel.
     #[serde(default)]
     pub cheats: Vec<ProfileCheat>,
+}
+
+/// Optional overlay and graphics hook settings for the game profile.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RenderConfig {
+    /// Whether to hook Present/EndScene and render the in-game overlay (default true).
+    #[serde(default = "default_true")]
+    pub overlay: bool,
+    /// Whether to install WndProc message hooks for hotkeys (default true).
+    #[serde(default = "default_true")]
+    pub hook_wndproc: bool,
+    /// Whether to poll XInput for controller shortcuts (default true).
+    #[serde(default = "default_true")]
+    pub xinput_hooks: bool,
 }
 
 fn default_true() -> bool {
@@ -469,6 +486,7 @@ mod tests {
                 },
             ],
             init_commands: None,
+            render: None,
             cheats: vec![ProfileCheat {
                 id: "wood".into(),
                 label: "Wood".into(),
@@ -514,6 +532,7 @@ mod tests {
             author: None,
             setup: vec![],
             init_commands: None,
+            render: None,
             cheats: vec![],
         };
         let profiles = vec![("Unrailed2.yaml".to_string(), p)];
@@ -536,6 +555,7 @@ mod tests {
             author: None,
             setup: vec![],
             init_commands: None,
+            render: None,
             cheats: vec![ProfileCheat {
                 id: "mining_speed".into(),
                 label: "Mining Speedhack (4x)".into(),
