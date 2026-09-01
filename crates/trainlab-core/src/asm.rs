@@ -636,6 +636,183 @@ fn parse_and_emit_instruction(
                 return Err(format!("unsupported destination register for lea: '{}'", args[0]));
             }
         }
+        "movd" => {
+            if args.len() != 2 { return Err("movd requires 2 operands (e.g. movd xmm0, eax)".into()); }
+            if let Ok(dst) = parse_xmm(args[0]) {
+                if let Ok(src) = parse_gpr32(args[1]) {
+                    a.movd(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr64(args[1]) {
+                    a.movq(dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.movd(dst, mem).map_err(|e| e.to_string())?;
+                }
+            } else if let Ok(dst) = parse_gpr32(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    a.movd(dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unsupported movd operands: {}, {}", args[0], args[1]));
+                }
+            } else if let Ok(dst) = parse_gpr64(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    a.movq(dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unsupported movd/movq operands: {}, {}", args[0], args[1]));
+                }
+            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+                let src = parse_xmm(args[1])?;
+                a.movd(dst_mem, src).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("unsupported movd operands: {}, {}", args[0], args[1]));
+            }
+        }
+        "movq" => {
+            if args.len() != 2 { return Err("movq requires 2 operands (e.g. movq xmm0, rax)".into()); }
+            if let Ok(dst) = parse_xmm(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    a.movq(dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr64(args[1]) {
+                    a.movq(dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.movq(dst, mem).map_err(|e| e.to_string())?;
+                }
+            } else if let Ok(dst) = parse_gpr64(args[0]) {
+                let src = parse_xmm(args[1])?;
+                a.movq(dst, src).map_err(|e| e.to_string())?;
+            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+                let src = parse_xmm(args[1])?;
+                a.movq(dst_mem, src).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("unsupported movq operands: {}, {}", args[0], args[1]));
+            }
+        }
+        "cvtsi2ss" => {
+            if args.len() != 2 { return Err("cvtsi2ss requires 2 operands (e.g. cvtsi2ss xmm0, eax)".into()); }
+            let dst = parse_xmm(args[0])?;
+            if let Ok(src) = parse_gpr32(args[1]) {
+                a.cvtsi2ss(dst, src).map_err(|e| e.to_string())?;
+            } else if let Ok(src) = parse_gpr64(args[1]) {
+                a.cvtsi2ss(dst, src).map_err(|e| e.to_string())?;
+            } else {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                a.cvtsi2ss(dst, mem).map_err(|e| e.to_string())?;
+            }
+        }
+        "cvtsi2sd" => {
+            if args.len() != 2 { return Err("cvtsi2sd requires 2 operands (e.g. cvtsi2sd xmm0, rax)".into()); }
+            let dst = parse_xmm(args[0])?;
+            if let Ok(src) = parse_gpr32(args[1]) {
+                a.cvtsi2sd(dst, src).map_err(|e| e.to_string())?;
+            } else if let Ok(src) = parse_gpr64(args[1]) {
+                a.cvtsi2sd(dst, src).map_err(|e| e.to_string())?;
+            } else {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                a.cvtsi2sd(dst, mem).map_err(|e| e.to_string())?;
+            }
+        }
+        "cvttss2si" | "cvtss2si" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} eax, xmm0)")); }
+            if let Ok(dst) = parse_gpr32(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    if mnemonic == "cvttss2si" {
+                        a.cvttss2si(dst, src).map_err(|e| e.to_string())?;
+                    } else {
+                        a.cvtss2si(dst, src).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    if mnemonic == "cvttss2si" {
+                        a.cvttss2si(dst, mem).map_err(|e| e.to_string())?;
+                    } else {
+                        a.cvtss2si(dst, mem).map_err(|e| e.to_string())?;
+                    }
+                }
+            } else if let Ok(dst) = parse_gpr64(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    if mnemonic == "cvttss2si" {
+                        a.cvttss2si(dst, src).map_err(|e| e.to_string())?;
+                    } else {
+                        a.cvtss2si(dst, src).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    if mnemonic == "cvttss2si" {
+                        a.cvttss2si(dst, mem).map_err(|e| e.to_string())?;
+                    } else {
+                        a.cvtss2si(dst, mem).map_err(|e| e.to_string())?;
+                    }
+                }
+            } else {
+                return Err(format!("unsupported destination for {mnemonic}: {}", args[0]));
+            }
+        }
+        "comiss" | "ucomiss" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)")); }
+            let dst = parse_xmm(args[0])?;
+            if let Ok(src) = parse_xmm(args[1]) {
+                if mnemonic == "comiss" {
+                    a.comiss(dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    a.ucomiss(dst, src).map_err(|e| e.to_string())?;
+                }
+            } else {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                if mnemonic == "comiss" {
+                    a.comiss(dst, mem).map_err(|e| e.to_string())?;
+                } else {
+                    a.ucomiss(dst, mem).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "maxss" | "minss" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)")); }
+            let dst = parse_xmm(args[0])?;
+            if let Ok(src) = parse_xmm(args[1]) {
+                if mnemonic == "maxss" {
+                    a.maxss(dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    a.minss(dst, src).map_err(|e| e.to_string())?;
+                }
+            } else {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                if mnemonic == "maxss" {
+                    a.maxss(dst, mem).map_err(|e| e.to_string())?;
+                } else {
+                    a.minss(dst, mem).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "pxor" => {
+            if args.len() != 2 { return Err("pxor requires 2 operands (e.g. pxor xmm0, xmm0)".into()); }
+            let dst = parse_xmm(args[0])?;
+            if let Ok(src) = parse_xmm(args[1]) {
+                a.pxor(dst, src).map_err(|e| e.to_string())?;
+            } else {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                a.pxor(dst, mem).map_err(|e| e.to_string())?;
+            }
+        }
+        "por" | "pand" | "pandn" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands")); }
+            let dst = parse_xmm(args[0])?;
+            if let Ok(src) = parse_xmm(args[1]) {
+                match mnemonic.as_str() {
+                    "por" => a.por(dst, src).map_err(|e| e.to_string())?,
+                    "pand" => a.pand(dst, src).map_err(|e| e.to_string())?,
+                    "pandn" => a.pandn(dst, src).map_err(|e| e.to_string())?,
+                    _ => {}
+                }
+            } else {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                match mnemonic.as_str() {
+                    "por" => a.por(dst, mem).map_err(|e| e.to_string())?,
+                    "pand" => a.pand(dst, mem).map_err(|e| e.to_string())?,
+                    "pandn" => a.pandn(dst, mem).map_err(|e| e.to_string())?,
+                    _ => {}
+                }
+            }
+        }
         "inc" => {
             if args.len() != 1 { return Err("inc requires 1 operand".into()); }
             if let Ok(reg) = parse_gpr64(args[0]) {
@@ -763,21 +940,10 @@ fn parse_mem(
         return Ok(wrap_mem(dword_ptr(lbl)));
     }
 
-    // Check for base + offset, e.g. `rax+0x10` or `rax-0x8` or `rbx + 0x190`
-    if let Some((reg_str, off_str)) = inner.split_once('+') {
-        let reg = parse_gpr64(reg_str.trim())?;
-        let off = parse_u64_expr(off_str.trim(), symbols)? as i32;
-        return Ok(wrap_mem(dword_ptr(reg + off)));
-    }
-    if let Some((reg_str, off_str)) = inner.split_once('-') {
-        let reg = parse_gpr64(reg_str.trim())?;
-        let off = parse_u64_expr(off_str.trim(), symbols)? as i32;
-        return Ok(wrap_mem(dword_ptr(reg - off)));
-    }
-
-    // Plain register, e.g. `[rax]`
-    if let Ok(reg) = parse_gpr64(inner) {
-        return Ok(wrap_mem(dword_ptr(reg)));
+    // Full SIB parser: tokenize by '+' and '-' while preserving signs
+    // e.g. `rsi + rdx*4 + 0x8`, `rdx + rdx*4`, `rbx + rcx*8 - 0x10`, `rax + 0x10`, `[rax]`
+    if let Ok(mem_op) = parse_sib_expression(inner, symbols) {
+        return Ok(wrap_mem(mem_op));
     }
 
     // Check for symbol / marker expression e.g. `$cave_val` or `0x1400100`
@@ -787,6 +953,104 @@ fn parse_mem(
 
     Err(format!("unsupported memory operand syntax: '{s}'"))
 }
+
+/// Helper to parse complex SIB and displacement expressions within brackets:
+/// `base + index*scale + disp` or variants
+fn parse_sib_expression(inner: &str, symbols: &HashMap<String, u64>) -> Result<iced_x86::code_asm::AsmMemoryOperand, String> {
+    use iced_x86::code_asm::*;
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut sign = 1i32;
+
+    for c in inner.chars() {
+        if c == '+' || c == '-' {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                tokens.push((sign, trimmed.to_string()));
+                current.clear();
+            }
+            sign = if c == '+' { 1 } else { -1 };
+        } else {
+            current.push(c);
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        tokens.push((sign, trimmed.to_string()));
+    }
+
+    let mut base_reg: Option<AsmRegister64> = None;
+    let mut index_scale: Option<(AsmRegister64, u32)> = None;
+    let mut disp: i32 = 0;
+
+    for (s_sign, tok) in tokens {
+        if let Some((idx_str, scale_str)) = tok.split_once('*') {
+            // Index * Scale, e.g. `rdx*4`
+            let idx_reg = parse_gpr64(idx_str.trim())?;
+            let scale: u32 = scale_str.trim().parse().map_err(|_| format!("invalid SIB scale '{scale_str}'"))?;
+            if !matches!(scale, 1 | 2 | 4 | 8) {
+                return Err(format!("SIB scale must be 1, 2, 4, or 8, got {scale}"));
+            }
+            if s_sign < 0 {
+                return Err("negative SIB index register not supported in x86-64".into());
+            }
+            index_scale = Some((idx_reg, scale));
+        } else if let Ok(reg) = parse_gpr64(&tok) {
+            // Register without scale: if base already set, treat as index with scale 1
+            if s_sign < 0 {
+                return Err("negative base/index register not supported in x86-64".into());
+            }
+            if base_reg.is_none() {
+                base_reg = Some(reg);
+            } else if index_scale.is_none() {
+                index_scale = Some((reg, 1));
+            } else {
+                return Err(format!("too many registers in memory expression '{inner}'"));
+            }
+        } else if let Ok(val) = parse_u64_expr(&tok, symbols) {
+            let d = (val as i32) * s_sign;
+            disp = disp.wrapping_add(d);
+        } else {
+            return Err(format!("unrecognized token '{tok}' in memory expression '{inner}'"));
+        }
+    }
+
+    match (base_reg, index_scale) {
+        (Some(b), Some((idx, scale))) => {
+            let mem = match scale {
+                1 => if disp == 0 { dword_ptr(b + idx * 1) } else { dword_ptr(b + idx * 1 + disp) },
+                2 => if disp == 0 { dword_ptr(b + idx * 2) } else { dword_ptr(b + idx * 2 + disp) },
+                4 => if disp == 0 { dword_ptr(b + idx * 4) } else { dword_ptr(b + idx * 4 + disp) },
+                8 => if disp == 0 { dword_ptr(b + idx * 8) } else { dword_ptr(b + idx * 8 + disp) },
+                _ => unreachable!(),
+            };
+            Ok(mem)
+        }
+        (None, Some((idx, scale))) => {
+            let mem = match scale {
+                1 => if disp == 0 { dword_ptr(idx * 1) } else { dword_ptr(idx * 1 + disp) },
+                2 => if disp == 0 { dword_ptr(idx * 2) } else { dword_ptr(idx * 2 + disp) },
+                4 => if disp == 0 { dword_ptr(idx * 4) } else { dword_ptr(idx * 4 + disp) },
+                8 => if disp == 0 { dword_ptr(idx * 8) } else { dword_ptr(idx * 8 + disp) },
+                _ => unreachable!(),
+            };
+            Ok(mem)
+        }
+        (Some(b), None) => {
+            if disp == 0 {
+                Ok(dword_ptr(b))
+            } else {
+                Ok(dword_ptr(b + disp))
+            }
+        }
+        (None, None) => {
+            Ok(dword_ptr(disp as u64))
+        }
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -1255,4 +1519,36 @@ mod ce_verbatim_porting {
         // Verify `sar rax, 3` produces 48 c1 f8 03
         assert_eq!(&block.bytes[4..8], &[0x48, 0xc1, 0xf8, 0x03]);
     }
+
+    #[test]
+    fn test_sib_addressing_and_sse_forms() {
+        // Reproduce Sins of a Solar Empire II request exactly:
+        let code = r#"
+            cmp edx, 2
+            ja back
+            cmp edx, 0
+            jne not_credit
+            mov eax, 20000
+            jmp store
+            not_credit:
+            mov eax, 10000
+            store:
+            movd xmm0, eax
+            cvtsi2ss xmm1, eax
+            pxor xmm2, xmm2
+            comiss xmm0, xmm1
+            maxss xmm0, xmm1
+            mov dword [rsi + rdx*4 + 0x8], eax
+            mov dword [rsi + rdx*4], 200000
+            lea rax, [rdx + rdx*4]
+            back:
+        "#;
+        let r = assemble_text(code, 0x140abec51, &HashMap::new());
+        assert!(r.is_ok(), "failed to assemble sins2 cave: {:?}", r.err());
+        let block = r.unwrap();
+        assert!(!block.bytes.is_empty());
+        // 13 parsed lines + 1 fallback NOP for trailing label `back:` = 14 or 15 instructions
+        assert_eq!(block.instruction_count, 15);
+    }
 }
+

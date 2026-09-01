@@ -176,10 +176,17 @@ fn handle_connection(mut stream: TcpStream) {
                 Message::Request { id, req } => {
                     let resp = handle_request_guarded(&mem, req);
                     let resp_msg = Message::Response { id, resp };
-                    if let Ok(out) = protocol::encode(&resp_msg)
-                        && stream.write_all(&out).is_err() {
+                    match protocol::encode(&resp_msg) {
+                        Ok(out) => {
+                            if stream.write_all(&out).is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to encode multiplexed response");
                             break;
                         }
+                    }
                 }
                 Message::Event(event) => {
                     render::overlay::apply_event(event);
@@ -208,6 +215,34 @@ fn handle_connection(mut stream: TcpStream) {
             break;
         }
     }
+
+    // Client disconnected (or the connection was lost). Uninstall any capture
+    // hooks that are still armed so we don't leave dangling jmp patches in game
+    // code. If we skip this, the game keeps jumping into our scratch buffer on
+    // every hot-path execution; if the buffer is ever freed or the connection
+    // is gone, that's a guaranteed crash.
+    uninstall_all_captures();
+}
+
+/// Uninstall every live capture hook and disarm any active hardware watchpoint
+/// or breakpoint registered in this session.
+///
+/// Called on client disconnect so no `jmp` patches are left in game code and
+/// no hardware debug registers remain set on game threads when the GUI can no
+/// longer send explicit cleanup commands. Safe to call with nothing armed.
+fn uninstall_all_captures() {
+    let ids = captures::live_ids();
+    for id in ids {
+        match captures::uninstall(id) {
+            Ok(()) => tracing::info!(capture_id = id, "auto-uninstalled capture on disconnect"),
+            Err(e) => tracing::warn!(capture_id = id, error = %e, "failed to auto-uninstall capture on disconnect"),
+        }
+    }
+    // Disarm any live hardware watchpoint (DR0/DR7) or int3 breakpoint.
+    // If left armed after disconnect the game threads keep taking #DB exceptions
+    // on every write to the watched address, with no one left to drain the hits.
+    watch::clear();
+    tracing::info!("cleared hardware watchpoint/breakpoint state on disconnect");
 }
 
 /// Handle a request, but never let a panic escape to the connection thread.

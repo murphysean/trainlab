@@ -3,16 +3,20 @@
 # Trainlab Steam Launch Wrapper
 # ==============================================================================
 # Usage in Steam Launch Options:
-#   /home/deck/Documents/Trainers/Trainlab/launch.sh %command%
+#   /home/<user>/Documents/Trainers/Trainlab/launch.sh %command%
 #
 # Behavior:
 #   1. Starts the target game with all original Steam/Proton command line args ($@)
 #   2. Identifies the exact Proton binary invoked by Steam in $@
 #   3. Launches trainlab-gui.exe in the same Proton runner and prefix
 #   4. Monitors the game process; upon exit, cleanly terminates trainlab-gui.exe
+#
+# Compatibility:
+#   Works on any Linux distro with Steam installed natively or via Flatpak.
 # ==============================================================================
 
-# Extract the exact Proton runner invoked in Steam's command ($@)
+# Extract the exact Proton runner from Steam's command ($@).
+# When launched via Steam launch options (%command%), Proton is always present in $@.
 PROTON_RUNNER=""
 for arg in "$@"; do
     if [[ "$arg" == *"proton" ]] && [ -x "$arg" ]; then
@@ -21,13 +25,8 @@ for arg in "$@"; do
     fi
 done
 
-# Fallback to RUNPROTON environment or latest installed Proton if not found in args
 if [ -z "$PROTON_RUNNER" ]; then
-    if [ -n "$RUNPROTON" ] && [ -x "$RUNPROTON" ]; then
-        PROTON_RUNNER="$RUNPROTON"
-    else
-        PROTON_RUNNER="$(find "$HOME/.local/share/Steam/steamapps/common/" -maxdepth 2 -name proton 2>/dev/null | sort -V | tail -n1)"
-    fi
+    echo "[trainlab] WARNING: Proton runner not found in launch command. Trainer will not be started." >/tmp/trainlab_launch_out.log
 fi
 
 # 1. Execute the main game launch in the background and capture its PID

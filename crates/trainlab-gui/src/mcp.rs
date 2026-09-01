@@ -21,12 +21,6 @@ use std::collections::HashMap;
 
 use crate::session::{CheatKind, PendingKind, SharedSession};
 
-/// Where the injected DLL's fast channel listens.
-const DLL_HOST: &str = "127.0.0.1";
-const DLL_PORT: u16 = 31337;
-// NOTE: `call_dll` now reads host/port from the session (T-160); these constants
-// serve as fallback defaults when the session has no explicit host/port set.
-
 /// Format the last Windows error code for diagnostics.
 #[cfg(windows)]
 fn last_error() -> String {
@@ -63,51 +57,19 @@ pub(crate) fn game_process(
     }
 }
 
-/// Send a request to the injected DLL over the fast channel and return the
-/// response.
+/// Send a request to the injected DLL over the single persistent multiplexed
+/// IPC connection managed by [`crate::controller`].
 ///
-/// Every socket op carries a timeout so a hung/unresponsive DLL returns an
-/// error instead of blocking the calling MCP tool indefinitely (which wedges
-/// the whole handler). `connect`, `write`, and both `read_exact` phases all
-/// share the same deadline.
-///
-/// T-160: Reads the host/port from the session instead of hardcoding them.
+/// # Deprecated
+/// This wrapper exists only for call-site compatibility while MCP tools are
+/// migrated. Prefer calling [`crate::controller::request`] directly. Do not
+/// add new call sites.
+#[deprecated(note = "use crate::controller::request directly")]
+#[allow(deprecated)]
 fn call_dll(session: &SharedSession, req: &Request) -> Result<Response, String> {
-    const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    let (host, port) = {
-        let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
-        let h = if s.dll_host().is_empty() { "127.0.0.1".to_string() } else { s.dll_host().to_string() };
-        let p = if s.dll_port() == 0 { 31337 } else { s.dll_port() };
-        (h, p)
-    };
-    let addr = format!("{host}:{port}");
-    let mut stream = std::net::TcpStream::connect(&addr)
-        .map_err(|e| format!("connect to DLL ({addr}) failed: {e}"))?;
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let frame = protocol::encode(req).map_err(|e| format!("encode error: {e}"))?;
-    use std::io::Write;
-    stream
-        .write_all(&frame)
-        .map_err(|e| format!("write error: {e}"))?;
-    // Read the 4-byte length prefix.
-    use std::io::Read;
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|e| format!("read length error: {e}"))?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .map_err(|e| format!("read body error: {e}"))?;
-    // Reassemble the frame for decode (decode expects the length prefix).
-    let mut frame_out = Vec::with_capacity(4 + len);
-    frame_out.extend_from_slice(&len_buf);
-    frame_out.extend_from_slice(&body);
-    protocol::decode::<Response>(&frame_out).map_err(|e| format!("decode error: {e}"))
+    crate::controller::request(session, req)
 }
+
 
 /// The MCP server handler for trainlab-gui.
 ///
@@ -256,6 +218,9 @@ pub struct ScanAobArgs {
     /// Optional region marker name (e.g. "game_heap") or expression to bound the search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Maximum number of match addresses to return (default 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// Backwards-compatible alias for [`ScanAobArgs`].
@@ -269,10 +234,24 @@ pub struct ScanPointerArgs {
     /// Optional size around `address` to treat as the target range (default 8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// Maximum number of referrer matches to return (default 50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// Backwards-compatible alias for [`ScanPointerArgs`].
 pub type PointerScanArgs = ScanPointerArgs;
+
+/// Arguments for [`list_regions`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ListRegionsArgs {
+    /// Maximum number of regions to return in text (default 50). If total exceeds limit, full results are saved to a snapshot file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Optional filter to only include named (module/heap) regions (default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_only: Option<bool>,
+}
 
 /// Arguments for [`pointer_chase`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1541,12 +1520,19 @@ impl TrainlabMcpServer {
             ]))
         }
     }
-    #[tool(description = "List readable memory regions of the game process, read externally.")]
-    fn list_regions(&self) -> Result<CallToolResult, ErrorData> {
+    #[tool(description = "List readable memory regions of the game process, read externally. Returns top regions (default 50) and saves the full dump to a snapshot file if it exceeds the limit.")]
+    fn list_regions(&self, Parameters(args): Parameters<ListRegionsArgs>) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let regions = proc.regions().map_err(|e| err(format!("regions failed: {e}")))?;
-        let lines: Vec<String> = regions
-            .iter()
+        let mut regions = proc.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        if args.named_only.unwrap_or(false) {
+            regions.retain(|r| r.name.as_ref().map(|n| !n.trim().is_empty()).unwrap_or(false));
+        }
+
+        let total = regions.len();
+        let limit = args.limit.unwrap_or(50);
+        let preview = regions.iter().take(limit);
+
+        let lines: Vec<String> = preview
             .map(|r| {
                 format!(
                     "{:#018x}-{:#018x} r{}{} {}",
@@ -1558,8 +1544,34 @@ impl TrainlabMcpServer {
                 )
             })
             .collect();
+
+        let mut text = format!("{total} memory region(s)\n");
+        text.push_str(&lines.join("\n"));
+
+        if total > limit {
+            let s_file = format!("regions_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+            let mut buf = Vec::new();
+            use std::io::Write;
+            for r in &regions {
+                let _ = writeln!(
+                    buf,
+                    "{:#018x}-{:#018x} r{}{} {}",
+                    r.start,
+                    r.end,
+                    if r.readable { 'x' } else { '-' },
+                    if r.writable { 'w' } else { '-' },
+                    r.name.as_deref().unwrap_or("")
+                );
+            }
+            if let Ok(rel_path) = trainlab_core::tools::write_output_artifact("regions", &s_file, &buf) {
+                text.push_str(&format!("\n... and {} more [full regions list saved to {rel_path}]", total - limit));
+            } else {
+                text.push_str(&format!("\n... and {} more", total - limit));
+            }
+        }
+
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(lines.join("\n")),
+            rmcp::model::ContentBlock::text(text),
         ]))
     }
 
@@ -1711,7 +1723,7 @@ impl TrainlabMcpServer {
     }
 
     /// AOB pattern scan over the game's readable memory (external).
-    #[tool(description = "Scan game memory for an AOB byte pattern (hex, ?? wildcards); returns match addresses, read externally. Can optionally bound search to a named region/marker and save to a marker.")]
+    #[tool(description = "Scan game memory for an AOB byte pattern (hex, ?? wildcards); returns match addresses, read externally. Can optionally bound search to a named region/marker and save to a marker. NOTE: Run memory scans sequentially (one at a time) rather than in parallel to avoid token/timeout limits.")]
     fn scan_aob(&self, Parameters(args): Parameters<ScanAobArgs>) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
         let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
@@ -1720,6 +1732,7 @@ impl TrainlabMcpServer {
             offset: args.offset,
             marker: args.marker,
             region: args.region,
+            limit: args.limit,
         }).map_err(|e| err(e.message))?;
 
         self.request_repaint();
@@ -1730,7 +1743,7 @@ impl TrainlabMcpServer {
     }
 
     /// Backwards-compatible alias for [`scan_aob`].
-    #[tool(description = "Alias for scan_aob. Scan game memory for an AOB byte pattern.")]
+    #[tool(description = "Alias for scan_aob. Scan game memory for an AOB byte pattern. NOTE: Run memory scans sequentially (one at a time) rather than in parallel to avoid token/timeout limits.")]
     fn aob_scan(&self, Parameters(args): Parameters<AobArgs>) -> Result<CallToolResult, ErrorData> {
         self.scan_aob(Parameters(args))
     }
@@ -1875,6 +1888,7 @@ impl TrainlabMcpServer {
         let res = trainlab_core::tools::execute_scan_pointer(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanPointerArgs {
             address: args.address,
             size: args.size,
+            limit: args.limit,
         }).map_err(|e| err(e.message))?;
 
         self.request_repaint();
@@ -3117,13 +3131,38 @@ pub(crate) fn execute_profile_commands(
                     s.log_activity("PROFILE", format!("cmd {idx}: free memory -> {}", res.message));
                 }
             }
-            crate::profile::ProfileCommand::AobScan { marker, pattern, offset, .. } => {
+            crate::profile::ProfileCommand::AobScan { marker, pattern, offset, region, .. } => {
                 let parsed_pat = trainlab_core::aob::parse(pattern);
                 if parsed_pat.is_empty() {
                     return Err(format!("cmd {idx}: empty AOB pattern '{pattern}'"));
                 }
                 let proc = game_process(session).map_err(|e| format!("cmd {idx}: AOB scan process access error: {e:?}"))?;
-                let regions = proc.regions().map_err(|e| format!("cmd {idx}: AOB scan list regions error: {e}"))?;
+                let all_regions = proc.regions().map_err(|e| format!("cmd {idx}: AOB scan list regions error: {e}"))?;
+
+                let regions = if let Some(r_name) = region {
+                    let (r_start, r_end) = {
+                        let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+                        if let Some(m) = s.get_marker(r_name) {
+                            let end = m.end_address().unwrap_or(m.address.saturating_add(0x1000));
+                            (m.address, end)
+                        } else {
+                            drop(s);
+                            let start = parse_addr_expr(session, r_name).map_err(|e| e.to_string())?;
+                            (start, start.saturating_add(0x1000))
+                        }
+                    };
+                    all_regions.into_iter().filter_map(|mut r| {
+                        if r.end <= r_start || r.start >= r_end {
+                            None
+                        } else {
+                            r.start = r.start.max(r_start);
+                            r.end = r.end.min(r_end);
+                            Some(r)
+                        }
+                    }).collect()
+                } else {
+                    all_regions
+                };
 
                 let mut first_match: Option<u64> = None;
                 for r in regions {
@@ -3338,15 +3377,41 @@ fn resolve_setup_step(
 ) -> Result<u64, String> {
     use crate::profile::SetupStep;
     match step {
-        SetupStep::AobScan { pattern, offset, .. } => {
-            // AOB scan externally (matches the `aob_scan` tool), take the
-            // first match + offset.
+        SetupStep::AobScan { pattern, offset, region, .. } => {
+            // AOB scan externally (matches the `aob_scan` tool), optionally bound
+            // to a specific region/module/marker, take the first match + offset.
             let parsed = trainlab_core::aob::parse(pattern);
             if parsed.is_empty() {
                 return Err("empty/invalid AOB pattern".into());
             }
             let proc = game_process(session).map_err(|e| e.to_string())?;
-            let regions = proc.regions().map_err(|e| format!("regions: {e}"))?;
+            let all_regions = proc.regions().map_err(|e| format!("regions: {e}"))?;
+
+            let regions = if let Some(r_name) = region {
+                let (r_start, r_end) = {
+                    let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+                    if let Some(m) = s.get_marker(r_name) {
+                        let end = m.end_address().unwrap_or(m.address.saturating_add(0x1000));
+                        (m.address, end)
+                    } else {
+                        drop(s);
+                        let start = parse_addr_expr(session, r_name).map_err(|e| e.to_string())?;
+                        (start, start.saturating_add(0x1000))
+                    }
+                };
+                all_regions.into_iter().filter_map(|mut r| {
+                    if r.end <= r_start || r.start >= r_end {
+                        None
+                    } else {
+                        r.start = r.start.max(r_start);
+                        r.end = r.end.min(r_end);
+                        Some(r)
+                    }
+                }).collect()
+            } else {
+                all_regions
+            };
+
             let mut first_match: Option<u64> = None;
             for r in regions {
                 if !r.readable {
@@ -3759,6 +3824,8 @@ pub async fn serve(
         .nest("/api", api_router)
         .nest_service("/mcp", service)
         .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))
+        .nest_service("/scans", tower_http::services::ServeDir::new("scans"))
+        .nest_service("/regions", tower_http::services::ServeDir::new("regions"))
         .route("/log", axum::routing::get(serve_session_log));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let addr = listener.local_addr()?;

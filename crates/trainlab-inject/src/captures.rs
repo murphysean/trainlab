@@ -123,3 +123,15 @@ pub fn scratch(id: u64) -> Option<u64> {
         .ok()
         .and_then(|r| r.captures.get(&id).map(|c| c.scratch))
 }
+
+/// Return all currently live capture IDs.
+///
+/// Used by the disconnect handler to uninstall every armed capture hook so no
+/// dangling `jmp` patches are left in game code when the client goes away.
+pub fn live_ids() -> Vec<u64> {
+    registry()
+        .lock()
+        .ok()
+        .map(|r| r.captures.keys().copied().collect())
+        .unwrap_or_default()
+}

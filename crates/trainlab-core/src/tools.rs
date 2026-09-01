@@ -189,6 +189,9 @@ pub struct ScanAobArgs {
     /// Optional region marker name (e.g. "game_heap") or address expression to bound the search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Maximum number of match addresses to return in structured output (default 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +199,9 @@ pub struct ScanPointerArgs {
     pub address: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// Maximum number of referrer matches to return (default 50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,27 +466,19 @@ pub fn read_cstr(proc: &dyn ProcessMemory, addr: u64, max_len: usize) -> Result<
     if slice.iter().all(|&b| (0x20..=0x7e).contains(&b) || b == b'\t' || b == b'\n' || b == b'\r') {
         if slice.len() > 1024 {
             // Write oversized string to a snapshot file
-            let _ = std::fs::create_dir_all("snapshots");
             let file_name = format!("cstr_{addr:#x}_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
-            let file_path = format!("snapshots/{file_name}");
-            if let Ok(mut f) = std::fs::File::create(&file_path) {
-                use std::io::Write;
-                let _ = f.write_all(slice);
-            }
             let preview = String::from_utf8_lossy(&slice[..256]);
-            Ok(format!("{preview}... [{} bytes total, saved to snapshots/{file_name}]", slice.len()))
+            if let Ok(rel_path) = write_output_artifact("snapshots", &file_name, slice) {
+                Ok(format!("{preview}... [{} bytes total, saved to {rel_path}]", slice.len()))
+            } else {
+                Ok(format!("{preview}... [{} bytes total]", slice.len()))
+            }
         } else {
             Ok(String::from_utf8_lossy(slice).into_owned())
         }
     } else {
-        // Binary / non-printable: if no null terminator or raw binary, save full snapshot and return URL/preview
-        let _ = std::fs::create_dir_all("snapshots");
+        // Binary / non-printable: if no null terminator or raw binary, save full snapshot and return preview
         let file_name = format!("bin_{addr:#x}_{}.bin", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
-        let file_path = format!("snapshots/{file_name}");
-        if let Ok(mut f) = std::fs::File::create(&file_path) {
-            use std::io::Write;
-            let _ = f.write_all(slice);
-        }
         let display_len = slice.len().min(32);
         let hex_preview = slice[..display_len]
             .iter()
@@ -488,9 +486,14 @@ pub fn read_cstr(proc: &dyn ProcessMemory, addr: u64, max_len: usize) -> Result<
             .collect::<Vec<_>>()
             .join(" ");
         let nul_note = if !has_nul { " (no null terminator found)" } else { "" };
-        Ok(format!("<non-ascii {} bytes{nul_note}> {hex_preview}... [saved to snapshots/{file_name}]", slice.len()))
+        if let Ok(rel_path) = write_output_artifact("snapshots", &file_name, slice) {
+            Ok(format!("<non-ascii {} bytes{nul_note}> {hex_preview}... [saved to {rel_path}]", slice.len()))
+        } else {
+            Ok(format!("<non-ascii {} bytes{nul_note}> {hex_preview}...", slice.len()))
+        }
     }
 }
+
 
 /// Format a memory buffer as hex + ASCII text view.
 pub fn format_dump(base_address: u64, data: &[u8]) -> String {
@@ -528,9 +531,45 @@ pub fn format_dump(base_address: u64, data: &[u8]) -> String {
     out
 }
 
+/// Write an oversized tool output to a specific subfolder (e.g. `scans/`, `regions/`, `snapshots/`)
+/// and enforce a FIFO quota (max 50 files per directory) to prevent disk/context bloat.
+pub fn write_output_artifact(subdir: &str, file_name: &str, content: &[u8]) -> std::io::Result<String> {
+    let dir = std::path::Path::new(subdir);
+    let _ = std::fs::create_dir_all(dir);
+    
+    // Auto-clean: keep at most 50 files in this directory to avoid disk clutter
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .filter_map(|e| {
+                let path = e.path();
+                let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                Some((modified, path))
+            })
+            .collect();
+
+        if files.len() >= 50 {
+            files.sort_by_key(|(m, _)| *m);
+            // Delete oldest entries down to 40 files
+            let to_remove = files.len().saturating_sub(40);
+            for (_, path) in files.iter().take(to_remove) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    let file_path = dir.join(file_name);
+    let mut f = std::fs::File::create(&file_path)?;
+    use std::io::Write;
+    f.write_all(content)?;
+    Ok(format!("{subdir}/{file_name}"))
+}
+
 // ---------------------------------------------------------------------------
 // Universal Tool Dispatchers
 // ---------------------------------------------------------------------------
+
 
 /// Evaluate an address expression against session markers and loaded modules.
 pub fn eval_addr_expr(
@@ -586,21 +625,16 @@ pub fn execute_read(
                 ));
             }
             if bytes.len() > 512 {
-                let _ = std::fs::create_dir_all("snapshots");
                 let file_name = format!("read_hex_{target_addr:#x}_{}.bin", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
-                let file_path = format!("snapshots/{file_name}");
-                if let Ok(mut f) = std::fs::File::create(&file_path) {
-                    use std::io::Write;
-                    let _ = f.write_all(&bytes);
-                }
                 let preview = bytes[..64].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-                let text = format!("{preview}... [{} bytes total, saved to snapshots/{file_name}]", bytes.len());
+                let rel_path = write_output_artifact("snapshots", &file_name, &bytes).unwrap_or_else(|_| format!("snapshots/{file_name}"));
+                let text = format!("{preview}... [{} bytes total, saved to {rel_path}]", bytes.len());
                 Ok(ToolResult::with_data(
                     text,
                     serde_json::json!({
                         "address": target_addr,
                         "bytes_read": bytes.len(),
-                        "snapshot_file": file_name,
+                        "snapshot_file": rel_path,
                         "client_id": ctx.id,
                     }),
                 ))
@@ -1497,18 +1531,34 @@ pub fn execute_scan_aob(
         s.log_activity(&ctx.id, format!("AOB scan '{}': {count} match(es)", args.pattern));
     }
 
-    let lines: Vec<String> = matches.iter().take(20).map(|m| format!("{m:#018x}")).collect();
+    let limit = args.limit.unwrap_or(20);
+    let preview_matches: Vec<u64> = matches.iter().copied().take(limit).collect();
+    let lines: Vec<String> = preview_matches.iter().map(|m| format!("{m:#018x}")).collect();
     let mut text = format!("{count} match(es)\n");
     text.push_str(&lines.join("\n"));
-    if count > 20 {
-        text.push_str(&format!("\n... and {} more", count - 20));
+    
+    let mut scan_file = None;
+    if count > limit {
+        let s_file = format!("aob_scan_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let full_json = serde_json::json!({
+            "count": count,
+            "pattern": args.pattern,
+            "matches": matches,
+        });
+        if let Ok(rel_path) = write_output_artifact("scans", &s_file, full_json.to_string().as_bytes()) {
+            scan_file = Some(rel_path.clone());
+            text.push_str(&format!("\n... and {} more [full matches saved to {rel_path}]", count - limit));
+        } else {
+            text.push_str(&format!("\n... and {} more", count - limit));
+        }
     }
 
     Ok(ToolResult::with_data(
         text,
         serde_json::json!({
             "count": count,
-            "matches": matches,
+            "matches": preview_matches,
+            "scan_file": scan_file,
             "client_id": ctx.id,
         }),
     ))
@@ -1531,11 +1581,26 @@ pub fn execute_scan_pointer(
         .map_err(|e| err(format!("pointer_scan failed: {e}")))?;
 
     let count = matches.len();
-    let lines: Vec<String> = matches.iter().take(50).map(|(a, p)| format!("{a:#018x} -> {p:#018x}")).collect();
+    let limit = args.limit.unwrap_or(50);
+    let preview_matches: Vec<(u64, u64)> = matches.iter().copied().take(limit).collect();
+    let lines: Vec<String> = preview_matches.iter().map(|(a, p)| format!("{a:#018x} -> {p:#018x}")).collect();
     let mut text = format!("{count} referrer(s)\n");
     text.push_str(&lines.join("\n"));
-    if count > 50 {
-        text.push_str(&format!("\n... and {} more", count - 50));
+    
+    let mut scan_file = None;
+    if count > limit {
+        let s_file = format!("pointer_scan_{address:#x}_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let full_json = serde_json::json!({
+            "count": count,
+            "target": address,
+            "referrers": matches.iter().map(|(a, p)| serde_json::json!({ "address": a, "points_to": p })).collect::<Vec<_>>(),
+        });
+        if let Ok(rel_path) = write_output_artifact("scans", &s_file, full_json.to_string().as_bytes()) {
+            scan_file = Some(rel_path.clone());
+            text.push_str(&format!("\n... and {} more [full results saved to {rel_path}]", count - limit));
+        } else {
+            text.push_str(&format!("\n... and {} more", count - limit));
+        }
     }
 
     if let Ok(mut s) = session.lock() {
@@ -1547,11 +1612,13 @@ pub fn execute_scan_pointer(
         serde_json::json!({
             "count": count,
             "target": address,
-            "referrers": matches.iter().map(|(a, p)| serde_json::json!({ "address": a, "points_to": p })).collect::<Vec<_>>(),
+            "referrers": preview_matches.iter().map(|(a, p)| serde_json::json!({ "address": a, "points_to": p })).collect::<Vec<_>>(),
+            "scan_file": scan_file,
             "client_id": ctx.id,
         }),
     ))
 }
+
 
 /// Execute a pointer chase operation.
 pub fn execute_pointer_chase(

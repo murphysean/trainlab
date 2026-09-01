@@ -63,6 +63,9 @@ pub enum SetupStep {
         /// Optional byte offset to add to the first match.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         offset: Option<i64>,
+        /// Optional module name (e.g. "sins2.exe") or region marker to bound the scan to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
     },
     /// A pointer chain resolved against a module base each launch.
     PointerChain {
@@ -267,6 +270,9 @@ pub enum ProfileCommand {
         /// Optional offset added to the match address.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         offset: Option<i64>,
+        /// Optional module name (e.g. "sins2.exe") or region marker to bound the scan to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
         /// Optional note / comment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -453,6 +459,7 @@ mod tests {
                     name: "god_mode_ret".into(),
                     pattern: "48 8B 05 ?? ?? ?? ??".into(),
                     offset: Some(3),
+                    region: None,
                 },
                 SetupStep::PointerChain {
                     name: "player_base".into(),
@@ -626,6 +633,36 @@ cheats: []
         let serialized = profile.to_yaml().expect("serialize");
         let back = GameProfile::from_yaml(&serialized).expect("roundtrip parse");
         assert_eq!(back.name, "Test InstallCave ASM");
+    }
+
+    #[test]
+    fn test_aob_scan_with_region_roundtrips_yaml() {
+        let yaml = r#"
+schema: trainlab-profile/v1
+game: sins2.exe
+name: Test Sins2 AobScan Region
+setup:
+  - type: aob_scan
+    name: influence_hook
+    pattern: "8B B7 ?? ?? ?? ?? 39 B3"
+    offset: 0
+    region: "sins2.exe"
+cheats: []
+"#;
+        let profile = GameProfile::from_yaml(yaml).expect("parse yaml");
+        assert_eq!(profile.setup.len(), 1);
+        match &profile.setup[0] {
+            SetupStep::AobScan { name, pattern, offset, region } => {
+                assert_eq!(name, "influence_hook");
+                assert_eq!(pattern, "8B B7 ?? ?? ?? ?? 39 B3");
+                assert_eq!(*offset, Some(0));
+                assert_eq!(region.as_deref(), Some("sins2.exe"));
+            }
+            _ => panic!("expected AobScan variant"),
+        }
+        let serialized = profile.to_yaml().expect("serialize");
+        let back = GameProfile::from_yaml(&serialized).expect("roundtrip parse");
+        assert_eq!(back.name, "Test Sins2 AobScan Region");
     }
 
     #[test]
