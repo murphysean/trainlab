@@ -2199,16 +2199,16 @@ pub fn execute_save_profile(
         let profile_cheats: Vec<ProfileCheat> = cheats
             .iter()
             .map(|c| {
-                let (kind, value_type, address_ref, target_ref, hook, payload, base, fields) = match &c.kind {
+                let (kind, value_type, address_ref, target_ref, hook, payload, base, fields, orig_bytes) = match &c.kind {
                     CheatKind::Value { address, value_type, address_expr } => {
                         let addr_ref = address_expr.clone().unwrap_or_else(|| format!("{address:#x}"));
-                        ("value".to_string(), Some(format!("{value_type:?}").to_lowercase()), Some(addr_ref), None, None, None, None, None)
+                        ("value".to_string(), Some(format!("{value_type:?}").to_lowercase()), Some(addr_ref), None, None, None, None, None, None)
                     }
                     CheatKind::Struct { base_address, base_expr, fields } => {
                         let b = if base_expr.is_empty() { format!("{base_address:#x}") } else { base_expr.clone() };
-                        ("struct".to_string(), None, None, None, None, None, Some(b), Some(fields.clone()))
+                        ("struct".to_string(), None, None, None, None, None, Some(b), Some(fields.clone()), None)
                     }
-                    CheatKind::Toggle { target, hook, .. } => {
+                    CheatKind::Toggle { target, hook, original_bytes, .. } => {
                         let (hk, pl) = match hook {
                             crate::cave_hook::CaveHook::Trampoline { payload, .. } => {
                                 ("trampoline".to_string(), Some(payload.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
@@ -2217,13 +2217,23 @@ pub fn execute_save_profile(
                                 ("override".to_string(), Some(payload.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
                             }
                         };
-                        ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl, None, None)
+                        let orig = if !original_bytes.is_empty() {
+                            Some(original_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "))
+                        } else {
+                            None
+                        };
+                        ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl, None, None, orig)
                     }
-                    CheatKind::Patch { target, patch_bytes, cave_ref, .. } => {
-                        ("patch".to_string(), None, None, Some(format!("{target:#x}")), cave_ref.clone(), Some(patch_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")), None, None)
+                    CheatKind::Patch { target, patch_bytes, cave_ref, original_bytes, .. } => {
+                        let orig = if !original_bytes.is_empty() {
+                            Some(original_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "))
+                        } else {
+                            None
+                        };
+                        ("patch".to_string(), None, None, Some(format!("{target:#x}")), cave_ref.clone(), Some(patch_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")), None, None, orig)
                     }
                     CheatKind::Button { .. } => {
-                        ("button".to_string(), None, None, None, None, None, None, None)
+                        ("button".to_string(), None, None, None, None, None, None, None, None)
                     }
                 };
                 ProfileCheat {
@@ -2249,6 +2259,8 @@ pub fn execute_save_profile(
                     group: c.group.clone(),
                     hotkey: c.hotkey.clone(),
                     hidden: if c.hidden { Some(true) } else { None },
+                    original_bytes: orig_bytes,
+                    context: None,
                     note: c.note.clone(),
                 }
             })

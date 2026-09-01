@@ -1262,11 +1262,14 @@ impl TrainlabMcpServer {
                         "override" => trainlab_core::cave_hook::CaveHook::Override { payload, jump: jump_style },
                         other => return Err(err(format!("unknown hook '{other}'"))),
                     };
+                    let preloaded_orig = pc.original_bytes.as_deref()
+                        .and_then(|h| parse_hex_bytes(h).ok())
+                        .unwrap_or_default();
                     crate::session::CheatKind::Toggle {
                         hook,
                         target,
                         enabled: false,
-                        original_bytes: Vec::new(),
+                        original_bytes: preloaded_orig,
                         cave_addr: 0,
                     }
                 }
@@ -1275,9 +1278,13 @@ impl TrainlabMcpServer {
                     let patch_bytes = parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?;
                     let host = s.dll_host().to_string();
                     let port = s.dll_port();
-                    let original_bytes = match crate::controller::request_at(&host, port, &Request::Read { address: target, len: patch_bytes.len() }, Some(&self.session)) {
-                        Ok(Response::Read { data }) => data,
-                        _ => Vec::new(),
+                    let original_bytes = if let Some(orig_hex) = &pc.original_bytes {
+                        parse_hex_bytes(orig_hex).unwrap_or_default()
+                    } else {
+                        match crate::controller::request_at(&host, port, &Request::Read { address: target, len: patch_bytes.len() }, Some(&self.session)) {
+                            Ok(Response::Read { data }) => data,
+                            _ => Vec::new(),
+                        }
                     };
                     crate::session::CheatKind::Patch {
                         target,
@@ -3165,7 +3172,7 @@ pub(crate) fn execute_profile_commands(
                 };
 
                 let mut first_match: Option<u64> = None;
-                for r in regions {
+                for r in &regions {
                     if !r.readable {
                         continue;
                     }
@@ -3179,6 +3186,33 @@ pub(crate) fn execute_profile_commands(
                             break;
                         }
                 }
+
+                // Fallback: If AOB pattern had 0 matches and original_bytes was recorded,
+                // attempt exact search for the pristine original bytes to relocate the hook site after game updates.
+                if first_match.is_none()
+                    && let crate::profile::ProfileCommand::AobScan { original_bytes: Some(orig_hex), .. } = &cmd {
+                        if let Ok(orig_pat) = parse_hex_bytes(orig_hex)
+                            && !orig_pat.is_empty() {
+                                let parsed_orig: Vec<Option<u8>> = orig_pat.into_iter().map(Some).collect();
+                                for r in &regions {
+                                    if !r.readable {
+                                        continue;
+                                    }
+                                    let len = (r.end - r.start) as usize;
+                                    if len < parsed_orig.len() {
+                                        continue;
+                                    }
+                                    if let Ok(buf) = proc.read(r.start, len)
+                                        && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_orig).first() {
+                                            first_match = Some(r.start + *off as u64);
+                                            if let Ok(mut s) = session.lock() {
+                                                s.log_activity("PROFILE", format!("cmd {idx}: AOB pattern failed, but relocated hook site via original_bytes at {:#x}", r.start + *off as u64));
+                                            }
+                                            break;
+                                        }
+                                }
+                            }
+                    }
 
                 if let Some(match_addr) = first_match {
                     let final_addr = (match_addr as i64 + offset.unwrap_or(0)) as u64;
@@ -3413,7 +3447,7 @@ fn resolve_setup_step(
             };
 
             let mut first_match: Option<u64> = None;
-            for r in regions {
+            for r in &regions {
                 if !r.readable {
                     continue;
                 }
@@ -3427,7 +3461,35 @@ fn resolve_setup_step(
                         break;
                     }
             }
-            let m = first_match.ok_or_else(|| "aob scan found no matches".to_string())?;
+
+            // Fallback: If AOB pattern had 0 matches and original_bytes was recorded,
+            // attempt exact search for the pristine original bytes to relocate the hook site after game updates.
+            if first_match.is_none()
+                && let SetupStep::AobScan { original_bytes: Some(orig_hex), .. } = step {
+                    if let Ok(orig_pat) = parse_hex_bytes(orig_hex)
+                        && !orig_pat.is_empty() {
+                            let parsed_orig: Vec<Option<u8>> = orig_pat.into_iter().map(Some).collect();
+                            for r in &regions {
+                                if !r.readable {
+                                    continue;
+                                }
+                                let len = (r.end - r.start) as usize;
+                                if len < parsed_orig.len() {
+                                    continue;
+                                }
+                                if let Ok(buf) = proc.read(r.start, len)
+                                    && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_orig).first() {
+                                        first_match = Some(r.start + *off as u64);
+                                        if let Ok(mut s) = session.lock() {
+                                            s.log_activity("PROFILE", format!("AOB pattern failed, but relocated hook site via original_bytes at {:#x}", r.start + *off as u64));
+                                        }
+                                        break;
+                                    }
+                            }
+                        }
+                }
+
+            let m = first_match.ok_or_else(|| "aob scan found no matches (including original_bytes fallback)".to_string())?;
             Ok((m as i64 + offset.unwrap_or(0)) as u64)
         }
         SetupStep::PointerChain { module, base, offsets, .. } => {
@@ -3920,6 +3982,8 @@ mod tests {
             group: None,
             hotkey: None,
             hidden: None,
+            original_bytes: None,
+            context: None,
             note: None,
         };
         assert_eq!(resolve_cheat_address(&resolved, &pc).unwrap(), 0x1000);

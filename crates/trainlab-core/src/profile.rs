@@ -83,6 +83,13 @@ pub enum SetupStep {
         /// Optional module name (e.g. "sins2.exe") or region marker to bound the scan to.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
+        /// Optional pristine original bytes captured at the hook site (hex string, e.g. "f3 0f 11 44 96 08").
+        /// Used for clean restoration and fallback signature relocation after game updates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original_bytes: Option<String>,
+        /// Optional disassembly context listing or signature comment describing surrounding instructions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
     },
     /// A pointer chain resolved against a module base each launch.
     PointerChain {
@@ -104,6 +111,12 @@ pub enum SetupStep {
         module: String,
         /// Module-relative offset.
         offset: String,
+        /// Optional pristine original bytes at the target address.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original_bytes: Option<String>,
+        /// Optional disassembly context listing or signature comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
     },
 }
 
@@ -178,6 +191,12 @@ pub struct ProfileCheat {
     /// Optional flag to hide this cheat from the user-facing GUI and in-game overlay (e.g. agent/WIP/transport cheats).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+    /// Optional pristine original bytes of the hook target site (hex string, e.g. "48 89 5c 24 08").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_bytes: Option<String>,
+    /// Optional disassembly context listing or signature comment describing surrounding instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
     /// Optional human note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -290,6 +309,12 @@ pub enum ProfileCommand {
         /// Optional module name (e.g. "sins2.exe") or region marker to bound the scan to.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<String>,
+        /// Optional pristine original bytes captured at the hook site.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original_bytes: Option<String>,
+        /// Optional disassembly context listing or signature comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
         /// Optional note / comment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -477,6 +502,8 @@ mod tests {
                     pattern: "48 8B 05 ?? ?? ?? ??".into(),
                     offset: Some(3),
                     region: None,
+                    original_bytes: None,
+                    context: None,
                 },
                 SetupStep::PointerChain {
                     name: "player_base".into(),
@@ -507,6 +534,8 @@ mod tests {
                 group: None,
                 hotkey: None,
                 hidden: None,
+                original_bytes: None,
+                context: None,
                 note: Some("wood stock".into()),
             }],
         };
@@ -576,6 +605,8 @@ mod tests {
                 group: Some("Speed".into()),
                 hotkey: None,
                 hidden: None,
+                original_bytes: None,
+                context: None,
                 note: Some("mining speed test".into()),
             }],
         };
@@ -667,16 +698,20 @@ setup:
     pattern: "8B B7 ?? ?? ?? ?? 39 B3"
     offset: 0
     region: "sins2.exe"
+    original_bytes: "8B B7 F8 D8 00 00 39 B3 50 08 00 00"
+    context: "sins2.exe+0x5ceda8: 8B B7 F8 D8 00 00 - mov esi,[rdi+0xd8f8]"
 cheats: []
 "#;
         let profile = GameProfile::from_yaml(yaml).expect("parse yaml");
         assert_eq!(profile.setup.len(), 1);
         match &profile.setup[0] {
-            SetupStep::AobScan { name, pattern, offset, region } => {
+            SetupStep::AobScan { name, pattern, offset, region, original_bytes, context } => {
                 assert_eq!(name, "influence_hook");
                 assert_eq!(pattern, "8B B7 ?? ?? ?? ?? 39 B3");
                 assert_eq!(*offset, Some(0));
                 assert_eq!(region.as_deref(), Some("sins2.exe"));
+                assert_eq!(original_bytes.as_deref(), Some("8B B7 F8 D8 00 00 39 B3 50 08 00 00"));
+                assert!(context.as_ref().unwrap().contains("mov esi,[rdi+0xd8f8]"));
             }
             _ => panic!("expected AobScan variant"),
         }
