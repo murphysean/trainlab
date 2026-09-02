@@ -117,6 +117,8 @@ struct TrainlabApp {
     window_visible: bool,
     // In-flight attachment / initialization indicator & lock
     is_attaching: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // In-flight memory scan indicator & lock
+    is_scanning: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // Event bus receiver to subscribe to all unified session/wire/log events
     bus_rx: tokio::sync::broadcast::Receiver<trainlab_core::event::BusEvent>,
 }
@@ -163,7 +165,7 @@ impl TrainlabApp {
             host: config.inject.dll_host.clone(),
             port: config.inject.dll_port.to_string(),
             connected: false,
-            status: "not connected".into(),
+            status: "ready".into(),
             game_name,
             dll_path: config.inject.dll_path.clone(),
             game_candidates: Vec::new(),
@@ -190,6 +192,7 @@ impl TrainlabApp {
             auto_init: true,
             window_visible: true,
             is_attaching: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            is_scanning: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus_rx,
         };
         app.auto_match_profile();
@@ -1296,124 +1299,164 @@ impl TrainlabApp {
 
             ui.add_space(5.0);
 
+            let is_scanning_active = self.is_scanning.load(std::sync::atomic::Ordering::SeqCst);
+
             ui.horizontal(|ui| {
-                // First Scan Button
-                if ui.button("⚡ First Scan").clicked() {
-                    let pid = {
-                        let s = self.session.lock().unwrap();
-                        s.game_pid()
-                    };
-                    if let Some(pid) = pid {
-                        #[cfg(windows)]
-                        let proc_res = trainlab_core::memory::WindowsProcess::open(pid);
-                        #[cfg(not(windows))]
-                        let proc_res: Result<trainlab_core::memory::LinuxProcess, String> = Ok(trainlab_core::memory::LinuxProcess::new(pid as i32));
-
-                        match proc_res {
-                            Ok(proc) => {
-                                let regions = proc.regions().unwrap_or_default();
-                                let op_res = match self.scan_op_mode {
-                                    ScanOpMode::Exact => self.scan_val.trim().parse::<f64>().map(|v| ScanOp::Exact { value: v }).map_err(|e| e.to_string()),
-                                    ScanOpMode::Range => {
-                                        let min = self.scan_val.trim().parse::<f64>();
-                                        let max = self.scan_val_max.trim().parse::<f64>();
-                                        match (min, max) {
-                                            (Ok(min), Ok(max)) => Ok(ScanOp::Range { min, max }),
-                                            _ => Err("invalid min/max".to_string()),
-                                        }
+                if is_scanning_active {
+                    ui.spinner();
+                    ui.colored_label(egui::Color32::YELLOW, "Scanning game memory in background...");
+                } else {
+                    // First Scan Button
+                    if ui.button("⚡ First Scan").clicked() {
+                        let pid = {
+                            let s = self.session.lock().unwrap();
+                            s.game_pid()
+                        };
+                        if let Some(pid) = pid {
+                            let op_res = match self.scan_op_mode {
+                                ScanOpMode::Exact => self.scan_val.trim().parse::<f64>().map(|v| ScanOp::Exact { value: v }).map_err(|e| e.to_string()),
+                                ScanOpMode::Range => {
+                                    let min = self.scan_val.trim().parse::<f64>();
+                                    let max = self.scan_val_max.trim().parse::<f64>();
+                                    match (min, max) {
+                                        (Ok(min), Ok(max)) => Ok(ScanOp::Range { min, max }),
+                                        _ => Err("invalid min/max".to_string()),
                                     }
-                                    _ => Err("First scan requires an Exact or Range value".to_string()),
-                                };
-
-                                match op_res {
-                                    Ok(op) => {
-                                        let mut scan = trainlab_core::scan::Scan::new(self.scan_val_type);
-                                        match scan.first_scan(&proc, &regions, op) {
-                                            Ok(cnt) => {
-                                                if let Ok(mut s) = self.session.lock() {
-                                                    s.set_scan(scan);
-                                                }
-                                                self.log(format!("First scan found {cnt} candidate matches ({:?})", self.scan_val_type));
-                                            }
-                                            Err(e) => self.log(format!("First scan failed: {e}")),
-                                        }
-                                    }
-                                    Err(msg) => self.log(format!("Scan error: {msg}")),
                                 }
-                            }
-                            Err(e) => self.log(format!("Failed to open game process: {e}")),
-                        }
-                    } else {
-                        self.log("No attached game PID; attach to a process first!");
-                    }
-                }
+                                _ => Err("First scan requires an Exact or Range value".to_string()),
+                            };
 
-                // Next Scan / Refine Button
-                if ui.button("🔍 Next Scan (Refine)").clicked() {
-                    let pid = {
-                        let s = self.session.lock().unwrap();
-                        s.game_pid()
-                    };
-                    if let Some(pid) = pid {
-                        #[cfg(windows)]
-                        let proc_res = trainlab_core::memory::WindowsProcess::open(pid);
-                        #[cfg(not(windows))]
-                        let proc_res: Result<trainlab_core::memory::LinuxProcess, String> = Ok(trainlab_core::memory::LinuxProcess::new(pid as i32));
+                            match op_res {
+                                Ok(op) => {
+                                    if self.is_scanning.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+                                        let session = self.session.clone();
+                                        let is_scanning = self.is_scanning.clone();
+                                        let val_type = self.scan_val_type;
 
-                        match proc_res {
-                            Ok(proc) => {
-                                let op_res = match self.scan_op_mode {
-                                    ScanOpMode::Exact => self.scan_val.trim().parse::<f64>().map(|v| ScanOp::Exact { value: v }).map_err(|e| e.to_string()),
-                                    ScanOpMode::Range => {
-                                        let min = self.scan_val.trim().parse::<f64>();
-                                        let max = self.scan_val_max.trim().parse::<f64>();
-                                        match (min, max) {
-                                            (Ok(min), Ok(max)) => Ok(ScanOp::Range { min, max }),
-                                            _ => Err("invalid min/max".to_string()),
-                                        }
-                                    }
-                                    ScanOpMode::Changed => Ok(ScanOp::Changed),
-                                    ScanOpMode::Unchanged => Ok(ScanOp::Unchanged),
-                                    ScanOpMode::Increased => Ok(ScanOp::Increased),
-                                    ScanOpMode::Decreased => Ok(ScanOp::Decreased),
-                                };
+                                        std::thread::spawn(move || {
+                                            #[cfg(windows)]
+                                            let proc_res = trainlab_core::memory::WindowsProcess::open(pid);
+                                            #[cfg(not(windows))]
+                                            let proc_res: Result<trainlab_core::memory::LinuxProcess, String> = Ok(trainlab_core::memory::LinuxProcess::new(pid as i32));
 
-                                match op_res {
-                                    Ok(op) => {
-                                        let scan_to_refine = {
-                                            let s = self.session.lock().unwrap();
-                                            s.scan().cloned()
-                                        };
-                                        if let Some(mut scan) = scan_to_refine {
-                                            match scan.refine(&proc, op) {
-                                                Ok(cnt) => {
-                                                    if let Ok(mut s) = self.session.lock() {
-                                                        s.set_scan(scan);
+                                            match proc_res {
+                                                Ok(proc) => {
+                                                    let regions = proc.regions().unwrap_or_default();
+                                                    let mut scan = trainlab_core::scan::Scan::new(val_type);
+                                                    match scan.first_scan(&proc, &regions, op) {
+                                                        Ok(cnt) => {
+                                                            if let Ok(mut s) = session.lock() {
+                                                                s.set_scan(scan);
+                                                                s.log_activity("UI", format!("First scan found {cnt} candidate matches ({val_type:?})"));
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            if let Ok(mut s) = session.lock() {
+                                                                s.log_activity("UI", format!("First scan failed: {e}"));
+                                                            }
+                                                        }
                                                     }
-                                                    self.log(format!("Refinement kept {cnt} matches"));
                                                 }
-                                                Err(e) => self.log(format!("Refinement failed: {e}")),
+                                                Err(e) => {
+                                                    if let Ok(mut s) = session.lock() {
+                                                        s.log_activity("UI", format!("Failed to open game process: {e}"));
+                                                    }
+                                                }
                                             }
-                                        } else {
-                                            self.log("No active scan set; perform a First Scan first!");
-                                        }
+                                            is_scanning.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        });
                                     }
-                                    Err(msg) => self.log(format!("Refine error: {msg}")),
                                 }
+                                Err(msg) => self.log(format!("Scan error: {msg}")),
                             }
-                            Err(e) => self.log(format!("Failed to open game process: {e}")),
+                        } else {
+                            self.log("No attached game PID; attach to a process first!");
                         }
-                    } else {
-                        self.log("No attached game PID; attach to a process first!");
                     }
-                }
 
-                // Reset Scan Button
-                if ui.button("🗑 Reset Scan").clicked() {
-                    if let Ok(mut s) = self.session.lock() {
-                        s.clear_scan();
+                    // Next Scan / Refine Button
+                    if ui.button("🔍 Next Scan (Refine)").clicked() {
+                        let pid = {
+                            let s = self.session.lock().unwrap();
+                            s.game_pid()
+                        };
+                        if let Some(pid) = pid {
+                            let op_res = match self.scan_op_mode {
+                                ScanOpMode::Exact => self.scan_val.trim().parse::<f64>().map(|v| ScanOp::Exact { value: v }).map_err(|e| e.to_string()),
+                                ScanOpMode::Range => {
+                                    let min = self.scan_val.trim().parse::<f64>();
+                                    let max = self.scan_val_max.trim().parse::<f64>();
+                                    match (min, max) {
+                                        (Ok(min), Ok(max)) => Ok(ScanOp::Range { min, max }),
+                                        _ => Err("invalid min/max".to_string()),
+                                    }
+                                }
+                                ScanOpMode::Changed => Ok(ScanOp::Changed),
+                                ScanOpMode::Unchanged => Ok(ScanOp::Unchanged),
+                                ScanOpMode::Increased => Ok(ScanOp::Increased),
+                                ScanOpMode::Decreased => Ok(ScanOp::Decreased),
+                            };
+
+                            match op_res {
+                                Ok(op) => {
+                                    let scan_to_refine = {
+                                        let s = self.session.lock().unwrap();
+                                        s.scan().cloned()
+                                    };
+                                    if let Some(mut scan) = scan_to_refine {
+                                        if self.is_scanning.compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst).is_ok() {
+                                            let session = self.session.clone();
+                                            let is_scanning = self.is_scanning.clone();
+
+                                            std::thread::spawn(move || {
+                                                #[cfg(windows)]
+                                                let proc_res = trainlab_core::memory::WindowsProcess::open(pid);
+                                                #[cfg(not(windows))]
+                                                let proc_res: Result<trainlab_core::memory::LinuxProcess, String> = Ok(trainlab_core::memory::LinuxProcess::new(pid as i32));
+
+                                                match proc_res {
+                                                    Ok(proc) => {
+                                                        match scan.refine(&proc, op) {
+                                                            Ok(cnt) => {
+                                                                if let Ok(mut s) = session.lock() {
+                                                                    s.set_scan(scan);
+                                                                    s.log_activity("UI", format!("Refinement kept {cnt} matches"));
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                if let Ok(mut s) = session.lock() {
+                                                                    s.log_activity("UI", format!("Refinement failed: {e}"));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        if let Ok(mut s) = session.lock() {
+                                                            s.log_activity("UI", format!("Failed to open game process: {e}"));
+                                                        }
+                                                    }
+                                                }
+                                                is_scanning.store(false, std::sync::atomic::Ordering::SeqCst);
+                                            });
+                                        }
+                                    } else {
+                                        self.log("No active scan set; perform a First Scan first!");
+                                    }
+                                }
+                                Err(msg) => self.log(format!("Refine error: {msg}")),
+                            }
+                        } else {
+                            self.log("No attached game PID; attach to a process first!");
+                        }
                     }
-                    self.log("Value search reset");
+
+                    // Reset Scan Button
+                    if ui.button("🗑 Reset Scan").clicked() {
+                        if let Ok(mut s) = self.session.lock() {
+                            s.clear_scan();
+                        }
+                        self.log("Value search reset");
+                    }
                 }
             });
         });
