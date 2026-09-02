@@ -1975,6 +1975,18 @@ pub fn execute_set_cheat_toggle(
                     }),
                 ));
             }
+            if args.enabled {
+                match &hook {
+                    crate::cave_hook::CaveHook::Override { payload, .. } if payload.is_empty() => {
+                        return Err(err(format!(
+                            "toggle cheat #{} has an empty override hook with no payload; cannot enable stub toggle",
+                            args.id
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+
             let mut s = session
                 .lock()
                 .map_err(|_| err("session lock poisoned"))?;
@@ -2031,6 +2043,12 @@ pub fn execute_set_cheat_toggle(
                 ));
             }
             let desc = cave_ref.as_deref().unwrap_or("fast patch");
+            if args.enabled && patch_bytes.is_empty() {
+                return Err(err(format!(
+                    "patch cheat #{} has empty patch_bytes; cannot enable stub patch",
+                    args.id
+                )));
+            }
             let data = if args.enabled { patch_bytes } else { original_bytes };
             let mut s = session
                 .lock()
@@ -3113,5 +3131,46 @@ mod tests {
         assert_eq!(cheat.label, "Instant Research");
         assert_eq!(cheat.target_ref.as_deref(), Some("research_hook"));
         assert_eq!(cheat.original_bytes.as_deref(), Some("0f 2f 76 30"));
+    }
+
+    #[test]
+    fn test_empty_toggle_override_fails_and_does_not_stage() {
+        let session = Arc::new(Mutex::new(SessionState::new()));
+        let mut s = session.lock().unwrap();
+        let ctx = s.create_context("test-ctx", ClientKind::Internal);
+        let cid = s.add_cheat(
+            "Stub Override Toggle",
+            CheatKind::Toggle {
+                hook: crate::cave_hook::CaveHook::Override {
+                    payload: Vec::new(), // Empty payload!
+                    jump: crate::cave_hook::JumpStyle::Absolute,
+                },
+                target: 0x140d3db44,
+                enabled: false,
+                original_bytes: vec![0x4d, 0x8b, 0xb7, 0xc8, 0x00, 0x00, 0x00],
+                cave_addr: 0,
+            },
+            None,
+            Some("Stub test"),
+        );
+        drop(s);
+
+        let res = execute_set_cheat_toggle(&session, &ctx, SetCheatToggleArgs {
+            id: cid,
+            enabled: true,
+        });
+        assert!(res.is_err(), "enabling empty override toggle must return an error");
+        let err_msg = res.unwrap_err().message;
+        assert!(err_msg.contains("empty override hook with no payload"), "err_msg: {err_msg}");
+
+        // Verify session state: no pending ops were staged, undo log is empty, and cheat remains disabled
+        let s = session.lock().unwrap();
+        assert_eq!(s.list_pending().len(), 0);
+        assert_eq!(s.undo_len(), 0);
+        let c = s.get_cheat(cid).unwrap();
+        match &c.kind {
+            CheatKind::Toggle { enabled, .. } => assert!(!enabled),
+            _ => panic!("wrong cheat kind"),
+        }
     }
 }

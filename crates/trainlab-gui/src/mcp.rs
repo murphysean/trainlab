@@ -2542,7 +2542,12 @@ impl TrainlabMcpServer {
         };
         let hook = match args.hook.as_str() {
             "trampoline" => CaveHook::Trampoline { payload: payload.clone(), jump },
-            "override" => CaveHook::Override { payload: payload.clone(), jump },
+            "override" => {
+                if payload.is_empty() {
+                    return Err(err("override hook requires a non-empty payload; an empty override drops stolen instructions without replacement"));
+                }
+                CaveHook::Override { payload: payload.clone(), jump }
+            }
             other => return Err(err(format!("unknown hook kind '{other}' (expected 'trampoline' or 'override')"))),
         };
 

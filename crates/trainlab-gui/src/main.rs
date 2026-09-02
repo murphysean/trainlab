@@ -808,9 +808,17 @@ impl TrainlabApp {
                                     });
                                 });
                             }
-                            CheatKind::Toggle { target, enabled, original_bytes, .. } => {
+                            CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
                                 let mut on = *enabled;
-                                if ui.checkbox(&mut on, &cheat.label).changed() {
+                                let is_stub_override = match hook {
+                                    trainlab_core::cave_hook::CaveHook::Override { payload, .. } if payload.is_empty() => true,
+                                    _ => false,
+                                };
+                                if is_stub_override {
+                                    let mut dummy_on = false;
+                                    ui.add_enabled(false, egui::Checkbox::new(&mut dummy_on, &cheat.label));
+                                    ui.colored_label(egui::Color32::YELLOW, "(stub — no payload)");
+                                } else if ui.checkbox(&mut on, &cheat.label).changed() {
                                     if on {
                                         if let Ok(mut s) = self_ptr.session.lock() {
                                             s.set_cheat_toggle(cheat.id, true);
@@ -851,7 +859,11 @@ impl TrainlabApp {
                             CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
                                 let mut on = *enabled;
                                 let desc = cave_ref.as_deref().unwrap_or("fast patch");
-                                if ui.checkbox(&mut on, &cheat.label).changed() {
+                                if patch_bytes.is_empty() {
+                                    let mut dummy_on = false;
+                                    ui.add_enabled(false, egui::Checkbox::new(&mut dummy_on, &cheat.label));
+                                    ui.colored_label(egui::Color32::YELLOW, "(stub — empty patch)");
+                                } else if ui.checkbox(&mut on, &cheat.label).changed() {
                                     let bytes_to_write = if on { patch_bytes } else { original_bytes };
                                     if !bytes_to_write.is_empty() {
                                         let r = self_ptr.request(&Request::Write {

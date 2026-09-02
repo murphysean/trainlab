@@ -93,6 +93,11 @@ where
     W: Fn(u64, &[u8]) -> Result<usize, String>,
     A: Fn(usize, bool) -> Result<u64, String>,
 {
+    if let HookKind::Override { payload, .. } = &kind
+        && payload.is_empty() {
+            return Err("override hook requires a non-empty payload; an empty override drops stolen instructions without replacement".to_string());
+        }
+
     let jump_style = match &kind {
         HookKind::Override { jump, .. } | HookKind::Trampoline { jump, .. } => *jump,
     };
@@ -382,6 +387,19 @@ mod tests {
         assert!(hook2.is_err());
         let err_msg = hook2.unwrap_err();
         assert!(err_msg.contains("already hooked"), "error message was: {err_msg}");
+    }
+
+    #[test]
+    fn install_empty_override_fails_with_error() {
+        let target = 0x4000u64;
+        let kind = HookKind::Override {
+            payload: Vec::new(),
+            jump: JumpStyle::Absolute,
+        };
+        let res = install(target, kind, fake_read, fake_write, fake_alloc);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("override hook requires a non-empty payload"), "err: {err_msg}");
     }
 
     #[test]
