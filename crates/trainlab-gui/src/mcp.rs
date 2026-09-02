@@ -1238,8 +1238,9 @@ impl TrainlabMcpServer {
             .session
             .lock()
             .map_err(|_| err("session lock poisoned"))?;
-        // Set the game name so attach/status reflect the profile.
+        // Set the game name and active profile metadata in session so save_profile preserves setup steps.
         s.set_game_name(profile.game.clone());
+        s.set_active_profile(&profile);
         s.log_activity("PROFILE", format!("loading profile '{}' ({})...", file, profile.game));
         s.clear_cheats();
 

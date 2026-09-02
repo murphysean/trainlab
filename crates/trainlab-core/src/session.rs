@@ -298,6 +298,22 @@ pub struct SessionState {
     next_cheat_id: u64,
     /// Tracked applications & binaries discovered during process scans or launched manually.
     tracked_apps: Vec<DiscoveredApp>,
+    /// Active profile name.
+    profile_name: Option<String>,
+    /// Active profile version.
+    profile_version: Option<String>,
+    /// Active profile game version.
+    profile_game_version: Option<String>,
+    /// Active profile author.
+    profile_author: Option<String>,
+    /// Active profile date.
+    profile_date: Option<String>,
+    /// Active setup steps currently associated with the session.
+    setup_steps: Vec<crate::profile::SetupStep>,
+    /// Active initialization commands associated with the session.
+    init_commands: Option<Vec<crate::profile::ProfileCommand>>,
+    /// Active render configuration associated with the session.
+    profile_render: Option<crate::profile::RenderConfig>,
     /// Pending window command requested remotely via REST API or MCP ("show" or "hide").
     pending_window_cmd: Option<String>,
     /// Unified activity log (sourced as "UI: ..." or "MCP: ...").
@@ -601,6 +617,51 @@ impl SessionState {
     /// Get the DLL's reported version.
     pub fn inject_version(&self) -> Option<&str> {
         self.inject_version.as_deref()
+    }
+
+    /// Set active profile metadata and setup steps.
+    pub fn set_active_profile(&mut self, profile: &crate::profile::GameProfile) {
+        self.profile_name = Some(profile.name.clone());
+        self.profile_version = Some(profile.version.clone());
+        self.profile_game_version = profile.game_version.clone();
+        self.profile_author = profile.author.clone();
+        self.profile_date = profile.date.clone();
+        self.setup_steps = profile.setup.clone();
+        self.init_commands = profile.init_commands.clone();
+        self.profile_render = profile.render.clone();
+    }
+
+    /// Access active setup steps.
+    pub fn setup_steps(&self) -> &[crate::profile::SetupStep] {
+        &self.setup_steps
+    }
+
+    /// Set active setup steps.
+    pub fn set_setup_steps(&mut self, steps: Vec<crate::profile::SetupStep>) {
+        self.setup_steps = steps;
+    }
+
+    /// Access active profile metadata.
+    pub fn profile_name(&self) -> Option<&str> {
+        self.profile_name.as_deref()
+    }
+    pub fn profile_version(&self) -> Option<&str> {
+        self.profile_version.as_deref()
+    }
+    pub fn profile_game_version(&self) -> Option<&str> {
+        self.profile_game_version.as_deref()
+    }
+    pub fn profile_author(&self) -> Option<&str> {
+        self.profile_author.as_deref()
+    }
+    pub fn profile_date(&self) -> Option<&str> {
+        self.profile_date.as_deref()
+    }
+    pub fn init_commands(&self) -> Option<&[crate::profile::ProfileCommand]> {
+        self.init_commands.as_deref()
+    }
+    pub fn profile_render(&self) -> Option<&crate::profile::RenderConfig> {
+        self.profile_render.as_ref()
     }
 
     pub fn new() -> Self {

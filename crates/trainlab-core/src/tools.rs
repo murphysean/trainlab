@@ -2187,25 +2187,40 @@ pub fn execute_save_profile(
     ctx: &ClientContext,
     args: ProfileSaveArgs,
 ) -> Result<ToolResult, ToolError> {
+    use std::collections::HashMap;
     use crate::profile::{GameProfile, ProfileCheat};
 
-    let (game, profile_cheats) = {
+    let (game, profile_cheats, setup_steps, profile_meta) = {
         let s = session.lock().map_err(|_| err("session lock poisoned"))?;
         let game = s.game_name().to_string();
         if game.is_empty() {
             return Err(err("cannot save profile: session has no target game attached"));
         }
+
+        // Build a lookup map of address -> marker name so cheats can reference setup steps symbolically
+        let markers = s.list_markers();
+        let mut addr_to_marker: HashMap<u64, String> = HashMap::new();
+        for m in markers {
+            addr_to_marker.insert(m.address, m.label.clone());
+        }
+
+        let setup_steps = s.setup_steps().to_vec();
+
         let cheats = s.list_cheats();
         let profile_cheats: Vec<ProfileCheat> = cheats
             .iter()
             .map(|c| {
                 let (kind, value_type, address_ref, target_ref, hook, payload, base, fields, orig_bytes) = match &c.kind {
                     CheatKind::Value { address, value_type, address_expr } => {
-                        let addr_ref = address_expr.clone().unwrap_or_else(|| format!("{address:#x}"));
+                        let addr_ref = address_expr.clone().or_else(|| addr_to_marker.get(address).cloned()).unwrap_or_else(|| format!("{address:#x}"));
                         ("value".to_string(), Some(format!("{value_type:?}").to_lowercase()), Some(addr_ref), None, None, None, None, None, None)
                     }
                     CheatKind::Struct { base_address, base_expr, fields } => {
-                        let b = if base_expr.is_empty() { format!("{base_address:#x}") } else { base_expr.clone() };
+                        let b = if base_expr.is_empty() {
+                            addr_to_marker.get(base_address).cloned().unwrap_or_else(|| format!("{base_address:#x}"))
+                        } else {
+                            base_expr.clone()
+                        };
                         ("struct".to_string(), None, None, None, None, None, Some(b), Some(fields.clone()), None)
                     }
                     CheatKind::Toggle { target, hook, original_bytes, .. } => {
@@ -2222,7 +2237,8 @@ pub fn execute_save_profile(
                         } else {
                             None
                         };
-                        ("toggle".to_string(), None, None, Some(format!("{target:#x}")), Some(hk), pl, None, None, orig)
+                        let tgt_ref = addr_to_marker.get(target).cloned().unwrap_or_else(|| format!("{target:#x}"));
+                        ("toggle".to_string(), None, None, Some(tgt_ref), Some(hk), pl, None, None, orig)
                     }
                     CheatKind::Patch { target, patch_bytes, cave_ref, original_bytes, .. } => {
                         let orig = if !original_bytes.is_empty() {
@@ -2230,7 +2246,8 @@ pub fn execute_save_profile(
                         } else {
                             None
                         };
-                        ("patch".to_string(), None, None, Some(format!("{target:#x}")), cave_ref.clone(), Some(patch_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")), None, None, orig)
+                        let tgt_ref = addr_to_marker.get(target).cloned().unwrap_or_else(|| format!("{target:#x}"));
+                        ("patch".to_string(), None, None, Some(tgt_ref), cave_ref.clone(), Some(patch_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")), None, None, orig)
                     }
                     CheatKind::Button { .. } => {
                         ("button".to_string(), None, None, None, None, None, None, None, None)
@@ -2265,21 +2282,32 @@ pub fn execute_save_profile(
                 }
             })
             .collect();
-        (game, profile_cheats)
+
+        let profile_name = s.profile_name().map(|n| n.to_string()).unwrap_or_else(|| format!("{game} cheats"));
+        let profile_version = s.profile_version().map(|v| v.to_string()).unwrap_or_else(|| "1.0.0".into());
+        let game_version = s.profile_game_version().map(|v| v.to_string());
+        let author = s.profile_author().map(|a| a.to_string());
+        let date = s.profile_date().map(|d| d.to_string());
+        let init_commands = s.init_commands().map(|c| c.to_vec());
+        let profile_render = s.profile_render().cloned();
+
+        (game, profile_cheats, setup_steps, (profile_name, profile_version, game_version, author, date, init_commands, profile_render))
     };
+
+    let (name, version, game_version, author, date, init_commands, render) = profile_meta;
 
     let profile = GameProfile {
         schema: GameProfile::SCHEMA_V1.into(),
         game: game.clone(),
-        name: format!("{game} cheats"),
+        name,
         inject_dll: true,
-        version: "1.0.0".into(),
-        game_version: None,
-        date: None,
-        author: None,
-        setup: vec![],
-        init_commands: None,
-        render: None,
+        version,
+        game_version,
+        date,
+        author,
+        setup: setup_steps,
+        init_commands,
+        render,
         cheats: profile_cheats.clone(),
     };
 
@@ -3015,5 +3043,75 @@ mod tests {
         // 4. Verify pending list is empty
         let l_p2 = execute_list_pending(&session, &ctx).unwrap();
         assert!(l_p2.message.contains("(no pending mutations)"));
+    }
+
+    #[test]
+    fn test_save_profile_preserves_setup_and_symbols() {
+        let session = Arc::new(Mutex::new(SessionState::new()));
+        let mut s = session.lock().unwrap();
+        let ctx = s.create_context("test-save-profile", ClientKind::Internal);
+
+        s.set_game_name("sins2.exe");
+        let setup_step = crate::profile::SetupStep::AobScan {
+            name: "research_hook".into(),
+            pattern: "0F 2F 76 ?? 0F 28 B4 24 ?? ?? ?? ?? 77".into(),
+            offset: Some(0),
+            region: Some("sins2.exe".into()),
+            original_bytes: Some("0f 2f 76 30 0f 28 b4 24 40 02 00 00 77 1e".into()),
+            context: Some("comiss xmm6,[rsi+0x30]; movaps xmm6,[rsp+0x240]; ja +0x1e — research progress compare".into()),
+        };
+        s.set_setup_steps(vec![setup_step]);
+        s.set_marker("research_hook", 0x140b246b3, Some("research hook marker")).unwrap();
+
+        // Add a toggle cheat referencing research_hook
+        let _ = s.add_cheat_group(
+            "Instant Research",
+            CheatKind::Toggle {
+                hook: crate::cave_hook::CaveHook::Override {
+                    payload: vec![0x90, 0x90],
+                    jump: crate::cave_hook::JumpStyle::Absolute,
+                },
+                target: 0x140b246b3,
+                enabled: false,
+                original_bytes: vec![0x0f, 0x2f, 0x76, 0x30],
+                cave_addr: 0,
+            },
+            Some("Research"),
+            Some("Num 1"),
+            false,
+            Some("Instant research note"),
+        );
+        drop(s);
+
+        let res = execute_save_profile(&session, &ctx, ProfileSaveArgs {
+            file: Some("test_sins2_saved.yaml".into()),
+        }).unwrap();
+        assert!(res.message.contains("saved profile to"));
+
+        // Read and parse back the saved YAML
+        let path = crate::profile::profiles_dir_path().join("test_sins2_saved.yaml");
+        let yaml = std::fs::read_to_string(&path).expect("read saved profile yaml");
+        let _ = std::fs::remove_file(&path); // Clean up
+
+        let loaded = crate::profile::GameProfile::from_yaml(&yaml).expect("parse saved yaml");
+        assert_eq!(loaded.game, "sins2.exe");
+        assert_eq!(loaded.setup.len(), 1);
+        match &loaded.setup[0] {
+            crate::profile::SetupStep::AobScan { name, pattern, offset, region, original_bytes, context } => {
+                assert_eq!(name, "research_hook");
+                assert_eq!(pattern, "0F 2F 76 ?? 0F 28 B4 24 ?? ?? ?? ?? 77");
+                assert_eq!(*offset, Some(0));
+                assert_eq!(region.as_deref(), Some("sins2.exe"));
+                assert_eq!(original_bytes.as_deref(), Some("0f 2f 76 30 0f 28 b4 24 40 02 00 00 77 1e"));
+                assert!(context.as_deref().unwrap().contains("research progress compare"));
+            }
+            _ => panic!("wrong setup step kind"),
+        }
+
+        assert_eq!(loaded.cheats.len(), 1);
+        let cheat = &loaded.cheats[0];
+        assert_eq!(cheat.label, "Instant Research");
+        assert_eq!(cheat.target_ref.as_deref(), Some("research_hook"));
+        assert_eq!(cheat.original_bytes.as_deref(), Some("0f 2f 76 30"));
     }
 }
