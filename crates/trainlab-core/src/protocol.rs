@@ -188,6 +188,15 @@ pub enum Request {
     SetOverlayVisible { visible: bool },
     /// Sync active cheats from GUI to the in-game overlay & pinning loop.
     SyncCheats { cheats: Vec<OverlayCheatDto> },
+    /// Configure or initialize in-game render and input hooks via IPC.
+    ConfigureRender {
+        /// Whether to hook Present/EndScene for in-game overlay rendering.
+        overlay: bool,
+        /// Whether to install WndProc hooks for message handling/hotkeys.
+        hook_wndproc: bool,
+        /// Whether to initialize controller polling hooks.
+        xinput_hooks: bool,
+    },
 }
 
 /// The response to a [`Request`].
@@ -301,6 +310,12 @@ pub enum Response {
     OverlayVisibilitySet { visible: bool },
     /// Reply to [`Request::SyncCheats`].
     CheatsSynced { count: usize },
+    /// Reply to [`Request::ConfigureRender`].
+    RenderConfigured {
+        overlay: bool,
+        hook_wndproc: bool,
+        xinput_hooks: bool,
+    },
     /// An error occurred while handling the request.
     Error { message: String },
 }

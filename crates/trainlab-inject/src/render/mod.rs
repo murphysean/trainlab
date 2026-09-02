@@ -85,7 +85,7 @@ pub fn detect_foreign_overlays() -> Vec<String> {
     Vec::new()
 }
 
-/// Initialize render detection and hook threads.
+/// Initialize third-party foreign overlay detection on load without installing hooks.
 pub fn init() {
     #[cfg(windows)]
     {
@@ -97,32 +97,36 @@ pub fn init() {
                 *lock = foreign;
             }
         }
+    }
+}
 
-        let disable_overlay = std::env::var("TRAINLAB_DISABLE_OVERLAY")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+/// Configure and optionally initialize in-game render and input hooks via IPC instructions.
+pub fn configure(overlay: bool, hook_wndproc: bool, xinput_hooks: bool) {
+    #[cfg(windows)]
+    {
+        let _ = hook_wndproc; // Used when present hook resolves HWND
 
-        let disable_xinput = std::env::var("TRAINLAB_DISABLE_XINPUT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        if !disable_overlay {
-            // Spawn background thread to wait for game window & hook DXGI / D3D
+        if overlay {
+            tracing::info!("Enabling in-game DXGI overlay hooking via IPC");
             std::thread::spawn(|| {
                 dxgi::init_dxgi_hook();
             });
         } else {
-            tracing::info!("In-game DXGI overlay hooking disabled via configuration");
+            tracing::info!("In-game DXGI overlay hooking disabled via IPC configuration");
         }
 
-        if !disable_xinput {
-            // Spawn background thread for controller combo hook (Select + Start)
+        if xinput_hooks {
+            tracing::info!("Enabling XInput controller hooking via IPC");
             std::thread::spawn(|| {
                 xinput::init_xinput_hook();
             });
         } else {
-            tracing::info!("XInput controller hooking disabled via configuration");
+            tracing::info!("XInput controller hooking disabled via IPC configuration");
         }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (overlay, hook_wndproc, xinput_hooks);
     }
 }
 

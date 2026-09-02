@@ -261,21 +261,7 @@ impl TrainlabApp {
                     if let Ok(mut s) = session.lock() {
                         let attached_pid = s.game_pid();
                         s.record_tracked_app(&game_name, attached_pid, None);
-                        s.log_activity("UI", format!("connected, inject v{version} — awaiting DLL graphics & engine readiness..."));
-                    }
-
-                    // Explicit handshake: Wait for DLL graphics hooks / engine initialization to settle
-                    match controller::request(&session, &Request::WaitForReady) {
-                        Ok(Response::Ready { api, input_hook, present_hooked, frame_count, combo_count }) => {
-                            if let Ok(mut s) = session.lock() {
-                                s.log_activity("UI", format!("DLL ready: {api} | Input: {input_hook} (present hooked: {present_hooked}, {frame_count} frames, {combo_count} combos)"));
-                            }
-                        }
-                        _ => {
-                            if let Ok(mut s) = session.lock() {
-                                s.log_activity("UI", "DLL ready handshake completed (default)");
-                            }
-                        }
+                        s.log_activity("UI", format!("connected, inject v{version} — initializing DLL via IPC..."));
                     }
 
                     if auto_init {
@@ -285,7 +271,7 @@ impl TrainlabApp {
                             match dp {
                                 profile::DiscoveredProfile::Valid { file, profile } => {
                                     if profile.game.eq_ignore_ascii_case(&game_name) {
-                                        matched = Some(file.clone());
+                                        matched = Some((file.clone(), profile.clone()));
                                         break;
                                     }
                                 }
@@ -299,7 +285,14 @@ impl TrainlabApp {
                             }
                         }
 
-                        if let Some(file) = matched {
+                        if let Some((file, prof)) = matched {
+                            let render_cfg = prof.render.clone().unwrap_or_default();
+                            let _ = controller::request(&session, &Request::ConfigureRender {
+                                overlay: render_cfg.overlay,
+                                hook_wndproc: render_cfg.hook_wndproc,
+                                xinput_hooks: render_cfg.xinput_hooks,
+                            });
+
                             if let Ok(mut s) = session.lock() {
                                 s.log_activity("UI", format!("starting sequential profile initialization for '{file}'..."));
                             }
@@ -314,6 +307,34 @@ impl TrainlabApp {
                                         s.log_activity("UI", format!("profile '{file}' load FAILED: {e}"));
                                     }
                                 }
+                            }
+                        } else {
+                            // Default: enable standard overlay and input hooks if no profile specifies otherwise
+                            let _ = controller::request(&session, &Request::ConfigureRender {
+                                overlay: true,
+                                hook_wndproc: true,
+                                xinput_hooks: true,
+                            });
+                        }
+                    } else {
+                        // Default: enable standard overlay and input hooks
+                        let _ = controller::request(&session, &Request::ConfigureRender {
+                            overlay: true,
+                            hook_wndproc: true,
+                            xinput_hooks: true,
+                        });
+                    }
+
+                    // Explicit handshake: Wait for DLL graphics hooks / engine initialization to settle
+                    match controller::request(&session, &Request::WaitForReady) {
+                        Ok(Response::Ready { api, input_hook, present_hooked, frame_count, combo_count }) => {
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("UI", format!("DLL ready: {api} | Input: {input_hook} (present hooked: {present_hooked}, {frame_count} frames, {combo_count} combos)"));
+                            }
+                        }
+                        _ => {
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("UI", "DLL ready handshake completed (default)");
                             }
                         }
                     }

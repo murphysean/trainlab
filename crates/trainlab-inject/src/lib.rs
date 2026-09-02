@@ -518,6 +518,14 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             render::overlay::apply_event(trainlab_core::protocol::Event::SyncCheats { cheats });
             Response::CheatsSynced { count }
         }
+        Request::ConfigureRender { overlay, hook_wndproc, xinput_hooks } => {
+            render::configure(overlay, hook_wndproc, xinput_hooks);
+            Response::RenderConfigured {
+                overlay,
+                hook_wndproc,
+                xinput_hooks,
+            }
+        }
     }
 }
 
@@ -748,6 +756,27 @@ mod tests {
                 assert_eq!(len, 8);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_configure_render_roundtrip() {
+        let mem = SelfProcess;
+        let req = Request::ConfigureRender {
+            overlay: false,
+            hook_wndproc: false,
+            xinput_hooks: false,
+        };
+        let frame = protocol::encode(&req).unwrap();
+        let decoded: Request = protocol::decode(&frame).unwrap();
+        let resp = handle_request_guarded(&mem, decoded);
+        match resp {
+            Response::RenderConfigured { overlay, hook_wndproc, xinput_hooks } => {
+                assert!(!overlay);
+                assert!(!hook_wndproc);
+                assert!(!xinput_hooks);
+            }
+            other => panic!("expected RenderConfigured, got {other:?}"),
         }
     }
 

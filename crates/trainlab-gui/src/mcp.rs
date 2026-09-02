@@ -1179,6 +1179,14 @@ impl TrainlabMcpServer {
             }
         }
 
+        // Configure DLL render hooks via IPC based on profile render config (defaults to enabled if not specified)
+        let render_cfg = profile.render.clone().unwrap_or_default();
+        let _ = crate::controller::request(&self.session, &Request::ConfigureRender {
+            overlay: render_cfg.overlay,
+            hook_wndproc: render_cfg.hook_wndproc,
+            xinput_hooks: render_cfg.xinput_hooks,
+        });
+
         // Run setup steps or init_commands to resolve base addresses and create markers.
         let mut resolved: Vec<(String, u64)> = Vec::new();
         if args.run_setup {
