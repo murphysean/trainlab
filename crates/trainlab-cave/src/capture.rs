@@ -36,6 +36,8 @@ pub struct InstalledCapture {
     /// The gate's own value type (defaults to `value_type` when ungated);
     /// used to decode the per-entry `gate_value` on read-back.
     pub gate_value_type: ValueType,
+    /// Address of the executable trampoline cave.
+    pub cave_addr: u64,
 }
 
 /// Install a passive register capture at `target`.
@@ -115,6 +117,7 @@ where
     Ok(InstalledCapture {
         id: 0,
         scratch: ring_base,
+        cave_addr: hook.cave_addr,
         target: hook.target,
         original: hook.original,
         capacity,

@@ -20,6 +20,7 @@ struct LiveCapture {
     target: u64,
     original: Vec<u8>,
     scratch: u64,
+    cave_addr: u64,
     capacity: usize,
     value_type: ValueType,
     gate_value_type: ValueType,
@@ -50,7 +51,13 @@ pub fn install(
     let mem = SelfProcess;
     let read = |addr: u64, len: usize| mem.read(addr, len).map_err(|e| e.to_string());
     let write = |addr: u64, data: &[u8]| mem.write(addr, data).map_err(|e| e.to_string());
-    let alloc = |size: usize, exec: bool| crate::allocate(size, exec);
+    let alloc = |size: usize, exec: bool| {
+        if exec {
+            crate::allocate_near(target, size, true)
+        } else {
+            crate::allocate(size, false)
+        }
+    };
 
     let cap = trainlab_cave::capture::install_capture(
         target,
@@ -72,6 +79,7 @@ pub fn install(
             target: cap.target,
             original: cap.original,
             scratch: cap.scratch,
+            cave_addr: cap.cave_addr,
             capacity: cap.capacity,
             value_type: cap.value_type,
             gate_value_type: cap.gate_value_type,
@@ -102,7 +110,8 @@ pub fn read(
     Ok((entries, disarmed))
 }
 
-/// Uninstall a capture: restore original bytes at its target and free the ring.
+/// Uninstall a capture: restore original bytes at its target, wait a brief grace
+/// period for any in-flight thread to exit the trampoline cave, and then free memory.
 pub fn uninstall(id: u64) -> Result<(), String> {
     let mut reg = registry().lock().map_err(|_| "capture registry poisoned".to_string())?;
     let c = reg
@@ -111,7 +120,16 @@ pub fn uninstall(id: u64) -> Result<(), String> {
         .ok_or_else(|| format!("no capture with id {id}"))?;
     let mem = SelfProcess;
     let write = |addr: u64, data: &[u8]| mem.write(addr, data).map_err(|e| e.to_string());
+    // 1. Restore original instructions at the hook site first so no future threads enter the cave
     trainlab_cave::capture::restore_capture(c.target, &c.original, write)?;
+
+    // 2. Allow any in-flight execution on concurrent game worker threads to finish and jump back
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // 3. Free the executable cave and the data ring buffer
+    if c.cave_addr != 0 {
+        crate::free(c.cave_addr);
+    }
     crate::free(c.scratch);
     Ok(())
 }
