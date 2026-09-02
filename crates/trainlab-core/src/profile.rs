@@ -461,12 +461,29 @@ pub fn discover_profiles() -> Vec<(String, GameProfile)> {
         .collect()
 }
 
-/// The absolute path to the profiles directory (next to the GUI exe).
+/// The absolute path to the profiles directory (next to the GUI exe or in workspace root).
 pub fn profiles_dir_path() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent() {
-            return dir.join(PROFILES_DIR);
+            let p = dir.join(PROFILES_DIR);
+            if p.exists() {
+                return p;
+            }
         }
+    let cwd_cheats = std::path::PathBuf::from(PROFILES_DIR);
+    if cwd_cheats.exists() {
+        return cwd_cheats;
+    }
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let manifest_path = std::path::PathBuf::from(manifest_dir);
+        if let Some(parent) = manifest_path.parent()
+            && let Some(workspace_root) = parent.parent() {
+                let ws_cheats = workspace_root.join(PROFILES_DIR);
+                if ws_cheats.exists() {
+                    return ws_cheats;
+                }
+            }
+    }
     std::path::PathBuf::from(PROFILES_DIR)
 }
 

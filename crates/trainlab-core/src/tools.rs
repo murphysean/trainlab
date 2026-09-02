@@ -1033,6 +1033,7 @@ pub fn execute_allocate_string(
 
         if let Ok(mut s) = session.lock() {
             s.log_activity(&ctx.id, format!("allocated string ({kind}, {len} bytes) at {alloc_addr:#x}"));
+            s.record_allocation(alloc_addr, len, format!("string ({kind})"), args.marker.clone());
             if let Some(m) = &args.marker {
                 let _ = s.set_marker(m, alloc_addr, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
             }
@@ -1120,6 +1121,7 @@ pub fn execute_allocate_memory(
 
         if let Ok(mut s) = session.lock() {
             s.log_activity(&ctx.id, format!("allocated memory ({size} bytes) at {alloc_addr:#x}"));
+            s.record_allocation(alloc_addr, size, "raw memory buffer", args.marker.clone());
             if let Some(m) = &args.marker {
                 let _ = s.set_marker(m, alloc_addr, Some(&format!("Allocated memory buffer ({size} bytes)")));
             }
@@ -1184,6 +1186,7 @@ pub fn execute_free_memory(
         }
 
         if let Ok(mut s) = session.lock() {
+            s.remove_allocation(target_addr);
             s.log_activity(&ctx.id, format!("freed memory at {target_addr:#x}"));
         }
 

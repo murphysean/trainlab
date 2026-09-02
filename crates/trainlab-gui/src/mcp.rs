@@ -1150,6 +1150,22 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<LoadProfileArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Enforce session clean state (BUG_load_profile_orphans_live_patches.md).
+        // Refuse to load a new profile if the current session holds active cave hooks,
+        // enabled cheats, unreverted undo entries, or unfreed memory allocations.
+        {
+            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let dirty = s.check_dirty();
+            if dirty.is_dirty() {
+                let err_msg = format!(
+                    "cannot load profile '{}' while session is dirty: {}. Revert active cheats/mutations or restart game before loading a profile.",
+                    args.profile,
+                    dirty.summary()
+                );
+                return Err(err(err_msg));
+            }
+        }
+
         let all_discovered = crate::profile::discover_all_profiles();
         // Match by file name or by game exe.
         let target = args.profile.trim().to_lowercase();
@@ -1431,6 +1447,66 @@ impl TrainlabMcpServer {
         text.push_str("Cheats are populated but NOT enabled. Use 'list_cheats' to see them.");
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(text),
+        ]))
+    }
+
+    /// Audit and verify code sites against their original_bytes in memory.
+    #[tool(description = "Audit and verify all code hook sites in the active profile against their expected original bytes in game memory. Reports which sites are clean, patched, or unknown.")]
+    fn verify_sites(&self) -> Result<CallToolResult, ErrorData> {
+        let proc = game_process(&self.session)?;
+        let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        let cheats = s.list_cheats();
+        if cheats.is_empty() {
+            return Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text("no cheats loaded in active session to verify"),
+            ]));
+        }
+
+        let mut lines = Vec::new();
+        lines.push(format!("Audit of {} cheat site(s):", cheats.len()));
+
+        for c in cheats {
+            match &c.kind {
+                CheatKind::Toggle { target, original_bytes, enabled, .. } => {
+                    if original_bytes.is_empty() {
+                        lines.push(format!("  • #{} '{}' @ {target:#x}: no original bytes recorded (enabled: {enabled})", c.id, c.label));
+                    } else {
+                        let current = proc.read(*target, original_bytes.len()).unwrap_or_default();
+                        let is_original = current == *original_bytes;
+                        let status = if is_original {
+                            "CLEAN (original bytes present)"
+                        } else if current.starts_with(&[0xff, 0x25]) || current.starts_with(&[0xe9]) || current.starts_with(&[0xeb]) {
+                            "PATCHED (live jump hook present)"
+                        } else {
+                            "DIRTY / MODIFIED"
+                        };
+                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} (session enabled: {enabled})", c.id, c.label));
+                    }
+                }
+                CheatKind::Patch { target, original_bytes, patch_bytes, enabled, .. } => {
+                    if original_bytes.is_empty() {
+                        lines.push(format!("  • #{} '{}' @ {target:#x}: no original bytes recorded (enabled: {enabled})", c.id, c.label));
+                    } else {
+                        let current = proc.read(*target, original_bytes.len()).unwrap_or_default();
+                        let status = if current == *original_bytes {
+                            "CLEAN (original bytes present)"
+                        } else if current == *patch_bytes {
+                            "PATCHED (patch bytes present)"
+                        } else {
+                            "DIRTY / MODIFIED"
+                        };
+                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} (session enabled: {enabled})", c.id, c.label));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let dirty_summary = s.check_dirty().summary();
+        lines.push(format!("\nSession dirty state: {dirty_summary}"));
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(lines.join("\n")),
         ]))
     }
 
@@ -2299,6 +2375,9 @@ impl TrainlabMcpServer {
                 target: _,
                 original: _,
             }) => {
+                if let Ok(mut s) = self.session.lock() {
+                    s.record_capture(id);
+                }
                 let gate_desc = match &gate {
                     None => "unconditional".to_string(),
                     Some(g) => format!(
@@ -2377,11 +2456,16 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<UninstallCaptureArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         match call_dll(&self.session, &Request::UninstallCapture { id: args.id }) {
-            Ok(Response::CaptureUninstalled { id }) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format!(
-                    "uninstalled capture {id}: original bytes restored, scratch freed."
-                )),
-            ])),
+            Ok(Response::CaptureUninstalled { id }) => {
+                if let Ok(mut s) = self.session.lock() {
+                    s.remove_capture(id);
+                }
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "uninstalled capture {id}: original bytes restored, scratch freed."
+                    )),
+                ]))
+            }
             Ok(Response::Error { message }) => Err(err(message)),
             Ok(_) => Err(err("unexpected response from DLL")),
             Err(e) => Err(err(e)),
@@ -2405,11 +2489,16 @@ impl TrainlabMcpServer {
             len,
             one_shot: args.one_shot,
         }) {
-            Ok(Response::WatchArmed) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(
-                    "watchpoint armed; poll with 'watch_poll' to retrieve the hit",
-                ),
-            ])),
+            Ok(Response::WatchArmed) => {
+                if let Ok(mut s) = self.session.lock() {
+                    s.record_breakpoint(address);
+                }
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(
+                        "watchpoint armed; poll with 'watch_poll' to retrieve the hit",
+                    ),
+                ]))
+            }
             Ok(Response::Error { message }) => Err(err(message)),
             Ok(_) => Err(err("unexpected response from DLL")),
             Err(e) => Err(err(e)),
@@ -2427,11 +2516,16 @@ impl TrainlabMcpServer {
             address,
             one_shot: args.one_shot,
         }) {
-            Ok(Response::BreakArmed) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(
-                    "breakpoint armed; poll with 'watch_poll' to retrieve the hit",
-                ),
-            ])),
+            Ok(Response::BreakArmed) => {
+                if let Ok(mut s) = self.session.lock() {
+                    s.record_breakpoint(address);
+                }
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(
+                        "breakpoint armed; poll with 'watch_poll' to retrieve the hit",
+                    ),
+                ]))
+            }
             Ok(Response::Error { message }) => Err(err(message)),
             Ok(_) => Err(err("unexpected response from DLL")),
             Err(e) => Err(err(e)),
@@ -2470,9 +2564,14 @@ impl TrainlabMcpServer {
     #[tool(description = "Disarm any active watchpoint or breakpoint and restore any patched bytes.")]
     fn clear_breakpoints(&self) -> Result<CallToolResult, ErrorData> {
         match call_dll(&self.session, &Request::ClearBreakpoints) {
-            Ok(Response::BreakpointsCleared) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text("breakpoints cleared"),
-            ])),
+            Ok(Response::BreakpointsCleared) => {
+                if let Ok(mut s) = self.session.lock() {
+                    s.clear_all_breakpoints();
+                }
+                Ok(CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text("breakpoints cleared"),
+                ]))
+            }
             Ok(Response::Error { message }) => Err(err(message)),
             Ok(_) => Err(err("unexpected response from DLL")),
             Err(e) => Err(err(e)),
@@ -4513,5 +4612,66 @@ cheats: []
         assert_eq!(args_str.fields[0].offset, 16);
         assert_eq!(args_str.fields[1].name, "metal");
         assert_eq!(args_str.fields[1].offset, 20);
+    }
+
+    #[test]
+    fn test_load_profile_refuses_when_session_is_dirty() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
+
+        // 1. When session is clean, check_dirty is clean
+        {
+            let session = s.lock().unwrap();
+            assert!(!session.check_dirty().is_dirty());
+        }
+
+        // 2. Add an enabled toggle cheat -> dirty
+        let cheat_id = {
+            let mut session = s.lock().unwrap();
+            let cid = session.add_cheat("Fast Ships", crate::session::CheatKind::Toggle {
+                hook: trainlab_core::cave_hook::CaveHook::Trampoline {
+                    payload: vec![0x90],
+                    jump: trainlab_core::cave_hook::JumpStyle::Absolute,
+                },
+                target: 0x140001000,
+                enabled: true,
+                original_bytes: vec![0x90; 14],
+                cave_addr: 0x150000000,
+            }, None, None);
+            assert!(session.check_dirty().is_dirty());
+            cid
+        };
+
+        // Attempting load_profile must fail with a dirty session error
+        let res = server.load_profile(Parameters(LoadProfileArgs {
+            profile: "example.yaml".into(),
+            run_setup: false,
+        }));
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().message;
+        assert!(err_msg.contains("cannot load profile"), "err was: {err_msg}");
+        assert!(err_msg.contains("dirty"), "err was: {err_msg}");
+
+        // 3. Disable the cheat, but add an undo entry -> still dirty
+        {
+            let mut session = s.lock().unwrap();
+            session.set_cheat_toggle(cheat_id, false);
+            let _ = session.record_undo(0x140001000, vec![0x90; 14], "test write".into());
+            assert!(session.check_dirty().is_dirty());
+        }
+        let res2 = server.load_profile(Parameters(LoadProfileArgs {
+            profile: "example.yaml".into(),
+            run_setup: false,
+        }));
+        assert!(res2.is_err());
+        let err_msg2 = res2.unwrap_err().message;
+        assert!(err_msg2.contains("cannot load profile"), "err was: {err_msg2}");
+
+        // 4. Pop undo -> clean
+        {
+            let mut session = s.lock().unwrap();
+            session.pop_undo_last();
+            assert!(!session.check_dirty().is_dirty());
+        }
     }
 }

@@ -8,7 +8,7 @@
 //! handler, so an agent can set markers, list them, and (once mutating tools
 //! exist) record/apply undo operations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use crate::{cave_hook, protocol, scan};
@@ -259,6 +259,70 @@ pub enum SessionLifecycle {
 }
 
 
+/// A tracked memory allocation inside the target process memory (caves, scratch, strings).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocatedBuffer {
+    pub address: u64,
+    pub size: usize,
+    pub description: String,
+    pub marker: Option<String>,
+}
+
+/// A summary of reasons why the current session is dirty (holding live modifications/allocations).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DirtyReport {
+    /// Active enabled cheats (caves or patches).
+    pub active_cheats: Vec<String>,
+    /// Unreverted mutations in the undo log.
+    pub unreverted_undo_count: usize,
+    /// Pending unconfirmed operations.
+    pub pending_op_count: usize,
+    /// Unfreed memory allocations.
+    pub active_allocations: Vec<AllocatedBuffer>,
+    /// Active register captures.
+    pub active_captures: Vec<u64>,
+    /// Active breakpoints / watchpoints.
+    pub active_breakpoints: Vec<u64>,
+}
+
+impl DirtyReport {
+    pub fn is_dirty(&self) -> bool {
+        !self.active_cheats.is_empty()
+            || self.unreverted_undo_count > 0
+            || self.pending_op_count > 0
+            || !self.active_allocations.is_empty()
+            || !self.active_captures.is_empty()
+            || !self.active_breakpoints.is_empty()
+    }
+
+    pub fn summary(&self) -> String {
+        let mut reasons = Vec::new();
+        if !self.active_cheats.is_empty() {
+            reasons.push(format!("{} active cheat(s) enabled: [{}]", self.active_cheats.len(), self.active_cheats.join(", ")));
+        }
+        if self.unreverted_undo_count > 0 {
+            reasons.push(format!("{} unreverted mutation(s) in undo log", self.unreverted_undo_count));
+        }
+        if self.pending_op_count > 0 {
+            reasons.push(format!("{} pending staged mutation(s)", self.pending_op_count));
+        }
+        if !self.active_allocations.is_empty() {
+            reasons.push(format!("{} unfreed memory allocation(s)", self.active_allocations.len()));
+        }
+        if !self.active_captures.is_empty() {
+            reasons.push(format!("{} active register capture(s)", self.active_captures.len()));
+        }
+        if !self.active_breakpoints.is_empty() {
+            reasons.push(format!("{} active breakpoint(s)", self.active_breakpoints.len()));
+        }
+        if reasons.is_empty() {
+            "session is clean".to_string()
+        } else {
+            reasons.join("; ")
+        }
+    }
+}
+
 /// The shared, mutable session state.
 #[derive(Debug, Default)]
 pub struct SessionState {
@@ -296,6 +360,12 @@ pub struct SessionState {
     cheats: Vec<Cheat>,
     /// Monotonic counter for cheat ids.
     next_cheat_id: u64,
+    /// Tracked allocations (strings, raw memory buffers) made inside the game process.
+    allocated_buffers: Vec<AllocatedBuffer>,
+    /// Tracked active passive register capture IDs.
+    active_captures: BTreeSet<u64>,
+    /// Tracked active code breakpoints or watchpoint targets.
+    active_breakpoints: BTreeSet<u64>,
     /// Tracked applications & binaries discovered during process scans or launched manually.
     tracked_apps: Vec<DiscoveredApp>,
     /// Active profile name.
@@ -337,6 +407,67 @@ impl SessionState {
         let id_str = id.into();
         self.log_activity(&id_str, format!("client context created ({:?})", kind));
         ClientContext::new(id_str, kind, &self.event_bus)
+    }
+
+    /// Check if the session is currently dirty (holds live modifications, active caves, or unfreed buffers).
+    pub fn check_dirty(&self) -> DirtyReport {
+        let active_cheats: Vec<String> = self.cheats.iter().filter_map(|c| {
+            match &c.kind {
+                CheatKind::Toggle { enabled, .. } if *enabled => Some(format!("#{} '{}' (toggle)", c.id, c.label)),
+                CheatKind::Patch { enabled, .. } if *enabled => Some(format!("#{} '{}' (patch)", c.id, c.label)),
+                _ => None,
+            }
+        }).collect();
+
+        DirtyReport {
+            active_cheats,
+            unreverted_undo_count: self.undo_log.len(),
+            pending_op_count: self.pending_ops.len(),
+            active_allocations: self.allocated_buffers.clone(),
+            active_captures: self.active_captures.iter().cloned().collect(),
+            active_breakpoints: self.active_breakpoints.iter().cloned().collect(),
+        }
+    }
+
+    /// Record a memory buffer allocation made inside the target process.
+    pub fn record_allocation(&mut self, address: u64, size: usize, description: impl Into<String>, marker: Option<String>) {
+        self.allocated_buffers.push(AllocatedBuffer {
+            address,
+            size,
+            description: description.into(),
+            marker,
+        });
+    }
+
+    /// Remove a recorded memory buffer allocation.
+    pub fn remove_allocation(&mut self, address: u64) -> Option<AllocatedBuffer> {
+        let idx = self.allocated_buffers.iter().position(|a| a.address == address)?;
+        Some(self.allocated_buffers.remove(idx))
+    }
+
+    /// List all tracked memory allocations in the target process.
+    pub fn list_allocations(&self) -> &[AllocatedBuffer] {
+        &self.allocated_buffers
+    }
+
+    /// Record an active register capture ID.
+    pub fn record_capture(&mut self, id: u64) {
+        self.active_captures.insert(id);
+    }
+
+    /// Remove a register capture ID upon uninstallation.
+    pub fn remove_capture(&mut self, id: u64) {
+        self.active_captures.remove(&id);
+    }
+
+    /// Record an active breakpoint or watchpoint address.
+    pub fn record_breakpoint(&mut self, address: u64) {
+        self.active_breakpoints.insert(address);
+    }
+
+    /// Clear all active breakpoints / watchpoints.
+    pub fn clear_all_breakpoints(&mut self) {
+        self.active_breakpoints.clear();
     }
 
     /// Access the current session lifecycle state.
