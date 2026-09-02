@@ -85,17 +85,22 @@ pub unsafe extern "system" fn hooked_present(
     // 1. Increment live frame counter
     super::STATE.frame_count.fetch_add(1, Ordering::Relaxed);
 
-    // 2. On the first few frames, extract the game's actual HWND from swapchain description
+    // 2. On the first few frames, extract the game's actual HWND from swapchain description safely
     if !HWND_INITIALIZED.load(Ordering::Relaxed) && !swapchain.is_null() {
-        let mut desc: DXGI_SWAP_CHAIN_DESC = unsafe { std::mem::zeroed() };
-        let vtable = unsafe { *(swapchain as *mut *mut usize) };
-        // GetDesc is VMT index 12 on IDXGISwapChain
-        let get_desc_fn: unsafe extern "system" fn(*mut c_void, *mut DXGI_SWAP_CHAIN_DESC) -> i32 =
-            unsafe { std::mem::transmute(*vtable.add(12)) };
+        let vtable_ptr = *(swapchain as *mut *mut usize);
+        if !vtable_ptr.is_null() {
+            let mut desc: DXGI_SWAP_CHAIN_DESC = std::mem::zeroed();
+            // GetDesc is VMT index 12 on IDXGISwapChain
+            let get_desc_fn_ptr = *vtable_ptr.add(12);
+            if get_desc_fn_ptr != 0 {
+                let get_desc_fn: unsafe extern "system" fn(*mut c_void, *mut DXGI_SWAP_CHAIN_DESC) -> i32 =
+                    std::mem::transmute(get_desc_fn_ptr);
 
-        if unsafe { get_desc_fn(swapchain, &mut desc) } == 0 && desc.output_window != std::ptr::null_mut() {
-            super::input::install_wndproc_hook(desc.output_window);
-            HWND_INITIALIZED.store(true, Ordering::Relaxed);
+                if get_desc_fn(swapchain, &mut desc) == 0 && desc.output_window != std::ptr::null_mut() {
+                    super::input::install_wndproc_hook(desc.output_window);
+                    HWND_INITIALIZED.store(true, Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -110,8 +115,8 @@ pub unsafe extern "system" fn hooked_present(
     // 5. Call original Present trampoline
     let orig = ORIGINAL_PRESENT.load(Ordering::Relaxed);
     if !orig.is_null() {
-        let orig_fn: FnPresent = unsafe { std::mem::transmute(orig) };
-        unsafe { orig_fn(swapchain, sync_interval, flags) }
+        let orig_fn: FnPresent = std::mem::transmute(orig);
+        orig_fn(swapchain, sync_interval, flags)
     } else {
         0
     }
@@ -119,17 +124,17 @@ pub unsafe extern "system" fn hooked_present(
 
 /// Creates a dummy window and D3D11 swapchain to discover the VMT pointer for `Present`.
 unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
-    let d3d11_dll = unsafe { LoadLibraryA(b"d3d11.dll\0".as_ptr()) };
+    let d3d11_dll = LoadLibraryA(b"d3d11.dll\0".as_ptr());
     if d3d11_dll == std::ptr::null_mut() {
         return None;
     }
 
-    let create_fn_ptr = unsafe { GetProcAddress(d3d11_dll, b"D3D11CreateDeviceAndSwapChain\0".as_ptr()) };
+    let create_fn_ptr = GetProcAddress(d3d11_dll, b"D3D11CreateDeviceAndSwapChain\0".as_ptr());
     if create_fn_ptr.is_none() {
         return None;
     }
 
-    let d3d11_create: FnD3D11CreateDeviceAndSwapChain = unsafe { std::mem::transmute(create_fn_ptr) };
+    let d3d11_create: FnD3D11CreateDeviceAndSwapChain = std::mem::transmute(create_fn_ptr);
 
     let class_name = b"TrainlabDummyClass\0";
     let wnd_class = WNDCLASSA {
@@ -145,30 +150,28 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
         lpszClassName: class_name.as_ptr(),
     };
 
-    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::RegisterClassA(&wnd_class) };
+    windows_sys::Win32::UI::WindowsAndMessaging::RegisterClassA(&wnd_class);
 
-    let hwnd = unsafe {
-        CreateWindowExA(
-            0,
-            class_name.as_ptr(),
-            b"TrainlabDummyWindow\0".as_ptr(),
-            WS_OVERLAPPEDWINDOW,
-            0,
-            0,
-            100,
-            100,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-        )
-    };
+    let hwnd = CreateWindowExA(
+        0,
+        class_name.as_ptr(),
+        b"TrainlabDummyWindow\0".as_ptr(),
+        WS_OVERLAPPEDWINDOW,
+        0,
+        0,
+        100,
+        100,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null(),
+    );
 
     if hwnd == std::ptr::null_mut() {
         return None;
     }
 
-    let mut swap_desc: DXGI_SWAP_CHAIN_DESC = unsafe { std::mem::zeroed() };
+    let mut swap_desc: DXGI_SWAP_CHAIN_DESC = std::mem::zeroed();
     swap_desc.buffer_count = 1;
     swap_desc.buffer_desc.format = 28; // DXGI_FORMAT_R8G8B8A8_UNORM = 28
     swap_desc.buffer_desc.width = 100;
@@ -191,38 +194,36 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
     const D3D_DRIVER_TYPE_HARDWARE: u32 = 1;
     const D3D11_SDK_VERSION: u32 = 7;
 
-    let hr = unsafe {
-        d3d11_create(
-            std::ptr::null_mut(),
-            D3D_DRIVER_TYPE_HARDWARE,
-            std::ptr::null_mut(),
-            0,
-            feature_levels.as_ptr(),
-            1,
-            D3D11_SDK_VERSION,
-            &swap_desc,
-            &mut swapchain,
-            &mut device,
-            &mut feature_level,
-            &mut context,
-        )
-    };
+    let hr = d3d11_create(
+        std::ptr::null_mut(),
+        D3D_DRIVER_TYPE_HARDWARE,
+        std::ptr::null_mut(),
+        0,
+        feature_levels.as_ptr(),
+        1,
+        D3D11_SDK_VERSION,
+        &swap_desc,
+        &mut swapchain,
+        &mut device,
+        &mut feature_level,
+        &mut context,
+    );
 
     let mut present_addr = None;
 
     if hr == 0 && !swapchain.is_null() {
-        let vtable = unsafe { *(swapchain as *mut *mut usize) };
+        let vtable = *(swapchain as *mut *mut usize);
         // Index 8 is IDXGISwapChain::Present
-        let present_ptr = unsafe { *vtable.add(8) };
+        let present_ptr = *vtable.add(8);
         present_addr = Some(present_ptr as *mut usize);
 
         // Release dummy COM objects
         let release_fn = |com_ptr: *mut usize| {
             if !com_ptr.is_null() {
-                let vtable = unsafe { *(com_ptr as *mut *mut usize) };
+                let vtable = *(com_ptr as *mut *mut usize);
                 let release: unsafe extern "system" fn(*mut usize) -> u32 =
-                    unsafe { std::mem::transmute(*vtable.add(2)) };
-                unsafe { release(com_ptr) };
+                    std::mem::transmute(*vtable.add(2));
+                release(com_ptr);
             }
         };
 
@@ -231,10 +232,8 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
         release_fn(context as *mut usize);
     }
 
-    unsafe {
-        DestroyWindow(hwnd);
-        UnregisterClassA(class_name.as_ptr(), std::ptr::null_mut());
-    }
+    DestroyWindow(hwnd);
+    UnregisterClassA(class_name.as_ptr(), std::ptr::null_mut());
 
     present_addr
 }
@@ -267,7 +266,7 @@ pub fn init_dxgi_hook() {
                     let payload = trainlab_cave::emitter::jmp_abs(callback_addr);
 
                     let hook = trainlab_cave::cave::HookKind::Trampoline {
-                        payload,
+                        payload: payload.clone(),
                         jump: trainlab_cave::cave::JumpStyle::Absolute,
                     };
 
@@ -292,10 +291,10 @@ pub fn init_dxgi_hook() {
                         allocate,
                     ) {
                         Ok(installed) => {
-                            // Point original present to the trampoline / cave return path
-                            // (installed.cave_addr + payload.len() is where stolen instructions & jump-back live)
+                            // Point original present to the trampoline return path
+                            // (installed.cave_addr + payload.len() is where relocated stolen instructions & jump-back live)
                             ORIGINAL_PRESENT.store(
-                                (installed.cave_addr + 14) as *mut c_void,
+                                (installed.cave_addr + payload.len() as u64) as *mut c_void,
                                 Ordering::SeqCst,
                             );
                             HOOK_INSTALLED.store(true, Ordering::SeqCst);
