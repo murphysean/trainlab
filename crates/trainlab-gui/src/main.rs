@@ -64,6 +64,15 @@ struct RegisteredHotkey {
     display: String,
 }
 
+/// Execution status of a button cheat (for real-time GUI feedback).
+#[derive(Debug, Clone, Default)]
+struct ButtonStatus {
+    last_error: Option<String>,
+    last_error_time: Option<std::time::Instant>,
+    failure_count: usize,
+    last_success_time: Option<std::time::Instant>,
+}
+
 struct TrainlabApp {
     // Shared session state (game pid, markers, scan). Set by the GUI, read by
     // the MCP server.
@@ -94,6 +103,7 @@ struct TrainlabApp {
     cheat_values_cache: std::collections::HashMap<u64, (std::time::Instant, Option<Vec<u8>>)>,
     cheat_hotkey_inputs: std::collections::HashMap<u64, String>,
     registered_hotkeys: std::collections::HashMap<i32, RegisteredHotkey>,
+    button_statuses: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>,
     show_cheats: bool,
 
     // Value Search state
@@ -177,6 +187,7 @@ impl TrainlabApp {
             cheat_values_cache: std::collections::HashMap::new(),
             cheat_hotkey_inputs: std::collections::HashMap::new(),
             registered_hotkeys: std::collections::HashMap::new(),
+            button_statuses: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             show_cheats: true,
             scan_val: "".into(),
             scan_val_max: "".into(),
@@ -897,13 +908,55 @@ impl TrainlabApp {
                                     let session = self_ptr.session.clone();
                                     let label = cheat.label.clone();
                                     let cmds = commands.clone();
+                                    let cid = cheat.id;
+                                    let b_statuses = self_ptr.button_statuses.clone();
                                     std::thread::spawn(move || {
-                                        if let Err(e) = mcp::execute_profile_commands(&session, &cmds)
-                                            && let Ok(mut s) = session.lock() {
-                                                s.log_activity("UI", format!("button '{label}' failed: {e}"));
+                                        match mcp::execute_profile_commands(&session, &cmds) {
+                                            Ok(()) => {
+                                                if let Ok(mut s) = session.lock() {
+                                                    s.log_activity("UI", format!("button '{label}' completed ok"));
+                                                }
+                                                if let Ok(mut map) = b_statuses.lock() {
+                                                    let status = map.entry(cid).or_default();
+                                                    status.last_error = None;
+                                                    status.failure_count = 0;
+                                                    status.last_success_time = Some(std::time::Instant::now());
+                                                }
                                             }
+                                            Err(e) => {
+                                                if let Ok(mut s) = session.lock() {
+                                                    s.log_activity("UI", format!("button '{label}' failed: {e}"));
+                                                }
+                                                if let Ok(mut map) = b_statuses.lock() {
+                                                    let status = map.entry(cid).or_default();
+                                                    status.last_error = Some(e);
+                                                    status.last_error_time = Some(std::time::Instant::now());
+                                                    status.failure_count = status.failure_count.saturating_add(1);
+                                                }
+                                            }
+                                        }
                                     });
                                 }
+
+                                // Show execution status badge (failure / consecutive failures / success)
+                                if let Ok(map) = self_ptr.button_statuses.lock()
+                                    && let Some(st) = map.get(&cheat.id) {
+                                        if let Some(err_msg) = &st.last_error {
+                                            let count = st.failure_count;
+                                            let badge_text = if count > 1 {
+                                                format!("❌ Failed {count}×: {err_msg}")
+                                            } else {
+                                                format!("❌ Failed: {err_msg}")
+                                            };
+                                            ui.colored_label(egui::Color32::from_rgb(255, 100, 100), badge_text)
+                                                .on_hover_text(format!("Full error: {err_msg}\nConsecutive failures: {count}"));
+                                        } else if let Some(succ_time) = st.last_success_time {
+                                            if succ_time.elapsed().as_secs() < 4 {
+                                                ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "✓ Done");
+                                            }
+                                        }
+                                    }
+
                                 if let Some(n) = &cheat.note {
                                     ui.label(format!("({n})"));
                                 }
@@ -1113,8 +1166,25 @@ impl TrainlabApp {
             }
             CheatKind::Button { commands } => {
                 self.log_with_source(source, format!("triggered button '{}': running {} command(s)...", label, commands.len()));
-                if let Err(e) = self.run_cheat_commands(&commands) {
-                    self.log_with_source(source, format!("button '{}' failed: {e}", label));
+                match self.run_cheat_commands(&commands) {
+                    Ok(()) => {
+                        self.log_with_source(source, format!("button '{}' completed ok", label));
+                        if let Ok(mut map) = self.button_statuses.lock() {
+                            let status = map.entry(cheat_id).or_default();
+                            status.last_error = None;
+                            status.failure_count = 0;
+                            status.last_success_time = Some(std::time::Instant::now());
+                        }
+                    }
+                    Err(e) => {
+                        self.log_with_source(source, format!("button '{}' failed: {e}", label));
+                        if let Ok(mut map) = self.button_statuses.lock() {
+                            let status = map.entry(cheat_id).or_default();
+                            status.last_error = Some(e);
+                            status.last_error_time = Some(std::time::Instant::now());
+                            status.failure_count = status.failure_count.saturating_add(1);
+                        }
+                    }
                 }
             }
             CheatKind::Value { address, value_type, address_expr } => {
@@ -2614,3 +2684,57 @@ fn hexdump(data: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_button_failure_status_tracking() {
+        let session = std::sync::Arc::new(std::sync::Mutex::new(SessionState::new()));
+        let mut app = TrainlabApp::with_session(session.clone());
+
+        // Add a button cheat with a failing command (e.g. assert against 0x0)
+        let cid = {
+            let mut s = session.lock().unwrap();
+            s.add_cheat(
+                "test_broken_button",
+                CheatKind::Button {
+                    commands: vec![
+                        profile::ProfileCommand::Assert {
+                            address_ref: Some("0x0".to_string()),
+                            address: None,
+                            expected: "123".to_string(),
+                            value_type: Some("i32".to_string()),
+                            note: None,
+                        }
+                    ],
+                },
+                None,
+                None,
+            )
+        };
+
+        // Trigger button 1st time
+        app.trigger_cheat(cid);
+
+        {
+            let map = app.button_statuses.lock().unwrap();
+            let st = map.get(&cid).expect("button status entry exists");
+            assert_eq!(st.failure_count, 1);
+            assert!(st.last_error.is_some());
+            assert!(st.last_error.as_ref().unwrap().contains("assert failed"));
+        }
+
+        // Trigger button 2nd time (consecutive failure)
+        app.trigger_cheat(cid);
+
+        {
+            let map = app.button_statuses.lock().unwrap();
+            let st = map.get(&cid).expect("button status entry exists");
+            assert_eq!(st.failure_count, 2);
+            assert!(st.last_error.is_some());
+        }
+    }
+}
+
