@@ -461,6 +461,7 @@ pub struct CaptureRegArgs {
     /// either `value` (for eq/ne/gt/lt/ge/le) or `min`/`max` (for range).
     /// `cmp="whole"` retains only clean whole numbers (floats). If absent, the
     /// capture records on every execution.
+    #[serde(default, deserialize_with = "deserialize_gate_opt")]
     pub gate: Option<CaptureGateArgs>,
     /// Jump style: "absolute" (default, 14-byte long jump) or "relative" (5-byte short jump for tight patch sites).
     #[serde(default)]
@@ -501,6 +502,32 @@ fn default_value_type() -> String {
 }
 fn default_capacity() -> usize {
     32
+}
+
+fn deserialize_gate_opt<'de, D>(deserializer: D) -> Result<Option<CaptureGateArgs>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum GateOrString {
+        Struct(CaptureGateArgs),
+        Str(String),
+        None,
+    }
+
+    match Option::<GateOrString>::deserialize(deserializer)? {
+        Some(GateOrString::Struct(gate)) => Ok(Some(gate)),
+        Some(GateOrString::Str(s)) => {
+            let s_trimmed = s.trim();
+            if s_trimmed.is_empty() || s_trimmed == "null" {
+                Ok(None)
+            } else {
+                serde_json::from_str(&s).map(Some).map_err(serde::de::Error::custom)
+            }
+        }
+        Some(GateOrString::None) | None => Ok(None),
+    }
 }
 
 /// Arguments for [`allocate_string`].
@@ -4340,5 +4367,49 @@ cheats: []
         let session = s.lock().unwrap();
         let marker = session.get_marker("gc_slot").expect("gc_slot marker exists");
         assert_eq!(marker.address, 0x140000044);
+    }
+
+    #[test]
+    fn test_capture_reg_gate_deserialization_struct_and_string() {
+        // 1. Direct structured JSON
+        let json_struct = r#"{
+            "target": "sins2.exe+0x5ceda8",
+            "reg": "rdi",
+            "value_type": "ptr",
+            "gate": {
+                "cmp": "ne",
+                "reg": "rdi",
+                "value": 0.0,
+                "value_type": "ptr"
+            }
+        }"#;
+        let args_struct: CaptureRegArgs = serde_json::from_str(json_struct).expect("deserialize structured gate");
+        assert!(args_struct.gate.is_some());
+        let gate = args_struct.gate.unwrap();
+        assert_eq!(gate.cmp, "ne");
+        assert_eq!(gate.reg, "rdi");
+        assert_eq!(gate.value, Some(0.0));
+
+        // 2. Stringified JSON (escaped JSON string from clients)
+        let json_str = r#"{
+            "target": "sins2.exe+0x5ceda8",
+            "reg": "rdi",
+            "value_type": "ptr",
+            "gate": "{\"cmp\": \"ne\", \"reg\": \"rdi\", \"value\": 0.0, \"value_type\": \"ptr\"}"
+        }"#;
+        let args_str: CaptureRegArgs = serde_json::from_str(json_str).expect("deserialize stringified gate");
+        assert!(args_str.gate.is_some());
+        let gate_from_str = args_str.gate.unwrap();
+        assert_eq!(gate_from_str.cmp, "ne");
+        assert_eq!(gate_from_str.reg, "rdi");
+        assert_eq!(gate_from_str.value, Some(0.0));
+
+        // 3. Null / omitted gate
+        let json_none = r#"{
+            "target": "sins2.exe+0x5ceda8",
+            "reg": "rdi"
+        }"#;
+        let args_none: CaptureRegArgs = serde_json::from_str(json_none).expect("deserialize gateless");
+        assert!(args_none.gate.is_none());
     }
 }
