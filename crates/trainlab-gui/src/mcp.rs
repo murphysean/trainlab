@@ -548,6 +548,9 @@ pub struct InstallCaveArgs {
     /// Optional marker label to automatically save the allocated cave address under once confirmed (e.g. "my_cave").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marker: Option<String>,
+    /// If true, bypass safety checks (such as the unjumped data-slot fallthrough guard).
+    #[serde(default)]
+    pub force: bool,
 }
 
 fn default_jump_style() -> String {
@@ -2855,6 +2858,9 @@ impl TrainlabMcpServer {
         }
 
         let (payload, label_offsets) = if let Some(asm_src) = &args.asm {
+            if args.hook == "trampoline" && !args.force {
+                trainlab_core::asm::check_trampoline_data_fallthrough(asm_src).map_err(err)?;
+            }
             let symbols: std::collections::HashMap<String, u64> = {
                 let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
                 s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
@@ -3434,6 +3440,10 @@ pub(crate) fn execute_profile_commands(
                 }
 
                 let (payload_bytes, label_offsets) = if let Some(asm_src) = asm {
+                    if hook == "trampoline" {
+                        trainlab_core::asm::check_trampoline_data_fallthrough(asm_src)
+                            .map_err(|e| format!("cmd {idx}: {e}"))?;
+                    }
                     let symbols: HashMap<String, u64> = {
                         let s = session.lock().map_err(|_| format!("session lock poisoned"))?;
                         s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()

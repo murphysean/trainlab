@@ -165,6 +165,75 @@ pub fn assemble_text(
     })
 }
 
+/// Checks assembly code for trampoline code cave hazards where execution falls through
+/// into data directive slots (`db`, `dd`, `dq`).
+///
+/// In a trampoline cave, the stolen-instruction replay is appended directly at the end
+/// of the assembled payload. If the payload contains trailing data slots (or intermediate
+/// data slots) that are not bypassed by an unconditional branch (`jmp`, `ret`), execution
+/// will fall through and execute data bytes as x86-64 code.
+pub fn check_trampoline_data_fallthrough(asm_code: &str) -> Result<(), String> {
+    #[derive(Debug, PartialEq, Eq)]
+    enum ItemKind {
+        TerminatingInstr,   // jmp, ret
+        NonTerminatingInstr,// push, pop, mov, add, cmp, etc.
+        DataDirective,      // db, dd, dq
+    }
+
+    let lines: Vec<&str> = asm_code.lines().collect();
+    let mut items: Vec<ItemKind> = Vec::new();
+
+    for raw_line in lines {
+        let line = strip_comments(raw_line).trim();
+        if line.is_empty() || line.ends_with(':') {
+            continue;
+        }
+        let lower = line.to_lowercase();
+        if lower.starts_with("db ") || lower.starts_with("dd ") || lower.starts_with("dq ")
+            || lower == "db" || lower == "dd" || lower == "dq" {
+            items.push(ItemKind::DataDirective);
+        } else {
+            let mnemonic = lower.split_whitespace().next().unwrap_or("");
+            if matches!(mnemonic, "jmp" | "ret") {
+                items.push(ItemKind::TerminatingInstr);
+            } else {
+                items.push(ItemKind::NonTerminatingInstr);
+            }
+        }
+    }
+
+    // If there are no data directives, nothing can be executed as code accidentally
+    if !items.contains(&ItemKind::DataDirective) {
+        return Ok(());
+    }
+
+    // In a trampoline cave, control must never fall through from a non-terminating instruction
+    // into a data directive.
+    let mut last_instr_was_terminating = true;
+    for item in &items {
+        match item {
+            ItemKind::NonTerminatingInstr => {
+                last_instr_was_terminating = false;
+            }
+            ItemKind::TerminatingInstr => {
+                last_instr_was_terminating = true;
+            }
+            ItemKind::DataDirective => {
+                if !last_instr_was_terminating {
+                    return Err(
+                        "trampoline cave payload has instructions falling through directly into data directives (db/dd/dq). \
+Execution will decode data bytes as code and crash once slots hold non-zero values.\n\
+Fix by jumping over data slots to a tail label, e.g.:\n  jmp code\n  my_slot:\n  dq 0\n  code:\n\
+Or pass 'force: true' to bypass this safety check.".into()
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn strip_comments(s: &str) -> &str {
     if let Some(idx) = s.find(';') {
         &s[..idx]
@@ -1549,6 +1618,48 @@ mod ce_verbatim_porting {
         assert!(!block.bytes.is_empty());
         // 13 parsed lines + 1 fallback NOP for trailing label `back:` = 14 or 15 instructions
         assert_eq!(block.instruction_count, 15);
+    }
+
+    #[test]
+    fn test_check_trampoline_data_fallthrough_hazard_and_bypass() {
+        // 1. Sins2 Live Repro: instructions falling through into trailing data slot (CRASH HAZARD)
+        let hazard_code = r#"
+            push rdi
+            mov [rip + player_base_slot], rdi
+            pop rdi
+            player_base_slot:
+            dq 0
+        "#;
+        let err = check_trampoline_data_fallthrough(hazard_code);
+        assert!(err.is_err(), "Must reject unjumped data slots in trampoline caves");
+        assert!(err.unwrap_err().contains("trampoline cave payload"));
+
+        // 2. Correct Pattern: Unconditional JMP over data slots to tail label
+        let safe_code = r#"
+            push rdi
+            mov [rip + player_base_slot], rdi
+            pop rdi
+            jmp code
+            player_base_slot:
+            dq 0
+            code:
+        "#;
+        assert!(check_trampoline_data_fallthrough(safe_code).is_ok(), "Jumping over data slots must pass");
+
+        // Assemble safe_code and verify label offset for `code` lands after `player_base_slot`
+        let block = assemble_text(safe_code, 0x140000000, &HashMap::new()).unwrap();
+        let slot_off = *block.label_offsets.get("player_base_slot").unwrap();
+        let code_off = *block.label_offsets.get("code").unwrap();
+        assert_eq!(code_off, slot_off + 8, "Tail label 'code' must land 8 bytes after player_base_slot");
+
+        // 3. Eval cave with RET (leaf override) past data slots
+        let leaf_code = r#"
+            mov eax, 1
+            ret
+            my_data:
+            dd 100
+        "#;
+        assert!(check_trampoline_data_fallthrough(leaf_code).is_ok(), "Leaf cave ending with ret before data must pass");
     }
 }
 
