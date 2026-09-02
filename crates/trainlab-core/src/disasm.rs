@@ -92,6 +92,54 @@ pub fn instruction_aligned_len(bytes: &[u8], min_len: usize) -> Option<usize> {
     }
 }
 
+/// Check if `target` lands exactly on an instruction boundary within `bytes` starting at virtual address `base`.
+///
+/// Returns `Ok(())` if `target == base` or if an instruction starts exactly at `target`.
+/// Returns `Err(message)` if `target` lands inside an instruction, with the enclosing instruction details.
+pub fn verify_instruction_boundary(base: u64, bytes: &[u8], target: u64) -> Result<(), String> {
+    if target < base || target >= base + bytes.len() as u64 {
+        return Err(format!(
+            "target address {target:#x} is outside context window [{base:#x}..{:#x}]",
+            base + bytes.len() as u64
+        ));
+    }
+    if target == base {
+        return Ok(());
+    }
+
+    let mut decoder = Decoder::with_ip(64, bytes, base, DecoderOptions::NONE);
+    decoder.set_ip(base);
+    let mut formatter = NasmFormatter::new();
+    formatter.options_mut().set_uppercase_hex(false);
+    formatter.options_mut().set_hex_prefix("0x");
+
+    while decoder.can_decode() {
+        let pos = decoder.position();
+        let ip = base + pos as u64;
+        if ip == target {
+            return Ok(());
+        }
+        let insn = decoder.decode();
+        if insn.is_invalid() {
+            return Err(format!(
+                "invalid instruction encountered near {ip:#x} while decoding context"
+            ));
+        }
+        let end_ip = base + decoder.position() as u64;
+        if target > ip && target < end_ip {
+            let mut text = String::new();
+            formatter.format(&insn, &mut text);
+            return Err(format!(
+                "target {target:#x} is INSIDE instruction at {ip:#x} ({text}) — refusing to patch mid-instruction (offset +{} within instruction of len {})",
+                target - ip,
+                end_ip - ip
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Relocate a block of stolen instructions to a new address.
 ///
 /// This is the heart of a *transparent* code-cave hook: when we overwrite the
@@ -305,4 +353,28 @@ mod tests {
         assert!(!r.ends_in_branch);
         assert_eq!(r.bytes.len(), 17);
     }
+
+    #[test]
+    fn test_verify_instruction_boundary_catches_mid_instruction() {
+        // 0x141380020: 41 c7 46 18 a4 70 7d 3f (mov dword [r14+0x18],0x3f7d70a4) - 8 bytes
+        // 0x141380028: 58 (pop rax) - 1 byte
+        let bytes = [
+            0x41, 0xc7, 0x46, 0x18, 0xa4, 0x70, 0x7d, 0x3f,
+            0x58,
+        ];
+        let base = 0x141380020u64;
+
+        // Exact start boundary is valid
+        assert!(verify_instruction_boundary(base, &bytes, 0x141380020).is_ok());
+
+        // Exact second instruction boundary is valid
+        assert!(verify_instruction_boundary(base, &bytes, 0x141380028).is_ok());
+
+        // Mid-instruction (e.g. 0x141380026, offset +6) must fail with informative error
+        let err = verify_instruction_boundary(base, &bytes, 0x141380026).unwrap_err();
+        assert!(err.contains("INSIDE instruction at 0x141380020"));
+        assert!(err.contains("mov"));
+        assert!(err.contains("refusing to patch mid-instruction"));
+    }
+
 }

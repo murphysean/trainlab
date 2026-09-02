@@ -441,6 +441,9 @@ pub struct BreakOnCodeArgs {
     /// If true, disarm after the first hit (default true).
     #[serde(default = "default_true")]
     pub one_shot: bool,
+    /// If true, bypass the instruction boundary verification guard (default false).
+    #[serde(default)]
+    pub force: bool,
 }
 
 fn default_true() -> bool {
@@ -570,6 +573,9 @@ pub struct CaptureRegArgs {
     /// Jump style: "absolute" (default, 14-byte long jump) or "relative" (5-byte short jump for tight patch sites).
     #[serde(default)]
     pub jump: Option<String>,
+    /// If true, bypass the instruction boundary verification guard (default false).
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// JSON-serializable gate spec for `capture_reg`.
@@ -2427,6 +2433,23 @@ impl TrainlabMcpServer {
             "relative" | "short" => trainlab_core::cave_hook::JumpStyle::Relative,
             _ => trainlab_core::cave_hook::JumpStyle::Absolute,
         };
+
+        // Arm-time instruction boundary verification guard
+        if !args.force {
+            if let Ok(proc) = game_process(&self.session) {
+                let context_len = 64usize;
+                let base = target.saturating_sub(48);
+                let read_len = context_len + 32;
+                if let Ok(bytes) = proc.read(base, read_len) {
+                    if let Err(msg) = trainlab_core::disasm::verify_instruction_boundary(base, &bytes, target) {
+                        return Err(err(format!(
+                            "{msg} (pass 'force: true' if you explicitly intend to bypass instruction boundary checking)"
+                        )));
+                    }
+                }
+            }
+        }
+
         let spec = CaptureRegSpec::new(reg, value_type).with_optional_gate(gate).with_jump(jump_style);
         match call_dll(&self.session, &Request::CaptureReg {
             target,
@@ -2577,6 +2600,23 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<BreakOnCodeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&self.session, &args.address)?;
+
+        // Arm-time instruction boundary verification guard
+        if !args.force {
+            if let Ok(proc) = game_process(&self.session) {
+                let context_len = 64usize;
+                let base = address.saturating_sub(48);
+                let read_len = context_len + 32;
+                if let Ok(bytes) = proc.read(base, read_len) {
+                    if let Err(msg) = trainlab_core::disasm::verify_instruction_boundary(base, &bytes, address) {
+                        return Err(err(format!(
+                            "{msg} (pass 'force: true' if you explicitly intend to bypass instruction boundary checking)"
+                        )));
+                    }
+                }
+            }
+        }
+
         match call_dll(&self.session, &Request::BreakOnCode {
             address,
             one_shot: args.one_shot,
@@ -4771,4 +4811,32 @@ cheats: []
         // game_process tool handles target lost
         assert!(txt2.contains("dead_game.exe"));
     }
+
+    #[test]
+    fn test_capture_reg_and_break_on_code_force_flags() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
+
+        // When no game process attached, capture_reg returns error unless forced or process mock
+        let res = server.capture_reg(Parameters(CaptureRegArgs {
+            target: "0x141380026".into(),
+            reg: "xmm0".into(),
+            value_type: "f32".into(),
+            capacity: 32,
+            stop_on_match: true,
+            gate: None,
+            jump: None,
+            force: false,
+        }));
+        assert!(res.is_err());
+
+        // break_on_code also has force field supported
+        let res_break = server.break_on_code(Parameters(BreakOnCodeArgs {
+            address: "0x141380026".into(),
+            one_shot: true,
+            force: false,
+        }));
+        assert!(res_break.is_err());
+    }
+
 }
