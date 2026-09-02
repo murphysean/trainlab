@@ -208,6 +208,24 @@ pub struct ScanPointerArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanRgrepArgs {
+    /// Regular expression pattern over raw bytes (e.g. "player_.*", "(?i)credits", or binary "(?s-u)\x48\x89").
+    pub pattern: String,
+    /// Optional address alignment (e.g. 1, 4, 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<usize>,
+    /// Optional region marker name (e.g. "game_heap") or address expression to bound search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// Optional marker name to automatically save the first match address under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    /// Maximum number of matches to return in structured output (default 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetMarkerArgs {
     pub label: String,
 }
@@ -1624,6 +1642,134 @@ pub fn execute_scan_pointer(
             "count": count,
             "target": address,
             "referrers": preview_matches.iter().map(|(a, p)| serde_json::json!({ "address": a, "points_to": p })).collect::<Vec<_>>(),
+            "scan_file": scan_file,
+            "client_id": ctx.id,
+        }),
+    ))
+}
+
+/// Search readable process memory for regular expression byte matches using ripgrep's regex engine.
+pub fn execute_scan_rgrep(
+    session: &SharedSession,
+    ctx: &ClientContext,
+    mem: &dyn ProcessMemory,
+    args: ScanRgrepArgs,
+) -> Result<ToolResult, ToolError> {
+    let re = regex::bytes::RegexBuilder::new(&args.pattern)
+        .unicode(false)
+        .build()
+        .map_err(|e| err(format!("invalid regex pattern '{}': {e}", args.pattern)))?;
+
+    let regions = {
+        let all_regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        if let Some(r_name) = &args.region {
+            let (r_start, r_end) = {
+                let s = session.lock().map_err(|_| err("session lock poisoned"))?;
+                if let Some(m) = s.get_marker(r_name) {
+                    let end = m.end_address().unwrap_or(m.address.saturating_add(0x1000));
+                    (m.address, end)
+                } else {
+                    drop(s);
+                    let start = eval_addr_expr(session, r_name, Some(mem))?;
+                    (start, start.saturating_add(0x1000))
+                }
+            };
+            let filtered: Vec<_> = all_regions
+                .into_iter()
+                .filter_map(|mut r| {
+                    if r.end <= r_start || r.start >= r_end {
+                        None
+                    } else {
+                        r.start = r.start.max(r_start);
+                        r.end = r.end.min(r_end);
+                        Some(r)
+                    }
+                })
+                .collect();
+            if filtered.is_empty() {
+                return Err(err(format!("specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages")));
+            }
+            filtered
+        } else {
+            all_regions
+        }
+    };
+
+    let alignment = args.alignment.unwrap_or(0);
+    let mut matches: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut regions_scanned = 0usize;
+
+    for r in &regions {
+        if !r.readable {
+            continue;
+        }
+        let len = (r.end - r.start) as usize;
+        if len == 0 {
+            continue;
+        }
+        regions_scanned += 1;
+        total_bytes += len as u64;
+        let hits = mem.scan_region_regex(r, &re, alignment);
+        matches.extend(hits);
+    }
+
+    let count = matches.len();
+
+    if let Some(m) = &args.marker
+        && let Some((first_addr, _)) = matches.first()
+            && let Ok(mut s) = session.lock() {
+                let _ = s.set_marker(m, *first_addr, Some(&format!("Regex match for '{}'", args.pattern)));
+            }
+
+    if let Ok(mut s) = session.lock() {
+        s.log_activity(&ctx.id, format!("rgrep scan '{}': {count} match(es) across {regions_scanned} region(s)", args.pattern));
+    }
+
+    let mb_scanned = (total_bytes as f64) / (1024.0 * 1024.0);
+    let limit = args.limit.unwrap_or(20);
+    let preview_matches: Vec<&(u64, Vec<u8>)> = matches.iter().take(limit).collect();
+    
+    let mut lines = Vec::new();
+    for (addr, bytes) in &preview_matches {
+        let hex_str = bytes.iter().take(16).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+        let ascii_str: String = bytes.iter().take(32).map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect();
+        lines.push(format!("{addr:#018x}: [{hex_str}] \"{ascii_str}\""));
+    }
+
+    let mut text = format!("{count} match(es) (scanned {regions_scanned} region(s), {mb_scanned:.1} MB)\n");
+    text.push_str(&lines.join("\n"));
+
+    let mut scan_file = None;
+    if count > limit {
+        let s_file = format!("rgrep_scan_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let full_json = serde_json::json!({
+            "count": count,
+            "pattern": args.pattern,
+            "alignment": alignment,
+            "matches": matches.iter().map(|(a, b)| serde_json::json!({
+                "address": format!("{a:#x}"),
+                "bytes": b.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" "),
+            })).collect::<Vec<_>>(),
+        });
+        if let Ok(rel_path) = write_output_artifact("scans", &s_file, full_json.to_string().as_bytes()) {
+            scan_file = Some(rel_path.clone());
+            text.push_str(&format!("\n... and {} more [full matches saved to {rel_path}]", count - limit));
+        } else {
+            text.push_str(&format!("\n... and {} more", count - limit));
+        }
+    }
+
+    Ok(ToolResult::with_data(
+        text,
+        serde_json::json!({
+            "count": count,
+            "regions_scanned": regions_scanned,
+            "mb_scanned": mb_scanned,
+            "matches": preview_matches.iter().map(|(a, b)| serde_json::json!({
+                "address": a,
+                "len": b.len(),
+            })).collect::<Vec<_>>(),
             "scan_file": scan_file,
             "client_id": ctx.id,
         }),
@@ -3183,5 +3329,66 @@ mod tests {
             CheatKind::Toggle { enabled, .. } => assert!(!enabled),
             _ => panic!("wrong cheat kind"),
         }
+    }
+
+    #[test]
+    fn test_execute_scan_rgrep() {
+        let session = Arc::new(Mutex::new(SessionState::new()));
+        let mut s = session.lock().unwrap();
+        let ctx = s.create_context("test-rgrep", ClientKind::Internal);
+        drop(s);
+
+        // Buffer with ASCII strings and binary patterns
+        let mut data = vec![0u8; 1024];
+        data[0x100..0x10d].copy_from_slice(b"Player_Health");
+        data[0x200..0x10d + 0x100].copy_from_slice(b"Player_Energy");
+        data[0x300..0x303].copy_from_slice(&[0x48, 0x89, 0x5C]);
+
+        struct RgrepMem {
+            data: Vec<u8>,
+        }
+        impl ProcessMemory for RgrepMem {
+            fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> {
+                let start = address as usize;
+                let end = (start + len).min(self.data.len());
+                if start >= self.data.len() {
+                    return Err(crate::memory::MemoryError::OutOfRange { address });
+                }
+                Ok(self.data[start..end].to_vec())
+            }
+            fn write(&self, _address: u64, _data: &[u8]) -> Result<usize, crate::memory::MemoryError> {
+                Ok(0)
+            }
+            fn regions(&self) -> Result<Vec<crate::memory::Region>, crate::memory::MemoryError> {
+                Ok(vec![crate::memory::Region {
+                    start: 0,
+                    end: 1024,
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                    name: None,
+                }])
+            }
+        }
+
+        let proc = RgrepMem { data };
+
+        // Regex scan for "Player_.*"
+        let res = execute_scan_rgrep(&session, &ctx, &proc, ScanRgrepArgs {
+            pattern: "Player_[A-Za-z]+".into(),
+            alignment: Some(4),
+            region: None,
+            marker: Some("player_str".into()),
+            limit: Some(10),
+        }).unwrap();
+
+        assert!(res.message.contains("2 match(es)"));
+        assert!(res.message.contains("0x0000000000000100"));
+        assert!(res.message.contains("0x0000000000000200"));
+
+        // Marker auto-set
+        let s = session.lock().unwrap();
+        let m = s.get_marker("player_str").unwrap();
+        assert_eq!(m.address, 0x100);
     }
 }

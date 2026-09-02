@@ -41,6 +41,8 @@ anyhow = "1"
 # GUI
 eframe = "0.27"
 egui = "0.27"
+# Regex byte scanning (ripgrep regex engine)
+regex = { version = "1.10", default-features = false, features = ["std", "perf", "unicode-case"] }
 # Disassembler & Assembler (for disassemble, addr_to_module, and assemble_asm tools)
 iced-x86 = { version = "1", features = ["code_asm"] }
 

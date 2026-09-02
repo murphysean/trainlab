@@ -115,6 +115,33 @@ pub trait ProcessMemory {
         );
         matches
     }
+
+    /// Scan a readable region for regular expression byte matches.
+    fn scan_region_regex(
+        &self,
+        region: &Region,
+        re: &regex::bytes::Regex,
+        alignment: usize,
+    ) -> Vec<(u64, Vec<u8>)> {
+        let mut matches = Vec::new();
+        // Overlap by 256 bytes across chunks so regexes straddling chunk boundaries are found
+        let overlap = 256usize;
+        crate::scan::scan_region_chunks(
+            self,
+            region,
+            crate::scan::DEFAULT_CHUNK_SIZE,
+            overlap,
+            |chunk_base, chunk_buf| {
+                for m in re.find_iter(chunk_buf) {
+                    let addr = chunk_base + m.start() as u64;
+                    if alignment <= 1 || addr.is_multiple_of(alignment as u64) {
+                        matches.push((addr, m.as_bytes().to_vec()));
+                    }
+                }
+            },
+        );
+        matches
+    }
 }
 
 /// A single memory region.
@@ -841,6 +868,29 @@ impl ProcessMemory for SelfProcess {
         for off in crate::aob::find_all_aligned_with_base(slice, pattern, start, alignment) {
             let addr = (start + off as u64) as i64 + offset.unwrap_or(0);
             matches.push(addr as u64);
+        }
+        matches
+    }
+
+    fn scan_region_regex(
+        &self,
+        region: &Region,
+        re: &regex::bytes::Regex,
+        alignment: usize,
+    ) -> Vec<(u64, Vec<u8>)> {
+        let start = region.start;
+        let end = region.end;
+        let len = (end - start) as usize;
+        if len == 0 {
+            return Vec::new();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(start as *const u8, len) };
+        let mut matches = Vec::new();
+        for m in re.find_iter(slice) {
+            let addr = start + m.start() as u64;
+            if alignment <= 1 || addr.is_multiple_of(alignment as u64) {
+                matches.push((addr, m.as_bytes().to_vec()));
+            }
         }
         matches
     }

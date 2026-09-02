@@ -4400,6 +4400,7 @@ dependencies = [
  "chrono",
  "iced-x86",
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",

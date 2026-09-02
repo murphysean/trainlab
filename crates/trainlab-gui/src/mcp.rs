@@ -291,6 +291,28 @@ pub struct ScanPointerArgs {
     pub limit: Option<usize>,
 }
 
+/// Arguments for [`scan_rgrep`] / [`rgrep`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ScanRgrepArgs {
+    /// Regular expression pattern over raw bytes (e.g. "player_.*", "(?i)credits", or binary "(?s-u)\x48\x89").
+    pub pattern: String,
+    /// Optional address alignment (e.g. 1, 4, 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<usize>,
+    /// Optional region marker name (e.g. "game_heap") or address expression to bound search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// Optional marker name to automatically save the first match address under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    /// Maximum number of matches to return (default 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Backwards-compatible alias for [`ScanRgrepArgs`].
+pub type RgrepArgs = ScanRgrepArgs;
+
 /// Backwards-compatible alias for [`ScanPointerArgs`].
 pub type PointerScanArgs = ScanPointerArgs;
 
@@ -2158,6 +2180,38 @@ impl TrainlabMcpServer {
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
         ]))
+    }
+
+    /// Search memory for regex byte patterns using ripgrep's regex engine.
+    #[tool(description = "Search game memory for regular expression byte patterns using ripgrep's regex engine (e.g. ASCII strings, UTF-8 text, or binary regexes). Streams memory across readable regions with alignment and region boundary overlap support.")]
+    fn scan_rgrep(
+        &self,
+        Parameters(args): Parameters<ScanRgrepArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let proc = game_process(&self.session)?;
+        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let res = trainlab_core::tools::execute_scan_rgrep(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanRgrepArgs {
+            pattern: args.pattern,
+            alignment: args.alignment,
+            region: args.region,
+            marker: args.marker,
+            limit: args.limit,
+        }).map_err(|e| err(e.message))?;
+
+        self.request_repaint();
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(res.message),
+        ]))
+    }
+
+    /// Backwards-compatible alias for [`scan_rgrep`].
+    #[tool(description = "Alias for 'scan_rgrep'. Search game memory with ripgrep regex engine.")]
+    fn rgrep(
+        &self,
+        Parameters(args): Parameters<RgrepArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.scan_rgrep(Parameters(args))
     }
 
     /// Backwards-compatible alias for [`scan_pointer`].

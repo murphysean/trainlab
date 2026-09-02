@@ -16,6 +16,7 @@ chrono = "0.4"
 tracing.workspace = true
 libc = "0.2"
 iced-x86.workspace = true
+regex.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
