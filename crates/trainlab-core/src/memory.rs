@@ -32,6 +32,8 @@ pub trait ProcessMemory {
     /// [`SelfProcess`], which avoids allocating a full copy of large heaps
     /// (the copy itself was the cause of OOM/faults when scanning a Unity
     /// game's multi-hundred-MB heap).
+    /// Scan a readable region for values matching `op`, returning matching
+    /// `(address, value)` pairs using chunked streaming.
     fn scan_region(
         &self,
         region: &Region,
@@ -40,17 +42,78 @@ pub trait ProcessMemory {
         value_type: crate::scan::ValueType,
         op: crate::scan::ScanOp,
     ) -> Vec<(u64, f64)> {
-        let start = region.start;
-        let end = region.end;
-        let len = (end - start) as usize;
-        if len < size {
-            return Vec::new();
-        }
-        let buf = match self.read(start, len) {
-            Ok(b) => b,
-            Err(_) => return Vec::new(), // region unreadable: skip it
-        };
-        scan_buffer(buf.as_slice(), start, size, alignment, value_type, op)
+        let mut matches = Vec::new();
+        let overlap = size.saturating_sub(1);
+        crate::scan::scan_region_chunks(
+            self,
+            region,
+            crate::scan::DEFAULT_CHUNK_SIZE,
+            overlap,
+            |chunk_base, chunk_buf| {
+                let m = scan_buffer(chunk_buf, chunk_base, size, alignment, value_type, op);
+                matches.extend(m);
+            },
+        );
+        matches
+    }
+
+    /// Scan a readable region for an AOB pattern using chunked streaming.
+    fn scan_region_aob(
+        &self,
+        region: &Region,
+        pattern: &[Option<u8>],
+        alignment: usize,
+        offset: Option<i64>,
+    ) -> Vec<u64> {
+        let mut matches = Vec::new();
+        let overlap = pattern.len().saturating_sub(1);
+        crate::scan::scan_region_chunks(
+            self,
+            region,
+            crate::scan::DEFAULT_CHUNK_SIZE,
+            overlap,
+            |chunk_base, chunk_buf| {
+                for off in crate::aob::find_all_aligned_with_base(chunk_buf, pattern, chunk_base, alignment) {
+                    let addr = (chunk_base + off as u64) as i64 + offset.unwrap_or(0);
+                    matches.push(addr as u64);
+                }
+            },
+        );
+        matches
+    }
+
+    /// Scan a readable region for pointers pointing within `[target_lo, target_hi]`.
+    fn scan_region_pointer(
+        &self,
+        region: &Region,
+        target_lo: u64,
+        target_hi: u64,
+    ) -> Vec<(u64, u64)> {
+        let size = 8usize;
+        let mut matches = Vec::new();
+        let overlap = size.saturating_sub(1);
+        crate::scan::scan_region_chunks(
+            self,
+            region,
+            crate::scan::DEFAULT_CHUNK_SIZE,
+            overlap,
+            |chunk_base, chunk_buf| {
+                let nvals = chunk_buf.len() / size;
+                for i in 0..nvals {
+                    let off = i * size;
+                    let addr = chunk_base + off as u64;
+                    if addr.is_multiple_of(8) {
+                        let mut arr = [0u8; 8];
+                        arr.copy_from_slice(&chunk_buf[off..off + 8]);
+                        let ptr = u64::from_le_bytes(arr);
+                        if ptr >= target_lo && ptr <= target_hi {
+                            matches.push((addr, ptr));
+                        }
+                    }
+                }
+            },
+        );
+        matches
     }
 }
 
@@ -758,6 +821,28 @@ impl ProcessMemory for SelfProcess {
         // within a readable region for the duration of the scan.
         let slice = unsafe { std::slice::from_raw_parts(start as *const u8, len) };
         crate::scan::scan_buffer(slice, start, size, alignment, value_type, op)
+    }
+
+    fn scan_region_aob(
+        &self,
+        region: &Region,
+        pattern: &[Option<u8>],
+        alignment: usize,
+        offset: Option<i64>,
+    ) -> Vec<u64> {
+        let start = region.start;
+        let end = region.end;
+        let len = (end - start) as usize;
+        if len < pattern.len() {
+            return Vec::new();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(start as *const u8, len) };
+        let mut matches = Vec::new();
+        for off in crate::aob::find_all_aligned_with_base(slice, pattern, start, alignment) {
+            let addr = (start + off as u64) as i64 + offset.unwrap_or(0);
+            matches.push(addr as u64);
+        }
+        matches
     }
 
     fn regions(&self) -> Result<Vec<Region>, MemoryError> {

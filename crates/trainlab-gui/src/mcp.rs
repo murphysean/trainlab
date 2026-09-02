@@ -267,6 +267,9 @@ pub struct ScanAobArgs {
     /// Optional region marker name (e.g. "game_heap") or expression to bound the search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Optional address alignment (e.g. 4 or 8 for pointer/data scans, 1 for unaligned code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<usize>,
     /// Maximum number of match addresses to return (default 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
@@ -1990,6 +1993,7 @@ impl TrainlabMcpServer {
             offset: args.offset,
             marker: args.marker,
             region: args.region,
+            alignment: args.alignment,
             limit: args.limit,
         }).map_err(|e| err(e.message))?;
 

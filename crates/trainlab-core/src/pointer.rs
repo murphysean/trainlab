@@ -110,31 +110,13 @@ pub fn reverse_scan<P: ProcessMemory + ?Sized>(
     target_lo: u64,
     target_hi: u64,
 ) -> Result<Vec<(u64, u64)>, MemoryError> {
-    let size = std::mem::size_of::<usize>();
     let mut out = Vec::new();
     for r in regions {
         if !r.readable || !r.writable {
             continue;
         }
-        let start = r.start;
-        let end = r.end;
-        let len = (end - start) as usize;
-        if len < size {
-            continue;
-        }
-        let buf = match proc.read(start, len) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let nvals = buf.len() / size;
-        for i in 0..nvals {
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(&buf[i * size..(i + 1) * size]);
-            let ptr = u64::from_le_bytes(arr);
-            if ptr >= target_lo && ptr <= target_hi {
-                out.push((start + (i * size) as u64, ptr));
-            }
-        }
+        let matches = proc.scan_region_pointer(r, target_lo, target_hi);
+        out.extend(matches);
     }
     Ok(out)
 }

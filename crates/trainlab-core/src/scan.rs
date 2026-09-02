@@ -241,6 +241,90 @@ fn op_matches(op: ScanOp, prev: f64, cur: f64, value_type: ValueType) -> bool {
     }
 }
 
+/// Default chunk size for streaming memory scans (2 MB).
+pub const DEFAULT_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+
+/// Metrics returned after completing a scan over multiple memory regions.
+#[derive(Debug, Clone, Default)]
+pub struct ScanMetrics {
+    pub regions_scanned: usize,
+    pub bytes_scanned: u64,
+    pub unreadable_chunks: usize,
+}
+
+/// Stream across memory `region` in bounded chunks of size `chunk_size`, maintaining an
+/// `overlap` of bytes between adjacent chunks so multi-byte values / patterns straddling
+/// a chunk boundary are not missed.
+///
+/// If a large chunk read fails (e.g. hitting a guard page or uncommitted tail page), it falls
+/// back to reading in 4 KB pages so readable pages are not abandoned.
+pub fn scan_region_chunks<P: ProcessMemory + ?Sized, F>(
+    proc: &P,
+    region: &crate::memory::Region,
+    chunk_size: usize,
+    overlap: usize,
+    mut on_chunk: F,
+) -> (u64, usize)
+where
+    F: FnMut(u64, &[u8]),
+{
+    let mut total_bytes = 0u64;
+    let mut skipped_chunks = 0usize;
+    let chunk_size = chunk_size.max(4096);
+    let mut cur = region.start;
+    let end = region.end;
+
+    while cur < end {
+        let max_to_read = (end - cur) as usize;
+        let read_len = max_to_read.min(chunk_size + overlap);
+
+        match proc.read(cur, read_len) {
+            Ok(buf) if !buf.is_empty() => {
+                let actual_len = buf.len();
+                total_bytes += actual_len as u64;
+                on_chunk(cur, &buf);
+
+                // Advance by (actual_len - overlap) to maintain boundary overlap on the next chunk
+                let advance = if actual_len > overlap {
+                    actual_len - overlap
+                } else {
+                    actual_len
+                };
+                cur += advance as u64;
+            }
+            _ => {
+                // If a large chunk read failed, try walking page-by-page (4KB) through this chunk
+                let page_size = 4096;
+                let page_limit = cur.saturating_add(chunk_size as u64).min(end);
+                let mut page_addr = cur;
+                while page_addr < page_limit {
+                    let page_to_read = (page_limit - page_addr) as usize;
+                    let page_len = page_to_read.min(page_size + overlap);
+                    match proc.read(page_addr, page_len) {
+                        Ok(pbuf) if !pbuf.is_empty() => {
+                            let pactual = pbuf.len();
+                            total_bytes += pactual as u64;
+                            on_chunk(page_addr, &pbuf);
+                            let padvance = if pactual > overlap {
+                                pactual - overlap
+                            } else {
+                                pactual
+                            };
+                            page_addr += padvance as u64;
+                        }
+                        _ => {
+                            skipped_chunks += 1;
+                            page_addr += page_size as u64;
+                        }
+                    }
+                }
+                cur = page_limit;
+            }
+        }
+    }
+    (total_bytes, skipped_chunks)
+}
+
 /// Scan a byte buffer for values of `value_type` satisfying `op`, starting at
 /// `base` address, respecting `alignment`. Returns `(address, value)` pairs.
 ///
@@ -265,7 +349,8 @@ pub(crate) fn scan_buffer(
     while offset <= end_offset {
         let addr = base + offset as u64;
         if alignment > 1 && !addr.is_multiple_of(alignment as u64) {
-            offset += step;
+            let rem = (addr % (alignment as u64)) as usize;
+            offset += alignment - rem;
             continue;
         }
         let v = buf_to_f64(&buf[offset..offset + size], value_type);
@@ -550,5 +635,36 @@ mod tests {
         // range
         let found = scan_buffer(&buf, 0, 4, 0, ValueType::I32, ScanOp::Range { min: 2.0, max: 4.0 });
         assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    fn scan_region_chunks_overlap_and_boundary_crossing() {
+        // Create 10000 bytes with a target value 0xDEADBEEF placed exactly at offset 4094
+        // (straddling a 4096-byte boundary).
+        let mut buf = vec![0u8; 10000];
+        let target_val = 0xDEADBEEFu32;
+        buf[4094..4098].copy_from_slice(&target_val.to_le_bytes());
+
+        let proc = MockProcess::new(buf);
+        let region = Region {
+            start: 0,
+            end: 10000,
+            readable: true,
+            writable: true,
+            executable: false,
+            name: None,
+        };
+
+        // Scan in 4096-byte chunks with 3 bytes of overlap
+        let mut hits = Vec::new();
+        let (scanned, skipped) = scan_region_chunks(&proc, &region, 4096, 3, |chunk_base, chunk_buf| {
+            let m = scan_buffer(chunk_buf, chunk_base, 4, 0, ValueType::U32, ScanOp::Exact { value: target_val as f64 });
+            hits.extend(m);
+        });
+
+        assert_eq!(skipped, 0);
+        assert!(scanned >= 10000);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, 4094);
     }
 }

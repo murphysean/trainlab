@@ -189,6 +189,9 @@ pub struct ScanAobArgs {
     /// Optional region marker name (e.g. "game_heap") or address expression to bound the search.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Optional address alignment (e.g. 4 or 8 for pointer/data scans, 1 for unaligned code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<usize>,
     /// Maximum number of match addresses to return in structured output (default 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
@@ -1504,9 +1507,12 @@ pub fn execute_scan_aob(
             all_regions
         }
     };
+    let alignment = args.alignment.unwrap_or(0);
     let mut matches = Vec::new();
+    let mut total_bytes = 0u64;
+    let mut regions_scanned = 0usize;
 
-    for r in regions {
+    for r in &regions {
         if !r.readable {
             continue;
         }
@@ -1514,12 +1520,10 @@ pub fn execute_scan_aob(
         if len < parsed_pat.len() {
             continue;
         }
-        if let Ok(buf) = mem.read(r.start, len) {
-            for off in crate::aob::find_all(&buf, &parsed_pat) {
-                let match_addr = (r.start + off as u64) as i64 + args.offset.unwrap_or(0);
-                matches.push(match_addr as u64);
-            }
-        }
+        regions_scanned += 1;
+        total_bytes += len as u64;
+        let hits = mem.scan_region_aob(r, &parsed_pat, alignment, args.offset);
+        matches.extend(hits);
     }
 
     let count = matches.len();
@@ -1531,13 +1535,14 @@ pub fn execute_scan_aob(
             }
 
     if let Ok(mut s) = session.lock() {
-        s.log_activity(&ctx.id, format!("AOB scan '{}': {count} match(es)", args.pattern));
+        s.log_activity(&ctx.id, format!("AOB scan '{}': {count} match(es) across {regions_scanned} region(s)", args.pattern));
     }
 
+    let mb_scanned = (total_bytes as f64) / (1024.0 * 1024.0);
     let limit = args.limit.unwrap_or(20);
     let preview_matches: Vec<u64> = matches.iter().copied().take(limit).collect();
     let lines: Vec<String> = preview_matches.iter().map(|m| format!("{m:#018x}")).collect();
-    let mut text = format!("{count} match(es)\n");
+    let mut text = format!("{count} match(es) (scanned {regions_scanned} region(s), {mb_scanned:.1} MB)\n");
     text.push_str(&lines.join("\n"));
     
     let mut scan_file = None;
@@ -1546,6 +1551,7 @@ pub fn execute_scan_aob(
         let full_json = serde_json::json!({
             "count": count,
             "pattern": args.pattern,
+            "alignment": alignment,
             "matches": matches,
         });
         if let Ok(rel_path) = write_output_artifact("scans", &s_file, full_json.to_string().as_bytes()) {
@@ -1560,6 +1566,8 @@ pub fn execute_scan_aob(
         text,
         serde_json::json!({
             "count": count,
+            "regions_scanned": regions_scanned,
+            "mb_scanned": mb_scanned,
             "matches": preview_matches,
             "scan_file": scan_file,
             "client_id": ctx.id,

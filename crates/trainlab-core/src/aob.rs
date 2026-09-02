@@ -26,19 +26,70 @@ pub fn parse(text: &str) -> Vec<Option<u8>> {
 /// Find all occurrences of `pattern` in `haystack`, returning the byte
 /// offsets of each match. Wildcards (`None`) match any byte.
 pub fn find_all(haystack: &[u8], pattern: &[Option<u8>]) -> Vec<usize> {
+    find_all_aligned(haystack, pattern, 0)
+}
+
+/// Find all occurrences of `pattern` in `haystack` starting at an offset where `(base + offset)`
+/// satisfies `alignment`. If `alignment <= 1`, matches at any byte boundary.
+pub fn find_all_aligned(haystack: &[u8], pattern: &[Option<u8>], alignment: usize) -> Vec<usize> {
+    find_all_aligned_with_base(haystack, pattern, 0, alignment)
+}
+
+/// Find all occurrences of `pattern` in `haystack` at `base` address with `alignment`.
+pub fn find_all_aligned_with_base(
+    haystack: &[u8],
+    pattern: &[Option<u8>],
+    base: u64,
+    alignment: usize,
+) -> Vec<usize> {
     if pattern.is_empty() || pattern.len() > haystack.len() {
         return Vec::new();
     }
     let mut out = Vec::new();
+    let step = if alignment > 1 { alignment } else { 1 };
     let last = haystack.len() - pattern.len();
-    'outer: for i in 0..=last {
+
+    // Fast-path: If pattern contains no wildcards at all, we can do fast exact byte searches
+    let all_exact = pattern.iter().all(|p| p.is_some());
+    if all_exact && pattern.len() <= 16 {
+        let exact_bytes: Vec<u8> = pattern.iter().map(|p| p.unwrap()).collect();
+        let mut i = 0;
+        while i <= last {
+            let addr = base + i as u64;
+            if alignment > 1 && !addr.is_multiple_of(alignment as u64) {
+                let rem = (addr % (alignment as u64)) as usize;
+                i += alignment - rem;
+                continue;
+            }
+            if &haystack[i..i + exact_bytes.len()] == exact_bytes.as_slice() {
+                out.push(i);
+            }
+            i += step;
+        }
+        return out;
+    }
+
+    let mut i = 0;
+    while i <= last {
+        let addr = base + i as u64;
+        if alignment > 1 && !addr.is_multiple_of(alignment as u64) {
+            let rem = (addr % (alignment as u64)) as usize;
+            i += alignment - rem;
+            continue;
+        }
+
+        let mut matched = true;
         for (j, p) in pattern.iter().enumerate() {
             if let Some(b) = p
                 && haystack[i + j] != *b {
-                    continue 'outer;
+                    matched = false;
+                    break;
                 }
         }
-        out.push(i);
+        if matched {
+            out.push(i);
+        }
+        i += step;
     }
     out
 }
@@ -73,5 +124,27 @@ mod tests {
         let hay = [0xAAu8, 0xBB, 0xCC, 0xDD];
         let p = parse("AA ?? CC");
         assert_eq!(find_first(&hay, &p), Some(0));
+    }
+
+    #[test]
+    fn aligned_matches_filter_unaligned() {
+        // Pattern at index 2 (base 0x1000 + 2 = 0x1002) and index 8 (base 0x1000 + 8 = 0x1008)
+        let mut hay = vec![0u8; 16];
+        hay[2] = 0xAA;
+        hay[3] = 0xBB;
+        hay[8] = 0xAA;
+        hay[9] = 0xBB;
+
+        let p = parse("AA BB");
+        let all = find_all(&hay, &p);
+        assert_eq!(all, vec![2, 8]);
+
+        // 8-byte aligned with base 0x1000 -> only offset 8 (0x1008) matches
+        let aligned8 = find_all_aligned_with_base(&hay, &p, 0x1000, 8);
+        assert_eq!(aligned8, vec![8]);
+
+        // 4-byte aligned with base 0x1000 -> neither 2 nor 8? 8 is 4-aligned, 2 is not
+        let aligned4 = find_all_aligned_with_base(&hay, &p, 0x1000, 4);
+        assert_eq!(aligned4, vec![8]);
     }
 }
