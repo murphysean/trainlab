@@ -279,8 +279,8 @@ pub struct StructField {
     /// Field type: i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, ptr,
     /// cstr (null-terminated ASCII string), or bytes.
     pub value_type: String,
-    /// Byte offset from the struct base (default 0).
-    #[serde(default)]
+    /// Byte offset from the struct base (default 0). Accepts integers or hex strings (e.g. 16 or "0x10").
+    #[serde(default, deserialize_with = "deserialize_offset")]
     pub offset: u64,
     /// For `bytes`: how many bytes to read. For `cstr`: max length to scan
     /// (default 256). Ignored for other types.
@@ -288,7 +288,36 @@ pub struct StructField {
     pub len: Option<usize>,
 }
 
-/// Arguments for [`dump_struct`].
+fn deserialize_offset<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(u64),
+        Signed(i64),
+        Str(String),
+    }
+
+    match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => Ok(n),
+        NumOrStr::Signed(s) => Ok(s as u64),
+        NumOrStr::Str(s) => {
+            let s = s.trim();
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).map_err(serde::de::Error::custom)
+            } else if let Ok(n) = s.parse::<u64>() {
+                Ok(n)
+            } else if let Ok(n) = s.parse::<i64>() {
+                Ok(n as u64)
+            } else {
+                Err(serde::de::Error::custom(format!("invalid offset string: '{s}'")))
+            }
+        }
+    }
+}
+
 /// Arguments for [`snapshot`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotArgs {
@@ -308,12 +337,38 @@ pub struct SnapshotArgs {
     pub max_len: Option<u64>,
 }
 
+/// Arguments for [`dump_struct`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DumpStructArgs {
     /// Base address or expression of the struct (raw hex, dec, module, or marker).
     pub address: String,
-    /// The typed fields to extract, each with a name, type, and offset.
+    /// The typed fields to extract, each with a name, type, and offset. Accepts an array of field objects or a JSON-encoded string.
+    #[serde(deserialize_with = "deserialize_fields_or_json")]
     pub fields: Vec<StructField>,
+}
+
+fn deserialize_fields_or_json<'de, D>(deserializer: D) -> Result<Vec<StructField>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum FieldsOrString {
+        List(Vec<StructField>),
+        Str(String),
+    }
+
+    match FieldsOrString::deserialize(deserializer)? {
+        FieldsOrString::List(fields) => Ok(fields),
+        FieldsOrString::Str(s) => {
+            let s_trimmed = s.trim();
+            if s_trimmed.is_empty() || s_trimmed == "[]" {
+                Ok(Vec::new())
+            } else {
+                serde_json::from_str(&s).map_err(serde::de::Error::custom)
+            }
+        }
+    }
 }
 
 /// Arguments for [`watch_writes`].
@@ -4425,5 +4480,38 @@ cheats: []
         }"#;
         let args_none: CaptureRegArgs = serde_json::from_str(json_none).expect("deserialize gateless");
         assert!(args_none.gate.is_none());
+    }
+
+    #[test]
+    fn test_dump_struct_deserialization_struct_and_string() {
+        // 1. Direct structured array of fields with numeric & hex string offsets
+        let json_struct = r#"{
+            "address": "player_base+0x2f0",
+            "fields": [
+                { "name": "credits", "value_type": "f32", "offset": 16 },
+                { "name": "metal", "value_type": "f32", "offset": "0x14" },
+                { "name": "crystal", "value_type": "f32", "offset": "0x18" }
+            ]
+        }"#;
+        let args_struct: DumpStructArgs = serde_json::from_str(json_struct).expect("deserialize structured fields");
+        assert_eq!(args_struct.fields.len(), 3);
+        assert_eq!(args_struct.fields[0].name, "credits");
+        assert_eq!(args_struct.fields[0].offset, 16);
+        assert_eq!(args_struct.fields[1].name, "metal");
+        assert_eq!(args_struct.fields[1].offset, 20); // 0x14 == 20
+        assert_eq!(args_struct.fields[2].name, "crystal");
+        assert_eq!(args_struct.fields[2].offset, 24); // 0x18 == 24
+
+        // 2. Stringified JSON array of fields (escaped string from LLM client)
+        let json_str = r#"{
+            "address": "player_base+0x2f0",
+            "fields": "[{\"name\": \"credits\", \"value_type\": \"f32\", \"offset\": 16}, {\"name\": \"metal\", \"value_type\": \"f32\", \"offset\": \"0x14\"}]"
+        }"#;
+        let args_str: DumpStructArgs = serde_json::from_str(json_str).expect("deserialize stringified fields");
+        assert_eq!(args_str.fields.len(), 2);
+        assert_eq!(args_str.fields[0].name, "credits");
+        assert_eq!(args_str.fields[0].offset, 16);
+        assert_eq!(args_str.fields[1].name, "metal");
+        assert_eq!(args_str.fields[1].offset, 20);
     }
 }
