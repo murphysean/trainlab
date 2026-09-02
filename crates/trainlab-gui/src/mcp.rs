@@ -1223,9 +1223,10 @@ impl TrainlabMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         // Enforce session clean state (BUG_load_profile_orphans_live_patches.md).
         // Refuse to load a new profile if the current session holds active cave hooks,
-        // enabled cheats, unreverted undo entries, or unfreed memory allocations.
+        // enabled cheats, unreverted undo entries, or unfreed memory allocations,
+        // or if another operation/init/load is in progress.
         {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
             let dirty = s.check_dirty();
             if dirty.is_dirty() {
                 let err_msg = format!(
@@ -1235,7 +1236,19 @@ impl TrainlabMcpServer {
                 );
                 return Err(err(err_msg));
             }
+            s.set_operation_in_progress(Some(format!("loading profile '{}'", args.profile)));
         }
+
+        // RAII guard to ensure operation_in_progress is cleared even if load_profile errors out early.
+        struct LoadGuard<'a>(&'a std::sync::Arc<std::sync::Mutex<trainlab_core::session::SessionState>>);
+        impl<'a> Drop for LoadGuard<'a> {
+            fn drop(&mut self) {
+                if let Ok(mut s) = self.0.lock() {
+                    s.set_operation_in_progress(None);
+                }
+            }
+        }
+        let _guard = LoadGuard(&self.session);
 
         let all_discovered = crate::profile::discover_all_profiles();
         // Match by file name or by game exe.
@@ -2903,6 +2916,17 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<OpConfirmArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Reject staged mutation if another operation or load is in progress.
+        {
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
+            if let Some(op) = s.operation_in_progress() {
+                return Err(err(format!("operation '{op}' is currently in progress; cannot confirm op")));
+            }
+        }
+
         // Peek at the op first — only remove it from pending on success (T-102).
         let op = {
             let s = self
@@ -2935,13 +2959,21 @@ impl TrainlabMcpServer {
                             .session
                             .lock()
                             .map_err(|_| err("session lock poisoned"))?;
+                        let mut is_restoring_patch = false;
                         if let Some(cid) = cheat_id {
                             // Toggle patch cheat state
                             if let Some(c) = s.get_cheat(cid)
                                 && let CheatKind::Patch { patch_bytes, .. } = &c.kind {
                                     let is_enabling = data == patch_bytes;
                                     s.set_cheat_toggle(cid, is_enabling);
+                                    if !is_enabling {
+                                        is_restoring_patch = true;
+                                    }
                                 }
+                        }
+                        if is_restoring_patch {
+                            // The patch was restored back to original bytes, clean up any undo log entry for this address.
+                            s.remove_undo_for_target(address);
                         }
                         if !original.is_empty() {
                             let id = s.record_undo(
@@ -3015,14 +3047,16 @@ impl TrainlabMcpServer {
                     data: original_bytes.clone(),
                 }) {
                     Ok(Response::Write { bytes_written }) => {
+                        let mut s = self
+                            .session
+                            .lock()
+                            .map_err(|_| err("session lock poisoned"))?;
                         // T-111: flip the toggle off when the undo is a toggle disable.
                         if let Some(cid) = cheat_id {
-                            let mut s = self
-                                .session
-                                .lock()
-                                .map_err(|_| err("session lock poisoned"))?;
                             s.set_cheat_toggle(cid, false);
                         }
+                        // Clean up undo log entry for this address since it was restored
+                        s.remove_undo_for_target(address);
                         Ok(format!(
                             "confirmed undo: restored {bytes_written} byte(s) at {:#x}",
                             address

@@ -283,6 +283,8 @@ pub struct DirtyReport {
     pub active_captures: Vec<u64>,
     /// Active breakpoints / watchpoints.
     pub active_breakpoints: Vec<u64>,
+    /// In-progress profile load or initialization operation.
+    pub operation_in_progress: Option<String>,
 }
 
 impl DirtyReport {
@@ -293,10 +295,14 @@ impl DirtyReport {
             || !self.active_allocations.is_empty()
             || !self.active_captures.is_empty()
             || !self.active_breakpoints.is_empty()
+            || self.operation_in_progress.is_some()
     }
 
     pub fn summary(&self) -> String {
         let mut reasons = Vec::new();
+        if let Some(op) = &self.operation_in_progress {
+            reasons.push(format!("operation '{op}' is currently in progress"));
+        }
         if !self.active_cheats.is_empty() {
             reasons.push(format!("{} active cheat(s) enabled: [{}]", self.active_cheats.len(), self.active_cheats.join(", ")));
         }
@@ -328,6 +334,8 @@ impl DirtyReport {
 pub struct SessionState {
     /// Explicit lifecycle state of the session.
     lifecycle: SessionLifecycle,
+    /// Active operation or profile load/initialization in progress.
+    operation_in_progress: Option<String>,
     /// Markers keyed by label (case-sensitive).
     markers: BTreeMap<String, Marker>,
     /// Undo log in the order mutations were made.
@@ -426,7 +434,18 @@ impl SessionState {
             active_allocations: self.allocated_buffers.clone(),
             active_captures: self.active_captures.iter().cloned().collect(),
             active_breakpoints: self.active_breakpoints.iter().cloned().collect(),
+            operation_in_progress: self.operation_in_progress.clone(),
         }
+    }
+
+    /// Check what operation is currently in progress, if any.
+    pub fn operation_in_progress(&self) -> Option<&str> {
+        self.operation_in_progress.as_deref()
+    }
+
+    /// Set or clear the active operation in progress (e.g. profile loading or DLL initialization).
+    pub fn set_operation_in_progress(&mut self, op: Option<String>) {
+        self.operation_in_progress = op;
     }
 
     /// Record a memory buffer allocation made inside the target process.
@@ -896,6 +915,11 @@ impl SessionState {
     pub fn pop_undo(&mut self, id: u64) -> Option<UndoEntry> {
         let idx = self.undo_log.iter().position(|e| e.id == id)?;
         Some(self.undo_log.remove(idx))
+    }
+
+    /// Remove any undo entries recorded for `address` when the site has been restored.
+    pub fn remove_undo_for_target(&mut self, address: u64) {
+        self.undo_log.retain(|e| e.address != address);
     }
 
     /// Number of recorded undo entries.
