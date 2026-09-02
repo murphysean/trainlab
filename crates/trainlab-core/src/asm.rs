@@ -130,6 +130,17 @@ pub fn assemble_text(
     // without any trailing instruction or byte causes "Unused label".
     // If the last emitted element was a label, emit a 0-byte slice / nop or let it assemble.
     let options = iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS;
+    let format_assemble_error = |e: iced_x86::IcedError| -> String {
+        let err_str = e.to_string();
+        if err_str.contains("Displacement must fit in an i32") || err_str.contains("displacement") {
+            format!(
+                "assemble error: {err_str} (rip-relative [rip + label] reference exceeds ±2GB limit from origin {origin_rip:#x}; use 64-bit load 'mov r64, $marker' followed by 'cmp/mov reg, [r64]')"
+            )
+        } else {
+            format!("assemble error: {err_str}")
+        }
+    };
+
     let assembled = match a.assemble_options(origin_rip, options) {
         Ok(result) => {
             // Update labels with exact IPs from the block encoder when available
@@ -143,7 +154,7 @@ pub fn assemble_text(
         }
         Err(e) if e.to_string().contains("Unused label") => {
             let _ = a.nop();
-            let result = a.assemble_options(origin_rip, options).map_err(|e| format!("assemble error: {e}"))?;
+            let result = a.assemble_options(origin_rip, options).map_err(format_assemble_error)?;
             for (name, lbl) in &labels_map {
                 if let Ok(label_ip) = result.label_ip(lbl) {
                     let offset = label_ip.saturating_sub(origin_rip);
@@ -152,7 +163,7 @@ pub fn assemble_text(
             }
             result.inner.code_buffer
         }
-        Err(e) => return Err(format!("assemble error: {e}")),
+        Err(e) => return Err(format_assemble_error(e)),
     };
 
     let hex = assembled.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
@@ -417,8 +428,8 @@ fn parse_and_emit_instruction(
                 a.movss(dst_mem, src).map_err(|e| e.to_string())?;
             }
         }
-        "mov" => {
-            if args.len() != 2 { return Err("mov requires 2 operands".into()); }
+        "mov" | "movabs" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands")); }
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.mov(dst, src).map_err(|e| e.to_string())?;
@@ -427,7 +438,7 @@ fn parse_and_emit_instruction(
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.mov(dst, imm).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for mov: {}", args[1]));
+                    return Err(format!("unknown source operand for {mnemonic}: {}", args[1]));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
@@ -1719,6 +1730,29 @@ mod ce_verbatim_porting {
         symbols.insert("player_base".to_string(), 0x140123456);
         let ok_res = assemble_text(code, 0x140000000, &symbols);
         assert!(ok_res.is_ok(), "Assembly must succeed when marker is provided in symbols: {:?}", ok_res.err());
+    }
+
+    #[test]
+    fn test_movabs_and_rip_displacement_diagnostics() {
+        let mut symbols = HashMap::new();
+        symbols.insert("player_base_slot".to_string(), 0x13fff0000);
+
+        // 1. movabs mnemonic support
+        let movabs_code = r#"
+            movabs rax, 0x141380000
+            movabs rdx, $player_base_slot
+        "#;
+        let res = assemble_text(movabs_code, 0x140000000, &symbols);
+        assert!(res.is_ok(), "movabs mnemonic must assemble cleanly: {:?}", res.err());
+
+        // 2. Clear error on rip-relative displacement overflow (> 2GB apart)
+        let overflow_code = r#"
+            cmp rax, [rip + 0x90000000]
+        "#;
+        let err_res = assemble_text(overflow_code, 0x140000000, &symbols);
+        assert!(err_res.is_err());
+        let err = err_res.unwrap_err();
+        assert!(err.contains("exceeds ±2GB limit"), "Expected diagnostic displacement overflow message, got: {err}");
     }
 }
 
