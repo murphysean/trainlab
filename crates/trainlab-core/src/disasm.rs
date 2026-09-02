@@ -264,4 +264,45 @@ mod tests {
         // which correctly targets the original destination!
         assert!(!r.bytes.is_empty());
     }
+
+    #[test]
+    fn test_instruction_aligned_len_sib_disp8_build_capacity() {
+        // sins2.exe build_capacity site:
+        // +0:  8b 1c 19            mov ebx, [rcx+rbx]     (3 bytes)
+        // +3:  03 9f 98 02 00 00   add ebx, [rdi+0x298]   (6 bytes)  -> boundary +9
+        // +9:  48 8b 0f            mov rcx, [rdi]         (3 bytes)  -> boundary +12 (or 48 8b 0f 4c 8d...)
+        // +12/13: 4c 8d 4c 24 20   lea r9, [rsp+0x20]     (5 bytes)
+        // +17/18: 44 88 44 24 20   mov [rsp+0x20], r8b    (5 bytes)
+        let bytes = [
+            0x8b, 0x1c, 0x19,
+            0x03, 0x9f, 0x98, 0x02, 0x00, 0x00,
+            0x48, 0x8b, 0x0f,
+            0x4c, 0x8d, 0x4c, 0x24, 0x20,
+            0x44, 0x88, 0x44, 0x24, 0x20,
+        ];
+        // min_len 14 (absolute jump size):
+        // 3 + 6 = 9 (< 14)
+        // 9 + 3 = 12 (< 14)
+        // 12 + 5 = 17 (>= 14)
+        // Total bytes stolen must be 17, and exactly 4 complete instructions are stolen.
+        let aligned = instruction_aligned_len(&bytes, 14);
+        assert_eq!(aligned, Some(17));
+
+        let dis = disassemble(0x140b34dc0, &bytes, None);
+        for (i, line) in dis.iter().enumerate() {
+            println!("dis[{i}]: {line}");
+        }
+        assert_eq!(dis.len(), 5);
+        assert!(dis[0].contains("mov ebx"));
+        assert!(dis[1].contains("add ebx"));
+        assert!(dis[2].contains("mov rcx"));
+        assert!(dis[3].contains("lea r9"));
+        assert!(dis[4].contains("mov"));
+
+        // Relocate 17 bytes (4 complete instructions)
+        let stolen = &bytes[0..17];
+        let r = relocate(stolen, 0x140b34dc0, 0x14fff0000).expect("relocate");
+        assert!(!r.ends_in_branch);
+        assert_eq!(r.bytes.len(), 17);
+    }
 }

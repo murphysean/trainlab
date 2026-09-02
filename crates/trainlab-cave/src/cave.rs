@@ -174,7 +174,14 @@ where
 
     // 6. Patch the call site with `jmp cave`.
     let jmp_in = match jump_style {
-        JumpStyle::Absolute => emitter::jmp_abs(cave),
+        JumpStyle::Absolute => {
+            let mut bytes = emitter::jmp_abs(cave);
+            // NOP-pad remaining stolen bytes in the patch window if patch_len > 14
+            if patch_len > emitter::JMP_ABS_LEN {
+                bytes.resize(patch_len, 0x90);
+            }
+            bytes
+        }
         JumpStyle::Relative => {
             let rel = (cave as i128) - ((target + 5) as i128);
             if rel < i32::MIN as i128 || rel > i32::MAX as i128 {
@@ -189,6 +196,23 @@ where
             bytes
         }
     };
+
+    // Installation geometry invariants
+    if jmp_in.len() != patch_len {
+        return Err(format!(
+            "internal hook geometry error: jmp_in length ({}) does not match instruction-aligned patch_len ({})",
+            jmp_in.len(),
+            patch_len
+        ));
+    }
+    if original.len() != patch_len {
+        return Err(format!(
+            "internal hook geometry error: original bytes length ({}) does not match patch_len ({})",
+            original.len(),
+            patch_len
+        ));
+    }
+
     write(target, &jmp_in).map_err(|e| format!("patch target: {e}"))?;
 
     Ok(InstalledCave {
@@ -400,6 +424,38 @@ mod tests {
         assert!(res.is_err());
         let err_msg = res.unwrap_err();
         assert!(err_msg.contains("override hook requires a non-empty payload"), "err: {err_msg}");
+    }
+
+    #[test]
+    fn install_absolute_jump_pads_remaining_bytes_and_correct_return_to() {
+        let target = 0x8000u64;
+        // sins2 build_capacity instruction sequence: 3 + 6 + 3 + 5 = 17 bytes for first 4 instructions
+        let seed = [
+            0x8b, 0x1c, 0x19, // mov ebx, [rcx+rbx] (3)
+            0x03, 0x9f, 0x98, 0x02, 0x00, 0x00, // add ebx, [rdi+0x298] (6) -> 9
+            0x48, 0x8b, 0x0f, // mov rcx, [rdi] (3) -> 12
+            0x4c, 0x8d, 0x4c, 0x24, 0x20, // lea r9, [rsp+0x20] (5) -> 17
+            0x44, 0x88, 0x44, 0x24, 0x20, // mov [rsp+0x20], r8b (5) -> 22
+        ];
+        fake_write(target, &seed).unwrap();
+
+        let kind = HookKind::Trampoline {
+            payload: vec![0x90],
+            jump: JumpStyle::Absolute,
+        };
+        let hook = install(target, kind, fake_read, fake_write, fake_alloc).unwrap();
+
+        // Stolen patch length must be 17 bytes (>= 14)
+        assert_eq!(hook.original.len(), 17);
+        assert_eq!(hook.return_to, target + 17);
+
+        // Verify the 17-byte patch at target: 14 bytes absolute jump + 3 bytes NOP padding
+        FAKE.with(|m| {
+            let patched = m.bytes_at(target, 17);
+            assert_eq!(&patched[0..2], &[0xFF, 0x25]); // jmp [rip+0]
+            // Bytes 14..17 must be NOPs (0x90)
+            assert_eq!(&patched[14..17], &[0x90, 0x90, 0x90], "remaining bytes in steal window must be NOP padded");
+        });
     }
 
     #[test]
