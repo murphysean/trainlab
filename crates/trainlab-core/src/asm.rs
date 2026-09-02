@@ -481,6 +481,8 @@ fn parse_and_emit_instruction(
                     a.cmp(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.cmp(dst, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for cmp {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
@@ -489,6 +491,8 @@ fn parse_and_emit_instruction(
                     a.cmp(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.cmp(dst, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for cmp {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst) = parse_gpr8(args[0]) {
                 if let Ok(src) = parse_gpr8(args[1]) {
@@ -497,6 +501,8 @@ fn parse_and_emit_instruction(
                     a.cmp(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.cmp(dst, imm as u32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for cmp {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
                 if let Ok(src) = parse_gpr64(args[1]) {
@@ -514,7 +520,11 @@ fn parse_and_emit_instruction(
                     } else {
                         a.cmp(dst_mem, imm as i32).map_err(|e| e.to_string())?;
                     }
+                } else {
+                    return Err(format!("unknown source operand for cmp {}: {}", args[0], args[1]));
                 }
+            } else {
+                return Err(format!("unsupported cmp operands: {}, {}", args[0], args[1]));
             }
         }
         "je" | "jz" | "jne" | "jnz" | "jg" | "jge" | "jl" | "jle" | "ja" | "jae" | "jb" | "jbe" | "js" | "jns" => {
@@ -546,19 +556,27 @@ fn parse_and_emit_instruction(
                     a.test(dst, src).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.test(dst, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for test {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.test(dst, src).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.test(dst, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for test {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst) = parse_gpr8(args[0]) {
                 if let Ok(src) = parse_gpr8(args[1]) {
                     a.test(dst, src).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.test(dst, imm as u32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for test {}: {}", args[0], args[1]));
                 }
+            } else {
+                return Err(format!("unsupported test operands: {}, {}", args[0], args[1]));
             }
         }
         "xor" | "xorps" => {
@@ -575,6 +593,8 @@ fn parse_and_emit_instruction(
             } else if let Ok(dst) = parse_gpr8(args[0]) {
                 let src = parse_gpr8(args[1])?;
                 a.xor(dst, src).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("unsupported xor operands: {}, {}", args[0], args[1]));
             }
         }
         "add" => {
@@ -586,6 +606,8 @@ fn parse_and_emit_instruction(
                     a.add(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.add(dst, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for add {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
@@ -594,6 +616,8 @@ fn parse_and_emit_instruction(
                     a.add(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.add(dst, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for add {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
                 if let Ok(src) = parse_gpr64(args[1]) {
@@ -602,7 +626,11 @@ fn parse_and_emit_instruction(
                     a.add(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.add(dst_mem, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for add {}: {}", args[0], args[1]));
                 }
+            } else {
+                return Err(format!("unsupported add operands: {}, {}", args[0], args[1]));
             }
         }
         "sub" => {
@@ -614,6 +642,8 @@ fn parse_and_emit_instruction(
                     a.sub(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.sub(dst, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for sub {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
@@ -622,6 +652,8 @@ fn parse_and_emit_instruction(
                     a.sub(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.sub(dst, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for sub {}: {}", args[0], args[1]));
                 }
             } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
                 if let Ok(src) = parse_gpr64(args[1]) {
@@ -630,7 +662,11 @@ fn parse_and_emit_instruction(
                     a.sub(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.sub(dst_mem, imm as i32).map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!("unknown source operand for sub {}: {}", args[0], args[1]));
                 }
+            } else {
+                return Err(format!("unsupported sub operands: {}, {}", args[0], args[1]));
             }
         }
         "sar" | "shl" | "sal" | "shr" | "rol" | "ror" => {
@@ -1661,5 +1697,29 @@ mod ce_verbatim_porting {
         "#;
         assert!(check_trampoline_data_fallthrough(leaf_code).is_ok(), "Leaf cave ending with ret before data must pass");
     }
+
+    #[test]
+    fn test_unresolved_marker_fails_assembly() {
+        let code = r#"
+            push rax
+            cmp rax, $player_base
+            jne exit
+            mov [rax+0x10], 100
+            exit:
+            pop rax
+        "#;
+        let empty_symbols = HashMap::new();
+        let res = assemble_text(code, 0x140000000, &empty_symbols);
+        assert!(res.is_err(), "Assembly must fail if a marker ($player_base) cannot be resolved");
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("unknown symbol '$player_base'") || err_msg.contains("player_base"), "Error message should mention the unresolved marker, got: {err_msg}");
+
+        // Now with resolved symbol, assembly must succeed
+        let mut symbols = HashMap::new();
+        symbols.insert("player_base".to_string(), 0x140123456);
+        let ok_res = assemble_text(code, 0x140000000, &symbols);
+        assert!(ok_res.is_ok(), "Assembly must succeed when marker is provided in symbols: {:?}", ok_res.err());
+    }
 }
+
 
