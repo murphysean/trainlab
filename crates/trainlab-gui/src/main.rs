@@ -1840,12 +1840,30 @@ impl eframe::App for TrainlabApp {
             }
         }
 
-        if let Ok(s) = self.session.lock() {
+        if let Ok(mut s) = self.session.lock() {
+            let was_connected = s.connected();
+            if was_connected {
+                if let Some(pid) = s.game_pid() {
+                    if !mcp::is_process_alive(pid) {
+                        let game = s.game_name().to_string();
+                        s.set_connected(false);
+                        s.set_lifecycle(trainlab_core::session::SessionLifecycle::TargetLost {
+                            pid,
+                            exe_name: game.clone(),
+                        });
+                        s.log_activity("GUI", format!("target game '{game}' (pid {pid}) exited; returning to welcome screen"));
+                        self.active_tab = ActiveTab::Cheats;
+                    }
+                }
+            }
+
             self.connected = s.connected();
             if self.connected {
                 let ver = s.inject_version().unwrap_or("active");
                 let game = s.game_name();
                 self.status = format!("connected to {game} (v{ver})");
+            } else if matches!(s.lifecycle(), trainlab_core::session::SessionLifecycle::TargetLost { .. }) {
+                self.status = "target game exited (disconnected)".into();
             } else {
                 self.status = "not connected".into();
             }
@@ -1936,6 +1954,31 @@ impl eframe::App for TrainlabApp {
                                 self.auto_match_profile();
                             }
                         });
+
+                        // Show matched cheat profile insight for the target process
+                        let target_clean = self.game_name.trim();
+                        if !target_clean.is_empty() {
+                            let profiles = profile::discover_profiles();
+                            if let Some((file, p)) = profile::find_profile_for_game(&profiles, target_clean) {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(egui::Color32::GREEN, "✔ Matched Profile:");
+                                    ui.strong(format!("cheats/{} — \"{}\"", file, p.name));
+                                    if let Some(author) = &p.author {
+                                        ui.label(format!("by {author}"));
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("  {} setup step(s), {} cheat(s)", p.setup.len(), p.cheats.len()));
+                                    if let Some(ver) = &p.game_version {
+                                        ui.label(format!("(target version: {ver})"));
+                                    }
+                                });
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.colored_label(egui::Color32::DARK_GRAY, "ℹ No matching profile in cheats/ for this process name (generic mode).");
+                                });
+                            }
+                        }
 
                         if !self.game_candidates.is_empty() {
                             ui.horizontal(|ui| {

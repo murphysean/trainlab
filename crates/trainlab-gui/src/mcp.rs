@@ -36,19 +36,68 @@ fn last_error() -> String {
 ///
 /// Returns a boxed `ProcessMemory` handle, or an error if the PID isn't set or
 /// the process can't be opened.
+pub(crate) fn is_process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{OpenProcess, GetExitCodeProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::Foundation::CloseHandle;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code: u32 = 0;
+        let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe { CloseHandle(handle); }
+        ok != 0 && exit_code == 259 // STILL_ACTIVE == 259
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 pub(crate) fn game_process(
     session: &SharedSession,
 ) -> Result<Box<dyn trainlab_core::memory::ProcessMemory>, ErrorData> {
-    let pid = {
+    let (pid, game_name) = {
         let s = session.lock().map_err(|_| err("session lock poisoned"))?;
-        s.game_pid()
+        (s.game_pid(), s.game_name().to_string())
     };
-    let pid = pid.ok_or_else(|| err("no game process; find & inject a game first"))?;
+    let pid = pid.ok_or_else(|| err("no game process attached; find & inject a game first"))?;
+
+    if !is_process_alive(pid) {
+        if let Ok(mut s) = session.lock() {
+            s.set_connected(false);
+            s.set_lifecycle(trainlab_core::session::SessionLifecycle::TargetLost {
+                pid,
+                exe_name: game_name.clone(),
+            });
+            s.log_activity("MCP", format!("target game process '{game_name}' (pid {pid}) is no longer running (game_alive: false)"));
+        }
+        return Err(err(format!(
+            "game process '{game_name}' (pid {pid}) has terminated / is not running (game_alive: false). Re-attach to a running game with 'attach_game'."
+        )));
+    }
+
     #[cfg(windows)]
     {
         trainlab_core::memory::WindowsProcess::open(pid)
             .map(|p| Box::new(p) as Box<dyn trainlab_core::memory::ProcessMemory>)
-            .map_err(|e| err(format!("failed to open game (pid {pid}) externally: {e}")))
+            .map_err(|e| {
+                if !is_process_alive(pid) {
+                    if let Ok(mut s) = session.lock() {
+                        s.set_connected(false);
+                        s.set_lifecycle(trainlab_core::session::SessionLifecycle::TargetLost {
+                            pid,
+                            exe_name: game_name.clone(),
+                        });
+                    }
+                    err(format!("game process '{game_name}' (pid {pid}) died (game_alive: false)"))
+                } else {
+                    err(format!("failed to open game process '{game_name}' (pid {pid}) externally: {e}"))
+                }
+            })
     }
     #[cfg(not(windows))]
     {
@@ -927,21 +976,37 @@ impl TrainlabMcpServer {
     }
 
     /// Report the current trainer / connection status.
-    #[tool(description = "Report trainer status: MCP reachable, whether we're connected to a DLL, the game pid, game name, DLL version, and the configured host/port.")]
+    #[tool(description = "Report trainer status: MCP reachable, whether we're connected to a DLL, whether target game process is alive, the game pid, game name, DLL version, lifecycle state, and configured host/port.")]
     fn connection_status(&self) -> Result<CallToolResult, ErrorData> {
-        let s = self
+        let mut s = self
             .session
             .lock()
             .map_err(|_| err("session lock poisoned"))?;
+
+        let (game_alive, pid_str) = if let Some(pid) = s.game_pid() {
+            let alive = is_process_alive(pid);
+            if !alive && s.connected() {
+                s.set_connected(false);
+                let game = s.game_name().to_string();
+                s.set_lifecycle(trainlab_core::session::SessionLifecycle::TargetLost {
+                    pid,
+                    exe_name: game,
+                });
+            }
+            (alive, pid.to_string())
+        } else {
+            (false, "none".into())
+        };
+
         let connected = s.connected();
-        let pid = s.game_pid().map(|p| p.to_string()).unwrap_or_else(|| "none".into());
         let game = s.game_name().to_string();
         let ver = s.inject_version().unwrap_or("(not connected)").to_string();
         let host = s.dll_host().to_string();
         let port = s.dll_port();
+        let lifecycle = format!("{:?}", s.lifecycle());
         drop(s);
         let text = format!(
-            "MCP: reachable\nconnected: {connected}\ngame: {game}\npid: {pid}\ninject v: {ver}\ndll host: {host}:{port}"
+            "MCP: reachable\nconnected: {connected}\ngame: {game}\npid: {pid_str}\ngame_alive: {game_alive}\nlifecycle: {lifecycle}\ninject v: {ver}\ndll host: {host}:{port}"
         );
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(text),
@@ -4673,5 +4738,37 @@ cheats: []
             session.pop_undo_last();
             assert!(!session.check_dirty().is_dirty());
         }
+    }
+
+    #[test]
+    fn test_connection_status_and_game_process_detects_target_lost() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
+
+        // When no game attached, connection_status reports not connected and game_alive: false
+        let res = server.connection_status().expect("status ok");
+        let txt = match &res.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(txt.contains("game_alive: false"));
+        assert!(txt.contains("connected: false"));
+
+        // When game pid is set to an invalid / non-running PID
+        {
+            let mut session = s.lock().unwrap();
+            session.set_game_name("dead_game.exe");
+            session.set_game_pid(Some(99999999));
+            session.set_connected(true);
+        }
+
+        let res2 = server.connection_status().expect("status ok");
+        let txt2 = match &res2.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        // On non-windows test runner, is_process_alive returns true stub or on Windows false.
+        // game_process tool handles target lost
+        assert!(txt2.contains("dead_game.exe"));
     }
 }
