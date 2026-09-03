@@ -706,6 +706,8 @@ pub struct ToggleNetworkReq {
     pub capture_loopback: bool,
     #[serde(default)]
     pub ignore_ports: Vec<u16>,
+    #[serde(default)]
+    pub ignore_hosts: Vec<String>,
 }
 
 /// `GET /api/network` — retrieve captured packets with filtering and pagination.
@@ -757,14 +759,18 @@ async fn toggle_network_hooks_handler(
         let mut s = lock_session_or_500(&state)?;
         s.set_network_hooks_enabled(req.enabled);
     }
-    let (dll_port, mcp_port) = {
-        let cfg = crate::config::AppConfig::load();
-        (cfg.inject.dll_port, cfg.server.mcp_port)
-    };
+    let cfg = crate::config::AppConfig::load();
+    let (dll_port, mcp_port) = (cfg.inject.dll_port, cfg.server.mcp_port);
     let mut ports = vec![dll_port, mcp_port];
     for p in req.ignore_ports {
         if !ports.contains(&p) {
             ports.push(p);
+        }
+    }
+    let mut ignore_hosts = cfg.inject_features.network.ignore_hosts.clone();
+    for h in req.ignore_hosts {
+        if !ignore_hosts.contains(&h) {
+            ignore_hosts.push(h);
         }
     }
     // Forward command to DLL if connected
@@ -772,6 +778,7 @@ async fn toggle_network_hooks_handler(
         enabled: req.enabled,
         ignore_ports: ports,
         capture_loopback: req.capture_loopback,
+        ignore_hosts,
     });
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "enabled": req.enabled })))

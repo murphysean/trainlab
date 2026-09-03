@@ -284,6 +284,9 @@ pub struct ConfigureNetworkArgs {
     /// Additional ports to ignore (beyond the trainer's internal IPC and MCP ports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignore_ports: Option<Vec<u16>>,
+    /// Hostnames, domains, or URL substrings to ignore from capture (e.g. ["api.helldivers.com", "telemetry.arrowhead.com"]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_hosts: Option<Vec<String>>,
 }
 
 /// Arguments for [`pin_value`].
@@ -1667,6 +1670,32 @@ impl TrainlabMcpServer {
             hook_wndproc: render_cfg.hook_wndproc,
             xinput_hooks: render_cfg.xinput_hooks,
         });
+
+        // Configure DLL network hooks and filtering via IPC if specified in profile
+        if let Some(net_cfg) = &profile.network {
+            let app_cfg = crate::config::AppConfig::load();
+            let mut ignore_ports = app_cfg.inject_features.network.ignore_ports.clone();
+            for p in &net_cfg.ignore_ports {
+                if !ignore_ports.contains(p) {
+                    ignore_ports.push(*p);
+                }
+            }
+            let mut ignore_hosts = app_cfg.inject_features.network.ignore_hosts.clone();
+            for h in &net_cfg.ignore_hosts {
+                if !ignore_hosts.contains(h) {
+                    ignore_hosts.push(h.clone());
+                }
+            }
+            let capture_loopback = net_cfg.capture_loopback.unwrap_or(app_cfg.inject_features.network.capture_loopback);
+            let enabled = net_cfg.enabled.unwrap_or(true);
+
+            let _ = crate::controller::request(&self.session, &Request::ConfigureNetworkHook {
+                enabled,
+                ignore_ports,
+                capture_loopback,
+                ignore_hosts,
+            });
+        }
 
         // Run setup steps or init_commands to resolve base addresses and create markers.
         let mut resolved: Vec<(String, u64)> = Vec::new();
@@ -3329,11 +3358,13 @@ impl TrainlabMcpServer {
             }
         }
         let capture_loopback = args.capture_loopback.unwrap_or(false);
+        let ignore_hosts = args.ignore_hosts.unwrap_or_default();
 
         let req = trainlab_core::protocol::Request::ConfigureNetworkHook {
             enabled: args.enabled,
             ignore_ports: ports.clone(),
             capture_loopback,
+            ignore_hosts: ignore_hosts.clone(),
         };
 
         let resp = crate::controller::request(&self.session, &req);
@@ -3345,7 +3376,7 @@ impl TrainlabMcpServer {
 
         let status_desc = match resp {
             Ok(trainlab_core::protocol::Response::NetworkHookConfigured { enabled }) => {
-                format!("Network interception set to {enabled}. Ignored ports: {ports:?}, capture_loopback: {capture_loopback}")
+                format!("Network interception set to {enabled}. Ignored ports: {ports:?}, capture_loopback: {capture_loopback}, ignore_hosts: {ignore_hosts:?}")
             }
             Ok(other) => format!("Unexpected DLL response: {other:?}"),
             Err(e) => format!("Failed to configure network hook on DLL (DLL may be offline): {e}"),

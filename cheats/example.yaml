@@ -15,6 +15,16 @@ inject_dll: true
 author: "Trainlab Community"
 date: "2026-08-31"
 
+# In-game network interception & packet filter settings
+network:
+  enabled: true
+  # Drop raw encrypted TLS on port 443 so you only see decrypted SChannel/WinHTTP traffic
+  ignore_ports: [443]
+  # Drop telemetry or noisy endpoints by domain / host substring
+  ignore_hosts:
+    - "api.helldivers.com"
+    - "telemetry.arrowhead.com"
+
 # ------------------------------------------------------------------------------
 # 1. SETUP STEPS
 # Resolves restart-stable base addresses and code hooks across game restarts.

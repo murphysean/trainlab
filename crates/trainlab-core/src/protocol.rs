@@ -221,6 +221,9 @@ pub enum Request {
         /// Whether to capture loopback (127.0.0.1 / ::1 / localhost) traffic. Defaults to false.
         #[serde(default)]
         capture_loopback: bool,
+        /// Hostnames, domains, or URL substrings to ignore from capture.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ignore_hosts: Vec<String>,
     },
     /// Initialize the injected DLL session with requested features and filters (consolidated capability handshake).
     InitializeSession {
@@ -457,6 +460,9 @@ pub struct NetworkFeatures {
     /// Ports to ignore from capture (e.g. internal IPC or MCP ports).
     #[serde(default)]
     pub ignore_ports: Vec<u16>,
+    /// Hosts, domains, or URL substrings to ignore from capture (e.g. "api.helldivers.com", "telemetry.arrowhead.com").
+    #[serde(default)]
+    pub ignore_hosts: Vec<String>,
 }
 
 impl Default for NetworkFeatures {
@@ -467,6 +473,7 @@ impl Default for NetworkFeatures {
             schannel: true,
             capture_loopback: false,
             ignore_ports: Vec::new(),
+            ignore_hosts: Vec::new(),
         }
     }
 }

@@ -18,6 +18,7 @@ pub mod schannel;
 static NETWORK_ENABLED: AtomicBool = AtomicBool::new(true);
 static CAPTURE_LOOPBACK: AtomicBool = AtomicBool::new(false);
 static IGNORE_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+static IGNORE_HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Maximum packets retained in the in-memory push queue.
@@ -53,12 +54,15 @@ pub fn set_enabled(enabled: bool) {
     NETWORK_ENABLED.store(enabled, Ordering::SeqCst);
 }
 
-/// Configure network capture filter: enable flag, ignored ports, and loopback capture toggle.
-pub fn configure(enabled: bool, ignore_ports: &[u16], capture_loopback: bool) {
+/// Configure network capture filter: enable flag, ignored ports, loopback toggle, and ignored hostnames/domains.
+pub fn configure(enabled: bool, ignore_ports: &[u16], capture_loopback: bool, ignore_hosts: &[String]) {
     NETWORK_ENABLED.store(enabled, Ordering::SeqCst);
     CAPTURE_LOOPBACK.store(capture_loopback, Ordering::SeqCst);
     if let Ok(mut ports) = IGNORE_PORTS.lock() {
         *ports = ignore_ports.to_vec();
+    }
+    if let Ok(mut hosts) = IGNORE_HOSTS.lock() {
+        *hosts = ignore_hosts.iter().map(|h| h.trim().to_lowercase()).filter(|h| !h.is_empty()).collect();
     }
 }
 
@@ -103,6 +107,46 @@ pub fn record_packet(
         if let Some(rp) = remote_port {
             if ignored.contains(&rp) {
                 return;
+            }
+        }
+    }
+
+    // Check if any ignored host/domain matches URL, endpoints, or headers
+    if let Ok(ignored_hosts) = IGNORE_HOSTS.lock() {
+        if !ignored_hosts.is_empty() {
+            let matches_host = |target: &str| -> bool {
+                let target_lower = target.to_lowercase();
+                ignored_hosts.iter().any(|h| target_lower.contains(h))
+            };
+
+            if let Some(u) = url.as_deref() {
+                if matches_host(u) {
+                    return;
+                }
+            }
+            if let Some(re) = remote_endpoint.as_deref() {
+                if matches_host(re) {
+                    return;
+                }
+            }
+            if let Some(le) = local_endpoint.as_deref() {
+                if matches_host(le) {
+                    return;
+                }
+            }
+            if let Some(hdr) = headers.as_deref() {
+                if matches_host(hdr) {
+                    return;
+                }
+            }
+            // If plaintext payload looks like HTTP (starts with method or HTTP/), check for Host: header
+            if payload.len() >= 4 && (payload.starts_with(b"GET ") || payload.starts_with(b"POST") || payload.starts_with(b"PUT ") || payload.starts_with(b"HEAD") || payload.starts_with(b"HTTP/")) {
+                let check_len = payload.len().min(1024);
+                if let Ok(text) = std::str::from_utf8(&payload[..check_len]) {
+                    if matches_host(text) {
+                        return;
+                    }
+                }
             }
         }
     }
@@ -307,7 +351,7 @@ mod tests {
     #[test]
     fn test_record_and_drain_packets() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        configure(true, &[], true); // allow loopback for test
+        configure(true, &[], true, &[]); // allow loopback for test
         let _ = drain_network_events();
         record_packet(
             PacketKind::Tcp,
@@ -353,7 +397,7 @@ mod tests {
     fn test_loopback_and_port_filtering() {
         let _guard = TEST_MUTEX.lock().unwrap();
         // Default: loopback is false, ignore port 31337
-        configure(true, &[31337], false);
+        configure(true, &[31337], false, &[]);
         let _ = drain_network_events();
 
         // 1. Loopback packet should be ignored
@@ -399,9 +443,66 @@ mod tests {
     }
 
     #[test]
+    fn test_ignore_hosts_filtering() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ignored_hosts = vec!["api.helldivers.com".to_string(), "telemetry.arrowhead.com".to_string()];
+        configure(true, &[], false, &ignored_hosts);
+        let _ = drain_network_events();
+
+        // 1. Dropped by URL
+        record_packet(
+            PacketKind::Http,
+            PacketDirection::Outbound,
+            None,
+            None,
+            Some("https://api.helldivers.com/v1/auth".into()),
+            None,
+            b"token=123",
+        );
+        assert!(drain_network_events().is_empty());
+
+        // 2. Dropped by Header
+        record_packet(
+            PacketKind::Http,
+            PacketDirection::Outbound,
+            None,
+            None,
+            Some("/v2/telemetry".into()),
+            Some("Host: telemetry.arrowhead.com\r\n".into()),
+            b"data",
+        );
+        assert!(drain_network_events().is_empty());
+
+        // 3. Dropped by HTTP request line in payload
+        record_packet(
+            PacketKind::Tcp,
+            PacketDirection::Outbound,
+            Some("192.168.1.10:50000".into()),
+            Some("104.18.25.10:443".into()),
+            None,
+            None,
+            b"POST /api HTTP/1.1\r\nHost: api.helldivers.com\r\n\r\n",
+        );
+        assert!(drain_network_events().is_empty());
+
+        // 4. Allowed if host does not match
+        record_packet(
+            PacketKind::Http,
+            PacketDirection::Outbound,
+            None,
+            None,
+            Some("https://game-netcode.helldivers.com/ping".into()),
+            None,
+            b"ping",
+        );
+        let events = drain_network_events();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
     fn test_http_packet_recording() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        configure(true, &[], false);
+        configure(true, &[], false, &[]);
         let _ = drain_network_events();
         record_packet(
             PacketKind::Http,
@@ -429,7 +530,7 @@ mod tests {
     #[test]
     fn test_staged_buffer_and_fast_ack() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        configure(true, &[], false);
+        configure(true, &[], false, &[]);
         let _ = drain_network_events();
 
         // Create a 1024-byte payload (> 256 bytes)

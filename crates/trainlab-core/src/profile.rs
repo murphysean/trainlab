@@ -48,6 +48,9 @@ pub struct GameProfile {
     /// Optional render & overlay configuration for the injected DLL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<RenderConfig>,
+    /// Optional network traffic hook and filtering configuration for the game.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<ProfileNetworkConfig>,
     /// The cheats that show up in the GUI Cheats panel.
     #[serde(default)]
     pub cheats: Vec<ProfileCheat>,
@@ -65,6 +68,32 @@ pub struct RenderConfig {
     /// Whether to poll XInput for controller shortcuts (default true).
     #[serde(default = "default_true")]
     pub xinput_hooks: bool,
+}
+
+/// Optional network hook and packet filtering configuration in game profile YAML.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProfileNetworkConfig {
+    /// Master toggle for network capture for this game profile (defaults to None, inheriting global setting).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Whether to hook Winsock (raw TCP/UDP). Default: None (inherits global).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winsock: Option<bool>,
+    /// Whether to hook WinHTTP REST API. Default: None (inherits global).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winhttp: Option<bool>,
+    /// Whether to hook SChannel TLS plaintext. Default: None (inherits global).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schannel: Option<bool>,
+    /// Ports to ignore from capture (e.g. [443] to drop socket-level encrypted TLS).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_ports: Vec<u16>,
+    /// Hostnames, domains, or URL substrings to ignore from capture (e.g. ["api.helldivers.com", "telemetry.arrowhead.com"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_hosts: Vec<String>,
+    /// Whether to capture loopback (127.0.0.1 / localhost) traffic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_loopback: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -561,6 +590,7 @@ mod tests {
             structs: vec![],
             init_commands: None,
             render: None,
+            network: None,
             cheats: vec![ProfileCheat {
                 id: "wood".into(),
                 label: "Wood".into(),
@@ -610,6 +640,7 @@ mod tests {
             structs: vec![],
             init_commands: None,
             render: None,
+            network: None,
             cheats: vec![],
         };
         let profiles = vec![("Unrailed2.yaml".to_string(), p)];
@@ -634,6 +665,7 @@ mod tests {
             structs: vec![],
             init_commands: None,
             render: None,
+            network: None,
             cheats: vec![ProfileCheat {
                 id: "mining_speed".into(),
                 label: "Mining Speedhack (4x)".into(),
@@ -882,5 +914,34 @@ cheats: []
             assert!(profile.init_commands.is_some());
             assert!(!profile.cheats.is_empty());
         }
+    }
+
+    #[test]
+    fn test_profile_network_config_roundtrips_yaml() {
+        let yaml = r#"
+schema: trainlab-profile/v1
+game: helldivers.exe
+name: Helldivers Network Filter Test
+inject_dll: true
+network:
+  enabled: true
+  ignore_ports: [443]
+  ignore_hosts:
+    - api.helldivers.com
+    - telemetry.arrowhead.com
+  capture_loopback: false
+cheats: []
+"#;
+        let profile = GameProfile::from_yaml(yaml).expect("parse network config");
+        assert!(profile.network.is_some());
+        let net = profile.network.as_ref().unwrap();
+        assert_eq!(net.enabled, Some(true));
+        assert_eq!(net.ignore_ports, vec![443]);
+        assert_eq!(net.ignore_hosts, vec!["api.helldivers.com", "telemetry.arrowhead.com"]);
+        assert_eq!(net.capture_loopback, Some(false));
+
+        let serialized = profile.to_yaml().expect("serialize");
+        let back = GameProfile::from_yaml(&serialized).expect("parse serialized");
+        assert_eq!(back.network.unwrap().ignore_hosts.len(), 2);
     }
 }

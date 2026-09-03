@@ -42,6 +42,7 @@ inject_features:
     schannel: true             # SChannel TLS/HTTPS plaintext detours (EncryptMessage/DecryptMessage)
     capture_loopback: false     # Set to true to include 127.0.0.1 loopback traffic
     ignore_ports: []           # Additional ports to filter out (trainer IPC & MCP ignored automatically)
+    ignore_hosts: []           # Hostnames, domains, or substrings to drop (e.g. ["api.helldivers.com", "telemetry.arrowhead.com"])
   memory:
     frame_pinning: true        # In-process frame-cadence value pinning in DXGI Present hook
     watchpoints: true          # Page guard / hardware debug register memory writes

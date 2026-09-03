@@ -463,6 +463,8 @@ pub struct SessionState {
     init_commands: Option<Vec<crate::profile::ProfileCommand>>,
     /// Active render configuration associated with the session.
     profile_render: Option<crate::profile::RenderConfig>,
+    /// Active network configuration associated with the session profile.
+    profile_network: Option<crate::profile::ProfileNetworkConfig>,
     /// Pending window command requested remotely via REST API or MCP ("show" or "hide").
     pending_window_cmd: Option<String>,
     /// Active dynamic memory pins maintained by the session.
@@ -940,6 +942,7 @@ impl SessionState {
         self.setup_steps = profile.setup.clone();
         self.init_commands = profile.init_commands.clone();
         self.profile_render = profile.render.clone();
+        self.profile_network = profile.network.clone();
     }
 
     /// Access active setup steps.
@@ -973,6 +976,9 @@ impl SessionState {
     }
     pub fn profile_render(&self) -> Option<&crate::profile::RenderConfig> {
         self.profile_render.as_ref()
+    }
+    pub fn profile_network(&self) -> Option<&crate::profile::ProfileNetworkConfig> {
+        self.profile_network.as_ref()
     }
 
     pub fn new() -> Self {

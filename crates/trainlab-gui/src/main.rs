@@ -2873,26 +2873,28 @@ impl TrainlabApp {
                 if let Ok(mut s) = self.session.lock() {
                     s.set_network_hooks_enabled(enabled);
                 }
-                let (dll_port, mcp_port) = {
+                let (dll_port, mcp_port, ignore_hosts) = {
                     let cfg = config::AppConfig::load();
-                    (cfg.inject.dll_port, cfg.server.mcp_port)
+                    (cfg.inject.dll_port, cfg.server.mcp_port, cfg.inject_features.network.ignore_hosts)
                 };
                 let _ = self.request(&Request::ConfigureNetworkHook {
                     enabled,
                     ignore_ports: vec![dll_port, mcp_port],
                     capture_loopback: self.net_capture_loopback,
+                    ignore_hosts: ignore_hosts.clone(),
                 });
             }
 
             if ui.checkbox(&mut self.net_capture_loopback, "Capture Loopback (127.0.0.1)").changed() {
-                let (dll_port, mcp_port) = {
+                let (dll_port, mcp_port, ignore_hosts) = {
                     let cfg = config::AppConfig::load();
-                    (cfg.inject.dll_port, cfg.server.mcp_port)
+                    (cfg.inject.dll_port, cfg.server.mcp_port, cfg.inject_features.network.ignore_hosts)
                 };
                 let _ = self.request(&Request::ConfigureNetworkHook {
                     enabled: hooks_enabled,
                     ignore_ports: vec![dll_port, mcp_port],
                     capture_loopback: self.net_capture_loopback,
+                    ignore_hosts,
                 });
             }
 

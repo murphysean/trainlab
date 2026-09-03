@@ -577,8 +577,8 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
         Request::ClearNetworkLog => {
             Response::NetworkLogCleared { cleared: 0 }
         }
-        Request::ConfigureNetworkHook { enabled, ignore_ports, capture_loopback } => {
-            network::configure(enabled, &ignore_ports, capture_loopback);
+        Request::ConfigureNetworkHook { enabled, ignore_ports, capture_loopback, ignore_hosts } => {
+            network::configure(enabled, &ignore_ports, capture_loopback, &ignore_hosts);
             Response::NetworkHookConfigured { enabled }
         }
         Request::InitializeSession { features } => {
@@ -597,6 +597,7 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 features.network.winsock || features.network.winhttp || features.network.schannel,
                 &features.network.ignore_ports,
                 features.network.capture_loopback,
+                &features.network.ignore_hosts,
             );
 
             // 3. Collect active advertised capabilities

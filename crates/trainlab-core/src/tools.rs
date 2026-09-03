@@ -2522,11 +2522,12 @@ pub fn execute_save_profile(
         let date = s.profile_date().map(|d| d.to_string());
         let init_commands = s.init_commands().map(|c| c.to_vec());
         let profile_render = s.profile_render().cloned();
+        let profile_network = s.profile_network().cloned();
 
-        (game, profile_cheats, setup_steps, (profile_name, profile_version, game_version, author, date, init_commands, profile_render))
+        (game, profile_cheats, setup_steps, (profile_name, profile_version, game_version, author, date, init_commands, profile_render, profile_network))
     };
 
-    let (name, version, game_version, author, date, init_commands, render) = profile_meta;
+    let (name, version, game_version, author, date, init_commands, render, network) = profile_meta;
 
     let profile = GameProfile {
         schema: GameProfile::SCHEMA_V1.into(),
@@ -2541,6 +2542,7 @@ pub fn execute_save_profile(
         structs: vec![],
         init_commands,
         render,
+        network,
         cheats: profile_cheats.clone(),
     };
 
