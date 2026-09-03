@@ -454,6 +454,9 @@ pub struct NetworkFeatures {
     /// SChannel TLS/HTTPS plaintext hook (`EncryptMessage`, `DecryptMessage`). Default: true.
     #[serde(default = "default_true")]
     pub schannel: bool,
+    /// Steamworks P2P & networking hook (`steam_api64.dll`). Default: true.
+    #[serde(default = "default_true")]
+    pub steamworks: bool,
     /// Whether to capture loopback (127.0.0.1 / localhost) traffic. Default: false.
     #[serde(default = "default_false")]
     pub capture_loopback: bool,
@@ -471,6 +474,7 @@ impl Default for NetworkFeatures {
             winsock: true,
             winhttp: true,
             schannel: true,
+            steamworks: true,
             capture_loopback: false,
             ignore_ports: Vec::new(),
             ignore_hosts: Vec::new(),
@@ -659,6 +663,7 @@ pub enum PacketKind {
     Tcp,
     Udp,
     Http,
+    Steam,
 }
 
 impl PacketKind {
@@ -667,6 +672,7 @@ impl PacketKind {
             PacketKind::Tcp => "tcp",
             PacketKind::Udp => "udp",
             PacketKind::Http => "http",
+            PacketKind::Steam => "steam",
         }
     }
 }

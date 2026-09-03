@@ -40,6 +40,7 @@ inject_features:
     winsock: true              # Winsock send/recv/sendto/recvfrom detours
     winhttp: true              # WinHTTP REST API detours
     schannel: true             # SChannel TLS/HTTPS plaintext detours (EncryptMessage/DecryptMessage)
+    steamworks: true           # Steamworks P2P networking detours (steam_api64.dll)
     capture_loopback: false     # Set to true to include 127.0.0.1 loopback traffic
     ignore_ports: []           # Additional ports to filter out (trainer IPC & MCP ignored automatically)
     ignore_hosts: []           # Hostnames, domains, or substrings to drop (e.g. ["api.helldivers.com", "telemetry.arrowhead.com"])

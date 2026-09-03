@@ -3214,6 +3214,7 @@ impl TrainlabMcpServer {
             Some("tcp") => Some(trainlab_core::protocol::PacketKind::Tcp),
             Some("udp") => Some(trainlab_core::protocol::PacketKind::Udp),
             Some("http") => Some(trainlab_core::protocol::PacketKind::Http),
+            Some("steam") => Some(trainlab_core::protocol::PacketKind::Steam),
             _ => None,
         };
 
@@ -3286,6 +3287,7 @@ impl TrainlabMcpServer {
             Some("tcp") => Some(trainlab_core::protocol::PacketKind::Tcp),
             Some("udp") => Some(trainlab_core::protocol::PacketKind::Udp),
             Some("http") => Some(trainlab_core::protocol::PacketKind::Http),
+            Some("steam") => Some(trainlab_core::protocol::PacketKind::Steam),
             _ => None,
         };
 

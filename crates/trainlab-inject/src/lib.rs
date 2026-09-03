@@ -586,15 +586,16 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             render::configure(features.display.overlay, features.input.wndproc, features.input.xinput);
 
             // 2. Network Hooks
-            if features.network.winsock || features.network.winhttp || features.network.schannel {
+            if features.network.winsock || features.network.winhttp || features.network.schannel || features.network.steamworks {
                 network::init_with_config(
                     features.network.winsock,
                     features.network.winhttp,
                     features.network.schannel,
+                    features.network.steamworks,
                 );
             }
             network::configure(
-                features.network.winsock || features.network.winhttp || features.network.schannel,
+                features.network.winsock || features.network.winhttp || features.network.schannel || features.network.steamworks,
                 &features.network.ignore_ports,
                 features.network.capture_loopback,
                 &features.network.ignore_hosts,

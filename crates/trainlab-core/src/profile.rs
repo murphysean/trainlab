@@ -85,6 +85,9 @@ pub struct ProfileNetworkConfig {
     /// Whether to hook SChannel TLS plaintext. Default: None (inherits global).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schannel: Option<bool>,
+    /// Whether to hook Steamworks P2P & networking. Default: None (inherits global).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steamworks: Option<bool>,
     /// Ports to ignore from capture (e.g. [443] to drop socket-level encrypted TLS).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_ports: Vec<u16>,

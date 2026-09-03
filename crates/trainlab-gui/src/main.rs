@@ -2917,6 +2917,7 @@ impl TrainlabApp {
                     ui.selectable_value(&mut self.net_proto_filter, "TCP".into(), "TCP");
                     ui.selectable_value(&mut self.net_proto_filter, "UDP".into(), "UDP");
                     ui.selectable_value(&mut self.net_proto_filter, "HTTP".into(), "HTTP");
+                    ui.selectable_value(&mut self.net_proto_filter, "Steam".into(), "Steam");
                 });
 
             ui.label("Filter:");
@@ -2929,6 +2930,7 @@ impl TrainlabApp {
             "TCP" => Some(trainlab_core::protocol::PacketKind::Tcp),
             "UDP" => Some(trainlab_core::protocol::PacketKind::Udp),
             "HTTP" => Some(trainlab_core::protocol::PacketKind::Http),
+            "Steam" => Some(trainlab_core::protocol::PacketKind::Steam),
             _ => None,
         };
         let filter_str = self.net_endpoint_filter.trim();

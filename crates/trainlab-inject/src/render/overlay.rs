@@ -64,7 +64,7 @@ fn get_active_tab_item_count() -> usize {
     let tab = ACTIVE_TAB.load(Ordering::Relaxed);
     let cheats = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
     let categories = get_categories(&cheats);
-    let total_tabs = categories.len() + 1; // + 1 for Window Controls tab
+    let _total_tabs = categories.len() + 1; // + 1 for Window Controls tab
 
     if (tab as usize) < categories.len() {
         let cat = &categories[tab as usize];
@@ -138,6 +138,18 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
             move_right = true;
             STICK_TRIGGERED_X.store(true, Ordering::Relaxed);
         }
+    }
+
+    if move_left {
+        let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
+        let new_tab = if cur_tab == 0 { total_tabs.saturating_sub(1) } else { cur_tab - 1 };
+        ACTIVE_TAB.store(new_tab, Ordering::Relaxed);
+        SELECTED_INDEX.store(0, Ordering::Relaxed);
+    } else if move_right {
+        let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
+        let new_tab = (cur_tab + 1) % total_tabs.max(1);
+        ACTIVE_TAB.store(new_tab, Ordering::Relaxed);
+        SELECTED_INDEX.store(0, Ordering::Relaxed);
     }
 
     let item_count = get_active_tab_item_count() as u64;

@@ -13,6 +13,8 @@ pub mod winsock;
 pub mod winhttp;
 #[cfg(windows)]
 pub mod schannel;
+#[cfg(windows)]
+pub mod steamworks;
 
 /// Global network hook configuration and captured packet ring buffer.
 static NETWORK_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -282,7 +284,7 @@ pub fn drain_network_events() -> Vec<Event> {
 }
 
 /// Initialize network traffic hooks if supported on the platform with granular flags.
-pub fn init_with_config(winsock: bool, winhttp: bool, schannel: bool) {
+pub fn init_with_config(winsock: bool, winhttp: bool, schannel: bool, steamworks: bool) {
     #[cfg(windows)]
     {
         std::thread::Builder::new()
@@ -297,19 +299,22 @@ pub fn init_with_config(winsock: bool, winhttp: bool, schannel: bool) {
                 if schannel {
                     schannel::init_schannel_hooks();
                 }
+                if steamworks {
+                    steamworks::init_steamworks_hooks();
+                }
             })
             .ok();
     }
     #[cfg(not(windows))]
     {
-        let _ = (winsock, winhttp, schannel);
+        let _ = (winsock, winhttp, schannel, steamworks);
         tracing::info!("network traffic hooking is not supported on non-Windows platforms (stubbed)");
     }
 }
 
 /// Initialize network traffic hooks with all enabled (legacy/default).
 pub fn init() {
-    init_with_config(true, true, true);
+    init_with_config(true, true, true, true);
 }
 
 /// Probe loaded network modules in the process.
@@ -568,6 +573,35 @@ mod tests {
         {
             let lock = STAGED_PACKETS.lock().unwrap();
             assert!(!lock.contains_key(&pkt_id));
+        }
+    }
+
+    #[test]
+    fn test_steam_packet_recording() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        configure(true, &[], false, &[]);
+        let _ = drain_network_events();
+
+        record_packet(
+            PacketKind::Steam,
+            PacketDirection::Outbound,
+            Some("steam:local".into()),
+            Some("steam:76561198012345678".into()),
+            Some("P2P Send (ch:0, type:2)".into()),
+            None,
+            b"PLAYER_POSITION_UPDATE",
+        );
+
+        let events = drain_network_events();
+        assert_eq!(events.len(), 1);
+        if let Event::NetworkPacket(p) = &events[0] {
+            assert_eq!(p.kind, PacketKind::Steam);
+            assert_eq!(p.direction, PacketDirection::Outbound);
+            assert_eq!(p.remote_endpoint.as_deref(), Some("steam:76561198012345678"));
+            assert_eq!(p.url.as_deref(), Some("P2P Send (ch:0, type:2)"));
+            assert_eq!(&p.payload_preview, b"PLAYER_POSITION_UPDATE");
+        } else {
+            panic!("expected NetworkPacket event");
         }
     }
 }
