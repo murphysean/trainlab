@@ -1770,6 +1770,7 @@ mod tests {
             payload_len: 32,
             payload_preview: vec![1, 2, 3],
             artifact_file: None,
+            staged_ptr: None,
         };
 
         let p2 = NetworkPacketDto {
@@ -1784,6 +1785,7 @@ mod tests {
             payload_len: 128,
             payload_preview: b"{\"token\":\"xyz\"}".to_vec(),
             artifact_file: None,
+            staged_ptr: None,
         };
 
         let id1 = s.record_network_packet(p1);

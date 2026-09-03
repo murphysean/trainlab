@@ -5577,6 +5577,7 @@ mod tests {
                 payload_len: 26,
                 payload_preview: b"NETWORK_PAYLOAD_TEST_BYTES".to_vec(),
                 artifact_file: Some("captures/packet_9999.bin".into()),
+                staged_ptr: None,
             });
         }
 
@@ -5627,6 +5628,7 @@ mod tests {
                 payload_len: 18,
                 payload_preview: b"GET / HTTP/1.1\r\n\r\n".to_vec(),
                 artifact_file: Some("captures/packet_101.bin".into()),
+                staged_ptr: None,
             });
         }
 

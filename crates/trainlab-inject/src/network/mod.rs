@@ -23,6 +23,23 @@ static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Maximum packets retained in the in-memory push queue.
 const MAX_QUEUED_PACKETS: usize = 2000;
 
+/// Maximum staged large packet buffers held simultaneously in game process memory.
+const MAX_STAGED_BUFFERS: usize = 128;
+
+/// Staged large payload buffer awaiting out-of-band external memory read by GUI.
+struct StagedBuffer {
+    ptr: *mut u8,
+    layout: std::alloc::Layout,
+    created_at: std::time::Instant,
+}
+
+// Safety: The buffer pointer is allocated on the system heap and exclusively managed by this mutex.
+unsafe impl Send for StagedBuffer {}
+unsafe impl Sync for StagedBuffer {}
+
+/// Out-of-band staged packet buffer pool (packet_id -> StagedBuffer).
+static STAGED_PACKETS: Mutex<std::collections::BTreeMap<u64, StagedBuffer>> = Mutex::new(std::collections::BTreeMap::new());
+
 /// Outbound queue of captured network packet events awaiting transmission over IPC.
 static CAPTURED_PACKETS: Mutex<Vec<NetworkPacketDto>> = Mutex::new(Vec::new());
 
@@ -118,6 +135,36 @@ pub fn record_packet(
     let preview_len = payload.len().min(256);
     let payload_preview = payload[..preview_len].to_vec();
 
+    // Out-of-band staging: If payload exceeds preview threshold, allocate a staging buffer in game process memory
+    let mut staged_ptr = None;
+    if payload.len() > 256 {
+        if let Ok(layout) = std::alloc::Layout::from_size_align(payload.len(), 8) {
+            unsafe {
+                let ptr = std::alloc::alloc(layout);
+                if !ptr.is_null() {
+                    std::ptr::copy_nonoverlapping(payload.as_ptr(), ptr, payload.len());
+                    staged_ptr = Some(ptr as u64);
+
+                    if let Ok(mut staged) = STAGED_PACKETS.lock() {
+                        // Keep pool bounded: evict oldest if at capacity limit
+                        if staged.len() >= MAX_STAGED_BUFFERS {
+                            if let Some((&oldest_id, _)) = staged.iter().next() {
+                                if let Some(evicted) = staged.remove(&oldest_id) {
+                                    std::alloc::dealloc(evicted.ptr, evicted.layout);
+                                }
+                            }
+                        }
+                        staged.insert(id, StagedBuffer {
+                            ptr,
+                            layout,
+                            created_at: std::time::Instant::now(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     let dto = NetworkPacketDto {
         id,
         timestamp_ms: now_ms,
@@ -130,6 +177,7 @@ pub fn record_packet(
         payload_len: payload.len(),
         payload_preview,
         artifact_file: None,
+        staged_ptr,
     };
 
     if let Ok(mut lock) = CAPTURED_PACKETS.lock() {
@@ -140,8 +188,42 @@ pub fn record_packet(
     }
 }
 
+/// Acknowledge packet receipt from GUI, freeing any staged payload buffer immediately.
+pub fn acknowledge_packet(id: u64) {
+    if let Ok(mut staged) = STAGED_PACKETS.lock() {
+        if let Some(buf) = staged.remove(&id) {
+            unsafe {
+                std::alloc::dealloc(buf.ptr, buf.layout);
+            }
+        }
+    }
+}
+
+/// Periodic cleanup of expired staging buffers (safety net TTL, default ~5 seconds).
+pub fn cleanup_expired_staged_buffers() {
+    let now = std::time::Instant::now();
+    let ttl = std::time::Duration::from_secs(5);
+
+    if let Ok(mut staged) = STAGED_PACKETS.lock() {
+        let expired_ids: Vec<u64> = staged
+            .iter()
+            .filter(|(_, b)| now.duration_since(b.created_at) > ttl)
+            .map(|(&id, _)| id)
+            .collect();
+
+        for id in expired_ids {
+            if let Some(buf) = staged.remove(&id) {
+                unsafe {
+                    std::alloc::dealloc(buf.ptr, buf.layout);
+                }
+            }
+        }
+    }
+}
+
 /// Drain captured packet events to send over IPC.
 pub fn drain_network_events() -> Vec<Event> {
+    cleanup_expired_staged_buffers();
     if let Ok(mut lock) = CAPTURED_PACKETS.lock() {
         if lock.is_empty() {
             Vec::new()
@@ -341,6 +423,50 @@ mod tests {
             assert_eq!(&p.payload_preview, br#"{"username":"player1"}"#);
         } else {
             panic!("expected NetworkPacket event");
+        }
+    }
+
+    #[test]
+    fn test_staged_buffer_and_fast_ack() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        configure(true, &[], false);
+        let _ = drain_network_events();
+
+        // Create a 1024-byte payload (> 256 bytes)
+        let large_payload = vec![0x42u8; 1024];
+        record_packet(
+            PacketKind::Tcp,
+            PacketDirection::Inbound,
+            Some("192.168.1.50:8080".into()),
+            Some("192.168.1.100:54321".into()),
+            None,
+            None,
+            &large_payload,
+        );
+
+        let events = drain_network_events();
+        assert_eq!(events.len(), 1);
+        let pkt_id = match &events[0] {
+            Event::NetworkPacket(p) => {
+                assert_eq!(p.payload_len, 1024);
+                assert_eq!(p.payload_preview.len(), 256);
+                assert!(p.staged_ptr.is_some());
+                p.id
+            }
+            _ => panic!("expected NetworkPacket event"),
+        };
+
+        // Staged buffer should exist in STAGED_PACKETS
+        {
+            let lock = STAGED_PACKETS.lock().unwrap();
+            assert!(lock.contains_key(&pkt_id));
+        }
+
+        // Send Fast-ACK -> buffer freed immediately
+        acknowledge_packet(pkt_id);
+        {
+            let lock = STAGED_PACKETS.lock().unwrap();
+            assert!(!lock.contains_key(&pkt_id));
         }
     }
 }

@@ -1784,6 +1784,36 @@ fn main() -> eframe::Result<()> {
                                     };
                                     controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::SyncCheats { cheats: cheats_dto });
                                 }
+                                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::NetworkPacket(pkt)) => {
+                                    let mut pkt = pkt.clone();
+                                    let id = pkt.id;
+                                    let staged_ptr = pkt.staged_ptr;
+                                    let payload_len = pkt.payload_len;
+
+                                    if let Some(ptr) = staged_ptr {
+                                        // Out-of-band shared memory retrieval
+                                        if let Ok(proc) = crate::mcp::game_process(&event_session) {
+                                            use trainlab_core::memory::ProcessMemory;
+                                            if let Ok(full_payload) = proc.read(ptr, payload_len) {
+                                                let _ = std::fs::create_dir_all("captures");
+                                                let filename = format!("captures/packet_{id}.bin");
+                                                if std::fs::write(&filename, full_payload).is_ok() {
+                                                    pkt.artifact_file = Some(filename);
+                                                }
+                                            }
+                                        }
+                                        // Fast-ACK: tell the injected DLL to free the staging buffer immediately
+                                        controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::AcknowledgePacket {
+                                            id,
+                                            discard: false,
+                                        });
+                                    }
+
+                                    // Store updated packet in session ring buffer
+                                    if let Ok(mut s) = event_session.lock() {
+                                        s.record_network_packet(pkt);
+                                    }
+                                }
                                 _ => {}
                             }
 

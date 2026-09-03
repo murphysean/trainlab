@@ -336,6 +336,9 @@ pub fn apply_event(event: Event) {
         Event::OverlayVisibilityChanged { visible } => {
             super::set_overlay_visible(visible);
         }
+        Event::AcknowledgePacket { id, .. } => {
+            crate::network::acknowledge_packet(id);
+        }
         _ => {}
     }
 }

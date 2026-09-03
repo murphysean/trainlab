@@ -45,6 +45,8 @@ pub enum Event {
     OverlayReady,
     /// Real-time captured network packet event from Winsock/WinHTTP hooks.
     NetworkPacket(NetworkPacketDto),
+    /// Acknowledge packet receipt and notify DLL to free any staged buffer in game memory.
+    AcknowledgePacket { id: u64, discard: bool },
 }
 
 /// Asynchronous push notification types emitted by the injected DLL.
@@ -694,6 +696,9 @@ pub struct NetworkPacketDto {
     pub payload_preview: Vec<u8>,
     /// Optional relative path or URL to full dumped payload if offloaded to disk.
     pub artifact_file: Option<String>,
+    /// Address in target game memory where full un-truncated payload is staged (if > 256 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_ptr: Option<u64>,
 }
 
 #[cfg(test)]
@@ -714,6 +719,7 @@ mod tests {
             payload_len: 12,
             payload_preview: vec![0xde, 0xad, 0xbe, 0xef],
             artifact_file: Some("captures/packet_42.bin".into()),
+            staged_ptr: Some(0x7ff70000),
         };
 
         let msg = Message::Event(Event::NetworkPacket(packet.clone()));
