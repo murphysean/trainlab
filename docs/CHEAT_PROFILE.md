@@ -133,6 +133,29 @@ cheats:
     payload: "c3"                # shellcode payload (hex), e.g. 'ret'
     mechanism: cave              # hook the damage handler, re-apply each tick
     note: "Override the damage handler each tick so the player never takes damage"
+
+  # A button cheat (instant macro) executing dynamic read-modify-write field copies.
+  - id: buff_selected_ship
+    label: "Buff Selected Ship"
+    kind: button
+    commands:
+      # Copy max hull + cripple into current hull:
+      - type: write_copy
+        src: "sel_ship_entity+0xad0"        # hull_max
+        dst: "sel_ship_entity+0xacc"        # hull_cur_raw
+        value_type: f32
+        addend_ref: "sel_ship_entity+0xad4" # hull_cripple
+        op: max                             # top-up only: dst = max(dst, src + addend)
+      # Copy max armor to current armor:
+      - type: write_copy
+        src: "sel_ship_entity+0xadc"
+        dst: "sel_ship_entity+0xad8"
+        value_type: f32
+      # Copy max shields to current shields:
+      - type: write_copy
+        src: "sel_ship_entity+0xae8"
+        dst: "sel_ship_entity+0xae4"
+        value_type: f32
 ```
 
 ## 4. How the pieces map to trainlab's API

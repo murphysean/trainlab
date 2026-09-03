@@ -371,6 +371,27 @@ pub enum ProfileCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// Copy/arithmetic write from a source address/expression to a destination address.
+    /// Supports `dst = src` or `dst = src + addend_ref`, and `op: max` (top-up only).
+    #[serde(alias = "copy")]
+    WriteCopy {
+        /// Source address or expression to read from.
+        src: String,
+        /// Destination address or expression to write to.
+        dst: String,
+        /// Value type (e.g. "f32", "i32", "u32", "f64", "i64", "u64", "ptr").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value_type: Option<String>,
+        /// Optional second read address/expression added to src: `dst = src + addend_ref`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        addend_ref: Option<String>,
+        /// Optional operation mode ("assign" (default) or "max" where dst = max(dst, computed)).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        op: Option<String>,
+        /// Optional note / comment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
 }
 
 fn default_hook_kind() -> String {
@@ -709,6 +730,61 @@ cheats: []
         let serialized = profile.to_yaml().expect("serialize");
         let back = GameProfile::from_yaml(&serialized).expect("roundtrip parse");
         assert_eq!(back.name, "Test InstallCave ASM");
+    }
+
+    #[test]
+    fn test_write_copy_command_roundtrips_yaml() {
+        let yaml = r#"
+schema: trainlab-profile/v1
+game: sins2.exe
+name: Test Sins2 WriteCopy
+cheats:
+  - id: buff_ship
+    label: "Buff Selected Ship"
+    kind: button
+    commands:
+      - type: write_copy
+        src: "sel_ship_entity+0xad0"
+        dst: "sel_ship_entity+0xacc"
+        value_type: f32
+        addend_ref: "sel_ship_entity+0xad4"
+        op: max
+        note: "hull = max(cur, max + cripple)"
+      - type: copy
+        src: "sel_ship_entity+0xadc"
+        dst: "sel_ship_entity+0xad8"
+        value_type: f32
+        note: "armor_cur = armor_max"
+"#;
+        let profile = GameProfile::from_yaml(yaml).expect("parse write_copy commands");
+        assert_eq!(profile.cheats.len(), 1);
+        let cmds = profile.cheats[0].commands.as_ref().expect("commands");
+        assert_eq!(cmds.len(), 2);
+        match &cmds[0] {
+            ProfileCommand::WriteCopy { src, dst, value_type, addend_ref, op, note } => {
+                assert_eq!(src, "sel_ship_entity+0xad0");
+                assert_eq!(dst, "sel_ship_entity+0xacc");
+                assert_eq!(value_type.as_deref(), Some("f32"));
+                assert_eq!(addend_ref.as_deref(), Some("sel_ship_entity+0xad4"));
+                assert_eq!(op.as_deref(), Some("max"));
+                assert_eq!(note.as_deref(), Some("hull = max(cur, max + cripple)"));
+            }
+            _ => panic!("expected WriteCopy variant for cmd 0"),
+        }
+        match &cmds[1] {
+            ProfileCommand::WriteCopy { src, dst, value_type, addend_ref, op, .. } => {
+                assert_eq!(src, "sel_ship_entity+0xadc");
+                assert_eq!(dst, "sel_ship_entity+0xad8");
+                assert_eq!(value_type.as_deref(), Some("f32"));
+                assert_eq!(*addend_ref, None);
+                assert_eq!(*op, None);
+            }
+            _ => panic!("expected WriteCopy variant for cmd 1"),
+        }
+
+        let serialized = profile.to_yaml().expect("serialize");
+        let back = GameProfile::from_yaml(&serialized).expect("roundtrip parse");
+        assert_eq!(back.cheats[0].commands.as_ref().unwrap().len(), 2);
     }
 
     #[test]

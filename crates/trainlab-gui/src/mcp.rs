@@ -4293,6 +4293,196 @@ pub(crate) fn execute_profile_commands(
                     s.log_activity("PROFILE", format!("cmd {idx}: wait {ms}ms complete"));
                 }
             }
+            crate::profile::ProfileCommand::WriteCopy { src, dst, value_type, addend_ref, op, .. } => {
+                let vt_str = value_type.as_deref().unwrap_or("f32");
+                let vt = parse_value_type(vt_str)
+                    .map_err(|e| format!("cmd {idx}: invalid value type '{vt_str}': {e}"))?;
+
+                let src_addr = parse_addr_expr(session, src)
+                    .map_err(|e| format!("cmd {idx}: bad src '{src}': {e}"))?;
+                if src_addr == 0 {
+                    return Err(format!("cmd {idx}: src '{src}' resolved to 0x0; sequence aborted"));
+                }
+
+                let dst_addr = parse_addr_expr(session, dst)
+                    .map_err(|e| format!("cmd {idx}: bad dst '{dst}': {e}"))?;
+                if dst_addr == 0 {
+                    return Err(format!("cmd {idx}: dst '{dst}' resolved to 0x0; sequence aborted"));
+                }
+
+                let size = vt.size();
+
+                // Read src value
+                let src_resp = crate::controller::request(
+                    session,
+                    &trainlab_core::protocol::Request::Read { address: src_addr, len: size },
+                ).map_err(|e| format!("cmd {idx}: read src at {src} ({src_addr:#x}) failed: {e}"))?;
+
+                let src_bytes = match src_resp {
+                    trainlab_core::protocol::Response::Read { data } if data.len() == size => data,
+                    trainlab_core::protocol::Response::Error { message } => {
+                        return Err(format!("cmd {idx}: read src failed at {src} ({src_addr:#x}): {message}"));
+                    }
+                    _ => return Err(format!("cmd {idx}: short read on src at {src} ({src_addr:#x})")),
+                };
+
+                // Compute final bytes, applying optional addend
+                let computed_bytes = if let Some(add_expr) = addend_ref {
+                    let add_addr = parse_addr_expr(session, add_expr)
+                        .map_err(|e| format!("cmd {idx}: bad addend_ref '{add_expr}': {e}"))?;
+                    if add_addr == 0 {
+                        return Err(format!("cmd {idx}: addend_ref '{add_expr}' resolved to 0x0; sequence aborted"));
+                    }
+
+                    let add_resp = crate::controller::request(
+                        session,
+                        &trainlab_core::protocol::Request::Read { address: add_addr, len: size },
+                    ).map_err(|e| format!("cmd {idx}: read addend at {add_expr} ({add_addr:#x}) failed: {e}"))?;
+
+                    let add_bytes = match add_resp {
+                        trainlab_core::protocol::Response::Read { data } if data.len() == size => data,
+                        trainlab_core::protocol::Response::Error { message } => {
+                            return Err(format!("cmd {idx}: read addend failed at {add_expr} ({add_addr:#x}): {message}"));
+                        }
+                        _ => return Err(format!("cmd {idx}: short read on addend at {add_expr} ({add_addr:#x})")),
+                    };
+
+                    match vt {
+                        trainlab_core::scan::ValueType::F32 => {
+                            let s = f32::from_le_bytes(src_bytes.as_slice().try_into().unwrap());
+                            let a = f32::from_le_bytes(add_bytes.as_slice().try_into().unwrap());
+                            (s + a).to_le_bytes().to_vec()
+                        }
+                        trainlab_core::scan::ValueType::F64 => {
+                            let s = f64::from_le_bytes(src_bytes.as_slice().try_into().unwrap());
+                            let a = f64::from_le_bytes(add_bytes.as_slice().try_into().unwrap());
+                            (s + a).to_le_bytes().to_vec()
+                        }
+                        trainlab_core::scan::ValueType::I32 => {
+                            let s = i32::from_le_bytes(src_bytes.as_slice().try_into().unwrap());
+                            let a = i32::from_le_bytes(add_bytes.as_slice().try_into().unwrap());
+                            s.wrapping_add(a).to_le_bytes().to_vec()
+                        }
+                        trainlab_core::scan::ValueType::U32 => {
+                            let s = u32::from_le_bytes(src_bytes.as_slice().try_into().unwrap());
+                            let a = u32::from_le_bytes(add_bytes.as_slice().try_into().unwrap());
+                            s.wrapping_add(a).to_le_bytes().to_vec()
+                        }
+                        trainlab_core::scan::ValueType::I64 => {
+                            let s = i64::from_le_bytes(src_bytes.as_slice().try_into().unwrap());
+                            let a = i64::from_le_bytes(add_bytes.as_slice().try_into().unwrap());
+                            s.wrapping_add(a).to_le_bytes().to_vec()
+                        }
+                        trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => {
+                            let s = u64::from_le_bytes(src_bytes.as_slice().try_into().unwrap());
+                            let a = u64::from_le_bytes(add_bytes.as_slice().try_into().unwrap());
+                            s.wrapping_add(a).to_le_bytes().to_vec()
+                        }
+                    }
+                } else {
+                    src_bytes
+                };
+
+                // Read destination if op == "max" or for undo snapshot
+                let dst_resp = crate::controller::request(
+                    session,
+                    &trainlab_core::protocol::Request::Read { address: dst_addr, len: size },
+                ).map_err(|e| format!("cmd {idx}: read dst at {dst} ({dst_addr:#x}) failed: {e}"))?;
+
+                let (dst_bytes, original) = match dst_resp {
+                    trainlab_core::protocol::Response::Read { data } if data.len() == size => {
+                        (Some(data.clone()), data)
+                    }
+                    _ => (None, Vec::new()),
+                };
+
+                // If op == "max", apply dst = max(dst, computed)
+                let bytes_to_write = if op.as_deref().unwrap_or("assign") == "max" {
+                    if let Some(cur) = dst_bytes {
+                        match vt {
+                            trainlab_core::scan::ValueType::F32 => {
+                                let c = f32::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let d = f32::from_le_bytes(cur.as_slice().try_into().unwrap());
+                                if d >= c {
+                                    if let Ok(mut s) = session.lock() {
+                                        s.log_activity("PROFILE", format!("cmd {idx}: write_copy max no-op (current {d} >= source {c})"));
+                                    }
+                                    return Ok(());
+                                }
+                                c.max(d).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::F64 => {
+                                let c = f64::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let d = f64::from_le_bytes(cur.as_slice().try_into().unwrap());
+                                if d >= c {
+                                    if let Ok(mut s) = session.lock() {
+                                        s.log_activity("PROFILE", format!("cmd {idx}: write_copy max no-op (current {d} >= source {c})"));
+                                    }
+                                    return Ok(());
+                                }
+                                c.max(d).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::I32 => {
+                                let c = i32::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let d = i32::from_le_bytes(cur.as_slice().try_into().unwrap());
+                                if d >= c {
+                                    return Ok(());
+                                }
+                                c.max(d).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::U32 => {
+                                let c = u32::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let d = u32::from_le_bytes(cur.as_slice().try_into().unwrap());
+                                if d >= c {
+                                    return Ok(());
+                                }
+                                c.max(d).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::I64 => {
+                                let c = i64::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let d = i64::from_le_bytes(cur.as_slice().try_into().unwrap());
+                                if d >= c {
+                                    return Ok(());
+                                }
+                                c.max(d).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => {
+                                let c = u64::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let d = u64::from_le_bytes(cur.as_slice().try_into().unwrap());
+                                if d >= c {
+                                    return Ok(());
+                                }
+                                c.max(d).to_le_bytes().to_vec()
+                            }
+                        }
+                    } else {
+                        computed_bytes
+                    }
+                } else {
+                    computed_bytes
+                };
+
+                let resp = crate::controller::request(
+                    session,
+                    &trainlab_core::protocol::Request::Write { address: dst_addr, data: bytes_to_write.clone() },
+                ).map_err(|e| format!("cmd {idx}: write to {dst} ({dst_addr:#x}) failed: {e}"))?;
+
+                if let trainlab_core::protocol::Response::Error { message } = resp {
+                    return Err(format!("cmd {idx}: write failed: {message}"));
+                }
+
+                let val_str = crate::format_value(&bytes_to_write, vt);
+                if let Ok(mut s) = session.lock() {
+                    if !original.is_empty() {
+                        s.record_undo(
+                            dst_addr,
+                            original,
+                            format!("profile write_copy {val_str} ({vt_str}) to {dst_addr:#x}"),
+                        );
+                    }
+                    s.log_activity("PROFILE", format!("cmd {idx}: write_copy '{val_str}' ({vt_str}) to {dst} ({dst_addr:#x}) -> ok"));
+                }
+            }
         }
     }
     Ok(())
