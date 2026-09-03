@@ -1252,6 +1252,28 @@ impl SessionState {
         false
     }
 
+    /// Update a cheat's label, group, and optional note metadata.
+    pub fn set_cheat_metadata(&mut self, id: u64, label: Option<String>, group: Option<String>, note: Option<String>) -> bool {
+        if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
+            if let Some(lbl) = label {
+                let trimmed = lbl.trim();
+                if !trimmed.is_empty() {
+                    c.label = trimmed.to_string();
+                }
+            }
+            if let Some(grp) = group {
+                let trimmed = grp.trim();
+                c.group = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+            }
+            if let Some(n) = note {
+                let trimmed = n.trim();
+                c.note = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+            }
+            return true;
+        }
+        false
+    }
+
     /// Get a cheat by id.
     pub fn get_cheat(&self, id: u64) -> Option<&Cheat> {
         self.cheats.iter().find(|c| c.id == id)

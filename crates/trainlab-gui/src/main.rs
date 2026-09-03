@@ -126,6 +126,8 @@ struct TrainlabApp {
     selected_packet_id: Option<u64>,
     // Active Tab state
     active_tab: ActiveTab,
+    // Cheat editor modal popup state
+    editing_cheat: Option<EditCheatModal>,
     // Auto-run profile init_commands on attach
     auto_init: bool,
     // Window visibility state for toggle hotkey
@@ -136,6 +138,15 @@ struct TrainlabApp {
     is_scanning: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // Event bus receiver to subscribe to all unified session/wire/log events
     bus_rx: tokio::sync::broadcast::Receiver<trainlab_core::event::BusEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct EditCheatModal {
+    cheat_id: u64,
+    label: String,
+    group: String,
+    hotkey: String,
+    note: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +221,7 @@ impl TrainlabApp {
             net_capture_loopback: false,
             selected_packet_id: None,
             active_tab: ActiveTab::Cheats,
+            editing_cheat: None,
             auto_init: true,
             window_visible: true,
             is_attaching: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -716,16 +728,17 @@ impl TrainlabApp {
                                     "? (null ptr)".into()
                                 };
 
-                                ui.label(&cheat.label);
-                                if let Some(n) = &cheat.note {
-                                    ui.label(format!("({n})"));
-                                }
+                                let mut label_widget = ui.label(&cheat.label);
+                                let mut tooltip = format!("Type: {:?}\nTarget: {target_addr:#x}", value_type);
                                 if let Some(expr) = address_expr {
-                                    ui.monospace(format!("{expr} -> {target_addr:#x}"));
-                                } else {
-                                    ui.label(format!("@ {target_addr:#x}"));
+                                    tooltip.push_str(&format!("\nExpression: {expr}"));
                                 }
-                                ui.label(format!("now: {current}"));
+                                if let Some(n) = &cheat.note {
+                                    tooltip.push_str(&format!("\nNote: {n}"));
+                                }
+                                label_widget = label_widget.on_hover_text(tooltip);
+
+                                ui.monospace(format!("[{current}]"));
 
                                 // Editable field (persisted per cheat id).
                                 let field = self_ptr
@@ -935,7 +948,12 @@ impl TrainlabApp {
                                         }
                                     }
                                 }
-                                ui.label(format!("@ {target:#x}"));
+                                let mut toggle_tip = format!("Hook Cave Target: {target:#x}");
+                                if let Some(n) = &cheat.note {
+                                    toggle_tip.push_str(&format!("\nNote: {n}"));
+                                }
+                                ui.colored_label(egui::Color32::GRAY, format!("@ {target:#x}"))
+                                    .on_hover_text(toggle_tip);
                             }
                             CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
                                 let mut on = *enabled;
@@ -970,7 +988,12 @@ impl TrainlabApp {
                                         }
                                     }
                                 }
-                                ui.label(format!("@ {target:#x} ({desc})"));
+                                let mut patch_tip = format!("Patch Target: {target:#x}\nRef: {desc}");
+                                if let Some(n) = &cheat.note {
+                                    patch_tip.push_str(&format!("\nNote: {n}"));
+                                }
+                                ui.colored_label(egui::Color32::GRAY, format!("@ {target:#x}"))
+                                    .on_hover_text(patch_tip);
                             }
                             CheatKind::Button { commands } => {
                                 if ui.button(format!("▶ {}", cheat.label)).clicked() {
@@ -1026,46 +1049,26 @@ impl TrainlabApp {
                                             }
                                         }
                                     }
-
-                                if let Some(n) = &cheat.note {
-                                    ui.label(format!("({n})"));
-                                }
                             }
                         }
 
-                        // Hotkey assignment input & button
-                        ui.separator();
-                        ui.label("Hotkey:");
-                        let hk_field = self_ptr
-                            .cheat_hotkey_inputs
-                            .entry(cheat.id)
-                            .or_insert_with(|| cheat.hotkey.clone().unwrap_or_default());
-                        ui.add(egui::TextEdit::singleline(hk_field).hint_text("e.g. Num1, Shift+Alt+K"));
+                        // Hotkey tag badge (if bound)
+                        if let Some(hk) = &cheat.hotkey {
+                            ui.colored_label(egui::Color32::from_rgb(180, 220, 255), format!("⌨ {hk}"));
+                        }
 
-                        if ui.button("Bind").clicked() {
-                            let text = hk_field.trim().to_string();
-                            if text.is_empty() {
-                                if let Ok(mut s) = self_ptr.session.lock() {
-                                    s.set_cheat_hotkey(cheat.id, None);
-                                }
-                                self_ptr.sync_registered_hotkeys();
-                                self_ptr.log(format!("cleared hotkey for '{}'", cheat.label));
-                            } else {
-                                match hotkeys::HotkeySpec::parse(&text) {
-                                    Ok(spec) => {
-                                        let display = spec.display_string();
-                                        if let Ok(mut s) = self_ptr.session.lock() {
-                                            s.set_cheat_hotkey(cheat.id, Some(display.clone()));
-                                        }
-                                        *hk_field = display.clone();
-                                        self_ptr.sync_registered_hotkeys();
-                                        self_ptr.log(format!("bound '{}' to hotkey '{display}'", cheat.label));
-                                    }
-                                    Err(e) => {
-                                        self_ptr.log(format!("invalid hotkey format for '{}': {e}", cheat.label));
-                                    }
-                                }
-                            }
+                        // Edit details / hotkey popup button
+                        if ui.small_button("⚙ Edit").clicked() {
+                            let curr_grp = cheat.group.clone().unwrap_or_default();
+                            let curr_hk = cheat.hotkey.clone().unwrap_or_default();
+                            let curr_note = cheat.note.clone().unwrap_or_default();
+                            self_ptr.editing_cheat = Some(EditCheatModal {
+                                cheat_id: cheat.id,
+                                label: cheat.label.clone(),
+                                group: curr_grp,
+                                hotkey: curr_hk,
+                                note: curr_note,
+                            });
                         }
                     });
                 }
@@ -2601,6 +2604,94 @@ impl eframe::App for TrainlabApp {
                 });
             });
         }
+
+        // Render Edit Cheat Modal Popup if active
+        if let Some(mut edit_modal) = self.editing_cheat.clone() {
+            let mut close_modal = false;
+            let mut save_modal = false;
+
+            egui::Window::new(format!("✏ Edit Cheat #{}", edit_modal.cheat_id))
+                .collapsible(false)
+                .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.screen_rect().center())
+                .default_width(380.0)
+                .show(ctx, |ui| {
+                    ui.add_space(5.0);
+                    ui.label("Configure cheat metadata, category group, and hotkey bindings:");
+                    ui.add_space(5.0);
+
+                    egui::Grid::new("edit_cheat_modal_grid")
+                        .num_columns(2)
+                        .spacing([10.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Display Label:");
+                            ui.add(egui::TextEdit::singleline(&mut edit_modal.label).desired_width(220.0));
+                            ui.end_row();
+
+                            ui.label("Group / Category:");
+                            ui.add(egui::TextEdit::singleline(&mut edit_modal.group).hint_text("e.g. Player, Weapons, General").desired_width(220.0));
+                            ui.end_row();
+
+                            ui.label("Global Hotkey:");
+                            ui.add(egui::TextEdit::singleline(&mut edit_modal.hotkey).hint_text("e.g. Num1, Shift+Alt+K").desired_width(220.0));
+                            ui.end_row();
+
+                            ui.label("Notes / Context:");
+                            ui.add(egui::TextEdit::multiline(&mut edit_modal.note).desired_rows(3).desired_width(220.0));
+                            ui.end_row();
+                        });
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("💾 Save Changes").clicked() {
+                            save_modal = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_modal = true;
+                        }
+                    });
+                });
+
+            if save_modal {
+                let id = edit_modal.cheat_id;
+                let new_label = edit_modal.label.trim().to_string();
+                let new_group = edit_modal.group.trim().to_string();
+                let new_note = edit_modal.note.trim().to_string();
+                let new_hk = edit_modal.hotkey.trim().to_string();
+
+                if let Ok(mut s) = self.session.lock() {
+                    s.set_cheat_metadata(
+                        id,
+                        Some(new_label.clone()),
+                        Some(new_group),
+                        Some(new_note),
+                    );
+
+                    let hk_opt = if new_hk.is_empty() {
+                        None
+                    } else if let Ok(spec) = hotkeys::HotkeySpec::parse(&new_hk) {
+                        Some(spec.display_string())
+                    } else {
+                        Some(new_hk)
+                    };
+                    s.set_cheat_hotkey(id, hk_opt.clone());
+                    if let Some(h) = hk_opt {
+                        self.cheat_hotkey_inputs.insert(id, h);
+                    } else {
+                        self.cheat_hotkey_inputs.remove(&id);
+                    }
+                    s.log_activity("UI", format!("updated cheat #{id} ('{new_label}')"));
+                }
+                self.sync_registered_hotkeys();
+                self.editing_cheat = None;
+            } else if close_modal {
+                self.editing_cheat = None;
+            } else {
+                self.editing_cheat = Some(edit_modal);
+            }
+        }
     }
 }
 
@@ -2815,12 +2906,20 @@ impl TrainlabApp {
         ui.add_space(5.0);
 
         // Split view: Packet list table on top, selected packet payload preview on bottom
-        egui::ScrollArea::vertical()
-            .max_height(280.0)
+        let avail_height = ui.available_height();
+        let table_height = if self.selected_packet_id.is_some() {
+            (avail_height * 0.55).clamp(180.0, 380.0)
+        } else {
+            avail_height.max(250.0)
+        };
+
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .max_height(table_height)
             .show(ui, |ui| {
                 egui::Grid::new("network_packets_grid")
                     .striped(true)
-                    .min_col_width(60.0)
+                    .min_col_width(50.0)
                     .show(ui, |ui| {
                         ui.strong("ID");
                         ui.strong("Dir");
@@ -2849,7 +2948,7 @@ impl TrainlabApp {
                             }
                             ui.label(dir_label);
                             ui.label(p.kind.as_str().to_uppercase());
-                            ui.label(ep);
+                            ui.add(egui::Label::new(ep).truncate(true)).on_hover_text(ep);
                             ui.label(format!("{} B", p.payload_len));
                             ui.monospace(preview);
 
@@ -2866,15 +2965,23 @@ impl TrainlabApp {
         // Selected packet detail inspector
         if let Some(sel_id) = self.selected_packet_id {
             if let Some(pkt) = packets.iter().find(|p| p.id == sel_id) {
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 ui.separator();
-                ui.heading(format!("Packet #{:04} Details", pkt.id));
                 ui.horizontal(|ui| {
+                    ui.heading(format!("Packet #{:04} Details", pkt.id));
+                    if ui.small_button("✕ Close Inspector").clicked() {
+                        self.selected_packet_id = None;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
                     ui.label(format!("Protocol: {}", pkt.kind.as_str().to_uppercase()));
+                    ui.separator();
                     ui.label(format!("Direction: {:?}", pkt.direction));
+                    ui.separator();
                     ui.label(format!("Size: {} bytes", pkt.payload_len));
                     if let Some(f) = &pkt.artifact_file {
-                        ui.label(format!("Saved on disk: {f}"));
+                        ui.separator();
+                        ui.label(format!("Disk File: {f}"));
                     }
                 });
 
@@ -2890,8 +2997,9 @@ impl TrainlabApp {
                 ui.add_space(5.0);
                 ui.heading("Payload Hex / ASCII Preview:");
                 let preview_bytes = &pkt.payload_preview;
-                egui::ScrollArea::vertical()
-                    .max_height(140.0)
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .max_height(180.0)
                     .show(ui, |ui| {
                         ui.monospace(hexdump(preview_bytes));
                     });
