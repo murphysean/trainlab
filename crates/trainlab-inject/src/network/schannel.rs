@@ -49,9 +49,15 @@ static SCHANNEL_HOOKED: AtomicBool = AtomicBool::new(false);
 
 /// Walk a `SecBufferDesc` and return the first `SECBUFFER_DATA` buffer's
 /// payload pointer + length (if any). Returns `None` if there is no data
-/// buffer. The returned pointer is only valid for the duration of the
-/// `EncryptMessage`/`DecryptMessage` call, so callers must copy it before
-/// returning.
+/// buffer.
+///
+/// ⚠️ The pointer's validity depends on which function is calling:
+/// - `DecryptMessage` (post-call): the buffer holds fresh plaintext and
+///   must be copied before returning.
+/// - `EncryptMessage` (pre-call): the buffer holds plaintext only *before*
+///   the original call runs; afterwards it holds ciphertext.
+///
+/// Callers must copy before returning either way.
 unsafe fn data_buffer_payload(desc: *const SecBufferDesc) -> Option<(*const u8, usize)> {
     if desc.is_null() {
         return None;
@@ -70,12 +76,26 @@ unsafe fn data_buffer_payload(desc: *const SecBufferDesc) -> Option<(*const u8, 
 }
 
 /// Hooked `EncryptMessage` callback (outbound plaintext, pre-TLS-wrap).
+///
+/// ⚠️ Buffer-lifetime asymmetry vs `hooked_decrypt_message`: SChannel's
+/// `EncryptMessage` encrypts the caller's `SECBUFFER_DATA` buffer **in
+/// place** — after the original returns, that buffer holds ciphertext
+/// (app data followed by the TLS trailer: explicit nonce/MAC/tag bytes),
+/// so reading it *after* the call yields the very ciphertext we were
+/// trying to avoid. The outbound plaintext must therefore be copied
+/// *before* invoking the original. (`DecryptMessage` is the reverse:
+/// SChannel re-labels the buffer array on output, so the post-call
+/// `SECBUFFER_DATA` buffer *is* the freshly decrypted plaintext.)
 pub unsafe extern "system" fn hooked_encrypt_message(
     ph_context: *const SecHandle,
     f_qop: u32,
     p_message: *const SecBufferDesc,
     message_seq_no: u32,
 ) -> i32 {
+    // Copy the plaintext request body while it is still plaintext.
+    let plaintext = unsafe { data_buffer_payload(p_message) }
+        .map(|(ptr, len)| unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec());
+
     let orig = ORIGINAL_ENCRYPT_MESSAGE.load(Ordering::Relaxed);
     let ret = if !orig.is_null() {
         let orig_fn: FnEncryptMessage = unsafe { std::mem::transmute(orig) };
@@ -85,19 +105,20 @@ pub unsafe extern "system" fn hooked_encrypt_message(
         -1
     };
 
-    if ret == SEC_E_OK {
-        if let Some((ptr, len)) = unsafe { data_buffer_payload(p_message) } {
-            let payload = unsafe { std::slice::from_raw_parts(ptr, len) };
-            super::record_packet(
-                PacketKind::Http,
-                PacketDirection::Outbound,
-                None,
-                None,
-                Some("TLS (SChannel) outbound".into()),
-                None,
-                payload,
-            );
-        }
+    // Only record when the encryption actually succeeded — a failed call
+    // (e.g. handshake CONTINUE_NEEDED) did not send the plaintext anywhere.
+    if ret == SEC_E_OK
+        && let Some(payload) = plaintext.as_deref()
+    {
+        super::record_packet(
+            PacketKind::Http,
+            PacketDirection::Outbound,
+            None,
+            None,
+            Some("TLS (SChannel) outbound".into()),
+            None,
+            payload,
+        );
     }
 
     ret
