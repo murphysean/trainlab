@@ -8,6 +8,8 @@ gui:
   height: 800.0
   fullscreen: false
   theme: "dark"
+  # Fallback external GUI timer rate for value pinning (default: 30 Hz)
+  pin_rate_hz: 30
 
 server:
   # Master toggle for the background HTTP server and TCP port bind (default: true)
@@ -41,6 +43,7 @@ inject_features:
     capture_loopback: false     # Set to true to include 127.0.0.1 loopback traffic
     ignore_ports: []           # Additional ports to filter out (trainer IPC & MCP ignored automatically)
   memory:
+    frame_pinning: true        # In-process frame-cadence value pinning in DXGI Present hook
     watchpoints: true          # Page guard / hardware debug register memory writes
     breakpoints: true          # Single-fire INT3 software breakpoints
     trampoline_capture: true   # Passive non-stalling register capture ring buffers
