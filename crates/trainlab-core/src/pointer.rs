@@ -84,6 +84,50 @@ pub fn chase_with<P: ProcessMemory + ?Sized>(
     Ok(hops)
 }
 
+/// Chase a pointer chain where `base` is already the object instance — no
+/// initial dereference of `base` at hop 0.
+///
+/// Use when the base marker has `kind == Object`: the base address IS the
+/// struct, so offsets are applied directly rather than dereferencing `base`
+/// first.
+///
+/// The chain resolves as:
+/// ```text
+/// (base is the object — no deref of base)
+/// 0 offsets  : result = [base]
+/// 1 offset   : result = [base + offsets[0]]           (no deref — field addr)
+/// 2+ offsets : ptr = read(base + offsets[0])
+///              hop i (i>0): ptr = read(ptr + offsets[i])
+///              final: ptr + offsets[last]
+/// ```
+pub fn chase_object<P: ProcessMemory + ?Sized>(
+    proc: &P,
+    base: u64,
+    offsets: &[u64],
+) -> Result<Vec<u64>, MemoryError> {
+    if offsets.is_empty() {
+        return Ok(vec![base]);
+    }
+    if offsets.len() == 1 {
+        // Single offset: just add it to base — no dereference needed.
+        return Ok(vec![base + offsets[0]]);
+    }
+    // Multiple offsets: read(base + offsets[0]) is the first hop, then chase
+    // remaining offsets via standard pointer-slot semantics.
+    let mut hops = Vec::with_capacity(offsets.len());
+    let mut ptr = read_ptr(proc, base + offsets[0])?;
+    hops.push(ptr);
+    for i in 1..offsets.len() {
+        if i < offsets.len() - 1 {
+            ptr = read_ptr(proc, ptr + offsets[i])?;
+            hops.push(ptr);
+        }
+    }
+    let final_addr = ptr + offsets[offsets.len() - 1];
+    hops.push(final_addr);
+    Ok(hops)
+}
+
 /// Read a single native-width pointer (usize) from a process.
 fn read_ptr<P: ProcessMemory + ?Sized>(proc: &P, address: u64) -> Result<u64, MemoryError> {
     let size = std::mem::size_of::<usize>();
@@ -188,6 +232,50 @@ mod tests {
         let m = Mock::new(64);
         let hops = chase(&m, 0x1000, &[]).unwrap();
         assert_eq!(hops, vec![0x1000]);
+    }
+
+    #[test]
+    fn chase_object_no_deref_single_offset() {
+        let m = Mock::new(256);
+        // base IS the object (heap instance). A single offset is a plain field
+        // address — NO deref of base. base + 0xd0.
+        let hops = chase_object(&m, 0x18aa018, &[0xd0]).unwrap();
+        assert_eq!(hops, vec![0x18aa0e8]);
+    }
+
+    #[test]
+    fn chase_object_multi_hop_derefs_field_then_chases() {
+        // Mock buffer sized to cover the heap-style base + offsets.
+        let m = Mock::new(0x2000000);
+        let base = 0x18aa018u64;
+        // object mode, 2 offsets: read(base + offsets[0]) as first hop, then
+        // value at ptr + offsets[1] (no trailing deref).
+        // base + 0xd0 = 0x18aa0e8 -> holds ptr to 0x1d966d0
+        let field_addr = base + 0xd0;
+        m.put_ptr(field_addr, 0x1d966d0);
+        // final = 0x1d966d0 + offsets[1]=0x40 = 0x1d96710
+        let hops = chase_object(&m, base, &[0xd0, 0x40]).unwrap();
+        assert_eq!(hops, vec![0x1d966d0, 0x1d96710]);
+    }
+
+    #[test]
+    fn chase_object_empty_offsets_returns_base() {
+        let m = Mock::new(64);
+        let hops = chase_object(&m, 0x2000, &[]).unwrap();
+        assert_eq!(hops, vec![0x2000]);
+    }
+
+    #[test]
+    fn chase_object_three_hops_still_no_initial_deref_of_base() {
+        let m = Mock::new(0x100000);
+        let base = 0x3000u64;
+        // read(base + 0x10) -> 0x4000
+        m.put_ptr(base + 0x10, 0x4000);
+        // read(0x4000 + 0x20) -> 0x5000
+        m.put_ptr(0x4000 + 0x20, 0x5000);
+        // final = 0x5000 + 0x30 = 0x5030
+        let hops = chase_object(&m, base, &[0x10, 0x20, 0x30]).unwrap();
+        assert_eq!(hops, vec![0x4000, 0x5000, 0x5030]);
     }
 
     #[test]

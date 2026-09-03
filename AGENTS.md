@@ -24,6 +24,24 @@ cargo build --release --target x86_64-pc-windows-gnu --package trainlab-gui --pa
 
 ---
 
+## 1b. Deploying Locally (this machine) — mirror directory
+
+The target directory structure is mirrored **locally** on this workstation at
+`~/Documents/Trainers/Trainlab/` (the same layout as on target devices). Keep
+this local copy in sync with the release artifacts — it is the canonical
+reference and the fallback whenever a remote device is unreachable:
+
+```bash
+mkdir -p ~/Documents/Trainers/Trainlab
+cp target/x86_64-pc-windows-gnu/release/trainlab-gui.exe \
+    target/x86_64-pc-windows-gnu/release/trainlab_inject.dll \
+    ~/Documents/Trainers/Trainlab/
+chmod +x ~/Documents/Trainers/Trainlab/trainlab-gui.exe
+# verify MD5s match between the mirror and the build artifacts
+```
+
+---
+
 ## 2. Deploying to Steam Deck / SteamOS Devices via SCP
 
 ### Target Connection Configuration

@@ -1,42 +1,54 @@
-//! # Hardware watchpoints (T-028) and int3 breakpoints (T-029)
+//! # Hardware watchpoints (T-028), Page Guard watchpoints, and int3 breakpoints (T-029)
 //!
 //! These features are **Windows-only** and implemented with a vectored
 //! exception handler (VEH) that runs *inside* the game process.
 //!
-//! - **T-028 `WatchWrites`**: arm a data-write hardware watchpoint on DR0 by
-//!   programming DR0/DR7 on every thread of the process. When the game writes
-//!   the watched address the CPU raises a `#DB` (debug) exception surfaced to
-//!   our VEH as `EXCEPTION_SINGLE_STEP`. We capture the writing thread's
-//!   registers (RIP + general purpose) and report which code did the write.
-//! - **T-029 `BreakOnCode`**: patch a single code byte with `0xCC` (int3). When
-//!   execution reaches it the VEH sees `EXCEPTION_BREAKPOINT`, restores the
-//!   original byte, steps `RIP` back onto it, captures registers plus a raw
-//!   stack trace, and reports. This is a single-fire breakpoint.
+//! - **Hardware `WatchWrites`**: arm a data-write hardware watchpoint on DR0 by
+//!   programming DR0/DR7 on threads of the process.
+//! - **Page Guard `WatchWrites`**: mark the target memory page with `PAGE_GUARD`.
+//!   When *any* thread (including any worker thread or thread pool worker)
+//!   accesses or writes into the page, `STATUS_GUARD_PAGE_VIOLATION` is caught by
+//!   the VEH.
+//! - **`BreakOnCode`**: patch code with `0xCC` (int3). When execution reaches it
+//!   the VEH sees `EXCEPTION_BREAKPOINT`, restores the original byte, and captures
+//!   registers.
 //!
-//! Both features are best-effort and safe: they clear themselves after a hit
-//! so the game never gets wedged on an unhandled exception.
+//! ### Multi-Thread Resilience & Tombstoning
+//! In highly concurrent game engines and thread pools, multiple threads frequently
+//! hit the breakpoint or guard page in the exact same millisecond window.
+//! When a breakpoint or watchpoint is disarmed (or armed in one-shot mode), a
+//! `Tombstone` is maintained in a recent disarm ring buffer. Any in-flight threads
+//! that hit the breakpoint address around or after disarm are recognized by the VEH:
+//! their `RIP` is safely rewound, their register state is recorded as a concurrent hit,
+//! and they are resumed together without wedging or crashing.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, EXCEPTION_ACCESS_VIOLATION, EXCEPTION_BREAKPOINT,
-    EXCEPTION_SINGLE_STEP, INVALID_HANDLE_VALUE,
+    EXCEPTION_GUARD_PAGE, EXCEPTION_SINGLE_STEP, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, GetThreadContext, RemoveVectoredExceptionHandler,
+    AddVectoredExceptionHandler, GetThreadContext,
     SetThreadContext, CONTEXT, CONTEXT_CONTROL_AMD64, CONTEXT_DEBUG_REGISTERS_AMD64,
     CONTEXT_INTEGER_AMD64, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
 };
-use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE};
+use windows_sys::Win32::System::Memory::{
+    VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_GUARD,
+};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId, OpenThread, ResumeThread,
     SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
     THREAD_SUSPEND_RESUME,
 };
+
+const TRAP_FLAG: u32 = 0x100;
 
 /// Register + stack snapshot reported when a watchpoint/breakpoint fires.
 #[derive(Debug, Clone)]
@@ -60,6 +72,12 @@ pub struct HitInfo {
 enum WatchKind {
     /// Data-write hardware watchpoint (DR0/DR7).
     DataWrite,
+    /// Memory protection fault watchpoint (PAGE_GUARD).
+    PageGuard {
+        page_base: u64,
+        page_size: usize,
+        original_protect: u32,
+    },
     /// int3 software breakpoint.
     Code,
 }
@@ -67,31 +85,48 @@ enum WatchKind {
 struct ActiveWatch {
     kind: WatchKind,
     address: u64,
+    len: usize,
+    one_shot: bool,
     /// Original byte that was overwritten with `0xCC` (breakpoints only).
     original_byte: u8,
+}
+
+/// Tombstone of a recently disarmed breakpoint or page guard.
+/// Allows in-flight concurrent threads that hit the trap site around or after
+/// disarm to safely recover, fix up RIP, record their hit, and resume without wedging.
+#[derive(Clone)]
+struct DisarmedTombstone {
+    address: u64,
+    original_byte: u8,
+    disarmed_at: Instant,
+}
+
+/// Pending single-step re-arm state keyed by Thread ID.
+#[derive(Clone, Copy)]
+enum PendingStep {
+    ReapplyCodeBreak { address: u64 },
+    ReapplyPageGuard { page_base: u64, page_size: usize },
+    ReapplyHardwareDr { dr7: u64 },
 }
 
 struct Runtime {
     state: Mutex<Option<ActiveWatch>>,
     veh_handle: Mutex<Option<VehHandle>>,
-    /// The most recent hit, kept until the caller polls it (so an async
-    /// watchpoint that fires after arming isn't lost when the arming TCP
-    /// call returns).
-    last_hit: Mutex<Option<HitInfo>>,
+    /// Thread ID -> PendingStep awaiting single-step completion.
+    pending_steps: Mutex<HashMap<u32, PendingStep>>,
+    /// Bounded ring buffer of hits (accumulates up to 64 hits).
+    hits: Mutex<Vec<HitInfo>>,
+    /// Recently disarmed tombstones (kept for 10 seconds to catch concurrent stragglers).
+    tombstones: Mutex<Vec<DisarmedTombstone>>,
 }
 
-/// A raw pointer wrapper that is explicitly `Send + Sync`, so it can live in a
-/// `static`. The VEH handle is only ever stored and compared for null; it is
-/// never dereferenced through this wrapper.
+const MAX_HITS_CAPACITY: usize = 64;
+const MAX_TOMBSTONES: usize = 16;
+const TOMBSTONE_TTL_SECS: u64 = 10;
+
 struct VehHandle(*mut c_void);
 unsafe impl Send for VehHandle {}
 unsafe impl Sync for VehHandle {}
-impl VehHandle {
-    #[allow(dead_code)]
-    fn as_ptr(&self) -> *mut c_void {
-        self.0
-    }
-}
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -99,7 +134,9 @@ fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime {
         state: Mutex::new(None),
         veh_handle: Mutex::new(None),
-        last_hit: Mutex::new(None),
+        pending_steps: Mutex::new(HashMap::new()),
+        hits: Mutex::new(Vec::new()),
+        tombstones: Mutex::new(Vec::new()),
     })
 }
 
@@ -107,10 +144,6 @@ fn runtime() -> &'static Runtime {
 fn ensure_veh() {
     let mut guard = runtime().veh_handle.lock().unwrap();
     if guard.is_none() {
-        // SAFETY: `veh_handler` is a valid extern "system" fn. Registering it
-        // as the first handler gives us first crack at single-step/breakpoint
-        // exceptions. We never unregister it; it simply ignores everything it
-        // does not own.
         let h = unsafe { AddVectoredExceptionHandler(1, Some(veh_handler)) };
         if !h.is_null() {
             *guard = Some(VehHandle(h));
@@ -118,48 +151,84 @@ fn ensure_veh() {
     }
 }
 
-/// Arm a data-write hardware watchpoint on `address` for all threads.
-///
-/// The watchpoint stays armed; when it fires, the [`HitInfo`] is stored so it
-/// can be retrieved later via [`poll_hit`]. This supports the async model:
-/// arm, let the game run, then poll for the hit.
+/// Arm a data-write watchpoint on `address`.
 pub fn arm_watch(
     address: u64,
     len: usize,
-    _one_shot: bool,
+    one_shot: bool,
+    mechanism: Option<&str>,
 ) -> Result<(), String> {
     clear_internal();
     ensure_veh();
 
-    // DR7 bits for a data-write breakpoint on DR0:
-    //   bit 0  (L0)     : locally enable DR0
-    //   bits 16-17 (R/W0): 01 = data write
-    //   bits 18-19 (LEN0): 00=1B, 01=2B, 10=4B, 11=8B
-    let len_code = if len >= 8 {
-        0b11
-    } else if len >= 4 {
-        0b10
-    } else if len >= 2 {
-        0b01
-    } else {
-        0b00
-    };
-    let dr7 = (1u64 << 0) | (1u64 << 16) | ((len_code as u64) << 18);
-    apply_debug_registers_all(address, dr7);
+    let use_hardware = matches!(mechanism, Some("hardware"));
 
-    *runtime().state.lock().unwrap() = Some(ActiveWatch {
-        kind: WatchKind::DataWrite,
-        address,
-        original_byte: 0,
-    });
+    if use_hardware {
+        let len_code = if len >= 8 {
+            0b11
+        } else if len >= 4 {
+            0b10
+        } else if len >= 2 {
+            0b01
+        } else {
+            0b00
+        };
+        let dr7 = (1u64 << 0) | (1u64 << 16) | ((len_code as u64) << 18);
+        apply_debug_registers_all(address, dr7);
+
+        *runtime().state.lock().unwrap() = Some(ActiveWatch {
+            kind: WatchKind::DataWrite,
+            address,
+            len,
+            one_shot,
+            original_byte: 0,
+        });
+    } else {
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let query_ret = unsafe {
+            VirtualQuery(
+                address as *const c_void,
+                &mut mbi,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if query_ret == 0 {
+            return Err(format!("VirtualQuery failed for 0x{:x}: {}", address, last_err()));
+        }
+
+        let page_base = address & !0xFFFu64;
+        let page_size = 0x1000usize;
+        let mut old_protect = 0u32;
+        let ok = unsafe {
+            VirtualProtect(
+                page_base as *mut c_void,
+                page_size,
+                mbi.Protect | PAGE_GUARD,
+                &mut old_protect,
+            )
+        };
+        if ok == 0 {
+            return Err(format!("VirtualProtect PAGE_GUARD failed: {}", last_err()));
+        }
+
+        *runtime().state.lock().unwrap() = Some(ActiveWatch {
+            kind: WatchKind::PageGuard {
+                page_base,
+                page_size,
+                original_protect: old_protect,
+            },
+            address,
+            len,
+            one_shot,
+            original_byte: 0,
+        });
+    }
+
     Ok(())
 }
 
-/// Arm a single-fire int3 breakpoint on `address`.
-///
-/// When it fires the [`HitInfo`] (with a stack trace) is stored; retrieve it
-/// via [`poll_hit`].
-pub fn arm_break(address: u64, _one_shot: bool) -> Result<(), String> {
+/// Arm a software breakpoint on `address` (int3 `0xCC`).
+pub fn arm_break(address: u64, one_shot: bool) -> Result<(), String> {
     clear_internal();
     ensure_veh();
     if address == 0 {
@@ -173,160 +242,393 @@ pub fn arm_break(address: u64, _one_shot: bool) -> Result<(), String> {
     *runtime().state.lock().unwrap() = Some(ActiveWatch {
         kind: WatchKind::Code,
         address,
+        len: 1,
+        one_shot,
         original_byte: original,
     });
     Ok(())
 }
 
-/// Poll for the most recent hit. Returns `None` if no hit has fired (or it was
-/// already consumed), or the stored [`HitInfo`] otherwise.
-pub fn poll_hit() -> Option<HitInfo> {
-    runtime().last_hit.lock().unwrap().take()
+/// Poll for accumulated hits since last poll. Returns all hits recorded.
+pub fn poll_hits() -> Vec<HitInfo> {
+    let mut hits = runtime().hits.lock().unwrap();
+    std::mem::take(&mut *hits)
 }
 
-/// Disarm any active watchpoint/breakpoint, restore patched bytes, and clear
-/// the debug registers on all threads.
+/// Poll for the most recent single hit (backwards-compatible).
+pub fn poll_hit() -> Option<HitInfo> {
+    let mut hits = runtime().hits.lock().unwrap();
+    if hits.is_empty() {
+        None
+    } else {
+        Some(hits.remove(0))
+    }
+}
+
+/// Disarm any active watchpoint/breakpoint, restore patched bytes/page protections,
+/// and clear debug registers.
 pub fn clear() {
     clear_internal();
+}
+
+fn add_tombstone(address: u64, original_byte: u8) {
+    let mut tombstones = runtime().tombstones.lock().unwrap();
+    tombstones.retain(|t| t.disarmed_at.elapsed().as_secs() < TOMBSTONE_TTL_SECS);
+    if tombstones.len() >= MAX_TOMBSTONES {
+        tombstones.remove(0);
+    }
+    tombstones.push(DisarmedTombstone {
+        address,
+        original_byte,
+        disarmed_at: Instant::now(),
+    });
+}
+
+fn find_tombstone(address: u64) -> Option<DisarmedTombstone> {
+    let tombstones = runtime().tombstones.lock().unwrap();
+    tombstones.iter().find(|t| t.address == address).cloned()
 }
 
 fn clear_internal() {
     let mut guard = runtime().state.lock().unwrap();
     if let Some(active) = guard.take() {
-        if active.kind == WatchKind::Code {
-            let _ = write_byte(active.address, active.original_byte);
+        match active.kind {
+            WatchKind::Code => {
+                let _ = write_byte(active.address, active.original_byte);
+                add_tombstone(active.address, active.original_byte);
+            }
+            WatchKind::PageGuard { page_base, page_size, original_protect } => {
+                let mut old = 0u32;
+                unsafe {
+                    VirtualProtect(
+                        page_base as *mut c_void,
+                        page_size,
+                        original_protect & !PAGE_GUARD,
+                        &mut old,
+                    );
+                }
+                add_tombstone(active.address, 0);
+            }
+            WatchKind::DataWrite => {
+                add_tombstone(active.address, 0);
+            }
         }
     }
     drop(guard);
+    runtime().pending_steps.lock().unwrap().clear();
     apply_debug_registers_all(0, 0);
 }
 
-/// The VEH callback. Runs on the thread that took the exception.
-///
-/// # Safety
-/// Registered via `AddVectoredExceptionHandler`; must match
-/// `PVECTORED_EXCEPTION_HANDLER`.
+fn record_hit(hit: HitInfo) {
+    let mut hits = runtime().hits.lock().unwrap();
+    if hits.len() >= MAX_HITS_CAPACITY {
+        hits.remove(0);
+    }
+    hits.push(hit);
+}
+
+/// The VEH callback. Runs on whichever thread took the exception.
 unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
-    // SAFETY: `ep` was passed by the OS and is valid for the duration of the
-    // call; we checked for null. All raw derefs are confined to this block.
     unsafe {
-    if ep.is_null() {
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
-    let code = (*ep).ExceptionRecord.as_mut().map_or(0, |r| r.ExceptionCode);
-    let ctx = (*ep).ContextRecord;
-    if ctx.is_null() {
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
-
-    let mut guard = runtime().state.lock().unwrap();
-    let Some(active) = guard.as_ref() else {
-        // No watch armed; this exception is not ours.
-        return EXCEPTION_CONTINUE_EXECUTION;
-    };
-
-    match active.kind {
-        WatchKind::DataWrite => {
-            // A data-write watchpoint surfaces as #DB (single step) or, in some
-            // cases, an access violation at the write site.
-            if code != EXCEPTION_SINGLE_STEP && code != EXCEPTION_ACCESS_VIOLATION {
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-            let hit = HitInfo {
-                rip: (*ctx).Rip,
-                rax: (*ctx).Rax,
-                rbx: (*ctx).Rbx,
-                rcx: (*ctx).Rcx,
-                rdx: (*ctx).Rdx,
-                rsi: (*ctx).Rsi,
-                rdi: (*ctx).Rdi,
-                rsp: (*ctx).Rsp,
-                rbp: (*ctx).Rbp,
-                description: format!("data-write watchpoint fired at 0x{:x}", active.address),
-                stack: Vec::new(),
-            };
-            // Clear the current thread's watchpoint so we don't immediately
-            // re-fire on the same instruction, then record the hit so the
-            // caller can poll it (the arming TCP call has already returned).
-            (*ctx).Dr0 = 0;
-            (*ctx).Dr7 = 0;
-            let _ = guard.take();
-            *runtime().last_hit.lock().unwrap() = Some(hit);
-            EXCEPTION_CONTINUE_EXECUTION
+        if ep.is_null() {
+            return EXCEPTION_CONTINUE_EXECUTION;
         }
-        WatchKind::Code => {
-            if code != EXCEPTION_BREAKPOINT {
+        let code = (*ep).ExceptionRecord.as_mut().map_or(0, |r| r.ExceptionCode);
+        let ctx = (*ep).ContextRecord;
+        if ctx.is_null() {
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        let tid = GetCurrentThreadId();
+
+        // 1. Handle single-step re-arm cadence (TF fired after stepping over an instruction)
+        if code == EXCEPTION_SINGLE_STEP {
+            let pending = {
+                let mut map = runtime().pending_steps.lock().unwrap();
+                map.remove(&tid)
+            };
+
+            if let Some(step) = pending {
+                // Clear the Trap Flag so the thread resumes regular execution
+                (*ctx).EFlags &= !TRAP_FLAG;
+
+                match step {
+                    PendingStep::ReapplyCodeBreak { address } => {
+                        let _ = write_byte(address, 0xCC);
+                    }
+                    PendingStep::ReapplyPageGuard { page_base, page_size } => {
+                        let mut old = 0u32;
+                        let _ = VirtualProtect(
+                            page_base as *mut c_void,
+                            page_size,
+                            PAGE_EXECUTE_READWRITE | PAGE_GUARD,
+                            &mut old,
+                        );
+                    }
+                    PendingStep::ReapplyHardwareDr { dr7 } => {
+                        (*ctx).Dr7 = dr7;
+                    }
+                }
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
-            // For int3 the exception address is the 0xCC byte; RIP is one past.
+        }
+
+        // 2. Check for active watch/break
+        let mut guard = runtime().state.lock().unwrap();
+        if let Some(active) = guard.as_ref() {
+            match active.kind {
+                WatchKind::PageGuard { page_base, page_size, original_protect } => {
+                    if code == EXCEPTION_GUARD_PAGE {
+                        let r = (*ep).ExceptionRecord.as_ref().unwrap();
+                        let access_type = r.ExceptionInformation[0];
+                        let fault_addr = r.ExceptionInformation[1] as u64;
+
+                        let in_range = fault_addr >= active.address
+                            && fault_addr < active.address.saturating_add(active.len as u64);
+                        let is_write = access_type == 1;
+
+                        if in_range && is_write {
+                            let hit = HitInfo {
+                                rip: (*ctx).Rip,
+                                rax: (*ctx).Rax,
+                                rbx: (*ctx).Rbx,
+                                rcx: (*ctx).Rcx,
+                                rdx: (*ctx).Rdx,
+                                rsi: (*ctx).Rsi,
+                                rdi: (*ctx).Rdi,
+                                rsp: (*ctx).Rsp,
+                                rbp: (*ctx).Rbp,
+                                description: format!(
+                                    "page-guard write hit at 0x{:x} (target 0x{:x}) by thread {}",
+                                    fault_addr, active.address, tid
+                                ),
+                                stack: capture_stack((*ctx).Rsp, 16),
+                            };
+                            record_hit(hit);
+
+                            if active.one_shot {
+                                let mut old = 0u32;
+                                VirtualProtect(
+                                    page_base as *mut c_void,
+                                    page_size,
+                                    original_protect & !PAGE_GUARD,
+                                    &mut old,
+                                );
+                                add_tombstone(active.address, 0);
+                                let _ = guard.take();
+                                return EXCEPTION_CONTINUE_EXECUTION;
+                            }
+                        }
+
+                        // Off-target or multi-shot: set TF to step over and reapply PAGE_GUARD
+                        (*ctx).EFlags |= TRAP_FLAG;
+                        runtime().pending_steps.lock().unwrap().insert(
+                            tid,
+                            PendingStep::ReapplyPageGuard { page_base, page_size },
+                        );
+
+                        return EXCEPTION_CONTINUE_EXECUTION;
+                    }
+                }
+
+                WatchKind::DataWrite => {
+                    if code == EXCEPTION_SINGLE_STEP || code == EXCEPTION_ACCESS_VIOLATION {
+                        let hit = HitInfo {
+                            rip: (*ctx).Rip,
+                            rax: (*ctx).Rax,
+                            rbx: (*ctx).Rbx,
+                            rcx: (*ctx).Rcx,
+                            rdx: (*ctx).Rdx,
+                            rsi: (*ctx).Rsi,
+                            rdi: (*ctx).Rdi,
+                            rsp: (*ctx).Rsp,
+                            rbp: (*ctx).Rbp,
+                            description: format!(
+                                "data-write watchpoint fired at 0x{:x} by thread {}",
+                                active.address, tid
+                            ),
+                            stack: capture_stack((*ctx).Rsp, 16),
+                        };
+                        record_hit(hit);
+
+                        if active.one_shot {
+                            (*ctx).Dr0 = 0;
+                            (*ctx).Dr7 = 0;
+                            add_tombstone(active.address, 0);
+                            let _ = guard.take();
+                            return EXCEPTION_CONTINUE_EXECUTION;
+                        } else {
+                            let dr7_saved = (*ctx).Dr7;
+                            (*ctx).Dr7 = 0;
+                            (*ctx).EFlags |= TRAP_FLAG;
+                            runtime().pending_steps.lock().unwrap().insert(
+                                tid,
+                                PendingStep::ReapplyHardwareDr { dr7: dr7_saved },
+                            );
+                            return EXCEPTION_CONTINUE_EXECUTION;
+                        }
+                    }
+                }
+
+                WatchKind::Code => {
+                    if code == EXCEPTION_BREAKPOINT {
+                        let exc_addr = (*ep)
+                            .ExceptionRecord
+                            .as_mut()
+                            .map_or(0, |r| r.ExceptionAddress as u64);
+                        let rip = (*ctx).Rip;
+                        if exc_addr == active.address || rip.wrapping_sub(1) == active.address {
+                            // Restore original instruction byte immediately
+                            let _ = write_byte(active.address, active.original_byte);
+                            (*ctx).Rip = active.address;
+
+                            let stack = capture_stack((*ctx).Rsp, 16);
+                            let hit = HitInfo {
+                                rip: active.address,
+                                rax: (*ctx).Rax,
+                                rbx: (*ctx).Rbx,
+                                rcx: (*ctx).Rcx,
+                                rdx: (*ctx).Rdx,
+                                rsi: (*ctx).Rsi,
+                                rdi: (*ctx).Rdi,
+                                rsp: (*ctx).Rsp,
+                                rbp: (*ctx).Rbp,
+                                description: format!(
+                                    "breakpoint hit at 0x{:x} by thread {}",
+                                    active.address, tid
+                                ),
+                                stack,
+                            };
+                            record_hit(hit);
+
+                            if active.one_shot {
+                                add_tombstone(active.address, active.original_byte);
+                                let _ = guard.take();
+                                return EXCEPTION_CONTINUE_EXECUTION;
+                            } else {
+                                (*ctx).EFlags |= TRAP_FLAG;
+                                runtime().pending_steps.lock().unwrap().insert(
+                                    tid,
+                                    PendingStep::ReapplyCodeBreak { address: active.address },
+                                );
+                                return EXCEPTION_CONTINUE_EXECUTION;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Tombstone check: if state was already disarmed by another thread,
+        // but this thread also trapped on the exact same breakpoint/page guard:
+        drop(guard);
+
+        if code == EXCEPTION_BREAKPOINT {
             let exc_addr = (*ep)
                 .ExceptionRecord
                 .as_mut()
                 .map_or(0, |r| r.ExceptionAddress as u64);
             let rip = (*ctx).Rip;
-            if exc_addr != active.address && rip.wrapping_sub(1) != active.address {
+            let target_addr = if let Some(t) = find_tombstone(exc_addr) {
+                Some((exc_addr, t))
+            } else if let Some(t) = find_tombstone(rip.wrapping_sub(1)) {
+                Some((rip.wrapping_sub(1), t))
+            } else {
+                None
+            };
+
+            if let Some((addr, tombstone)) = target_addr {
+                // Ensure original byte is restored
+                let _ = write_byte(addr, tombstone.original_byte);
+                // Rewind RIP to instruction start so thread executes normally
+                (*ctx).Rip = addr;
+
+                let stack = capture_stack((*ctx).Rsp, 16);
+                let hit = HitInfo {
+                    rip: addr,
+                    rax: (*ctx).Rax,
+                    rbx: (*ctx).Rbx,
+                    rcx: (*ctx).Rcx,
+                    rdx: (*ctx).Rdx,
+                    rsi: (*ctx).Rsi,
+                    rdi: (*ctx).Rdi,
+                    rsp: (*ctx).Rsp,
+                    rbp: (*ctx).Rbp,
+                    description: format!(
+                        "concurrent breakpoint hit at 0x{:x} by straggler thread {} (safely resumed)",
+                        addr, tid
+                    ),
+                    stack,
+                };
+                record_hit(hit);
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
-            // Restore the original byte and step RIP back onto it so the
-            // original instruction actually executes.
-            let _ = write_byte(active.address, active.original_byte);
-            (*ctx).Rip = rip.wrapping_sub(1);
-
-            let stack = capture_stack((*ctx).Rsp, 16);
-            let hit = HitInfo {
-                rip: active.address,
-                rax: (*ctx).Rax,
-                rbx: (*ctx).Rbx,
-                rcx: (*ctx).Rcx,
-                rdx: (*ctx).Rdx,
-                rsi: (*ctx).Rsi,
-                rdi: (*ctx).Rdi,
-                rsp: (*ctx).Rsp,
-                rbp: (*ctx).Rbp,
-                description: format!("breakpoint hit at 0x{:x}", active.address),
-                stack,
-            };
-            let _ = guard.take();
-            *runtime().last_hit.lock().unwrap() = Some(hit);
-            EXCEPTION_CONTINUE_EXECUTION
         }
-    }
+
+        if code == EXCEPTION_GUARD_PAGE {
+            let r = (*ep).ExceptionRecord.as_ref().unwrap();
+            let fault_addr = r.ExceptionInformation[1] as u64;
+            let page_base = fault_addr & !0xFFFu64;
+
+            if let Some(tombstone) = find_tombstone(fault_addr).or_else(|| find_tombstone(page_base)) {
+                // Page Guard was already disarmed or in teardown: resume instruction safely
+                let mut old = 0u32;
+                VirtualProtect(
+                    page_base as *mut c_void,
+                    0x1000,
+                    PAGE_EXECUTE_READWRITE,
+                    &mut old,
+                );
+                let hit = HitInfo {
+                    rip: (*ctx).Rip,
+                    rax: (*ctx).Rax,
+                    rbx: (*ctx).Rbx,
+                    rcx: (*ctx).Rcx,
+                    rdx: (*ctx).Rdx,
+                    rsi: (*ctx).Rsi,
+                    rdi: (*ctx).Rdi,
+                    rsp: (*ctx).Rsp,
+                    rbp: (*ctx).Rbp,
+                    description: format!(
+                        "concurrent page guard hit at 0x{:x} (target 0x{:x}) by thread {} (safely resumed)",
+                        fault_addr, tombstone.address, tid
+                    ),
+                    stack: capture_stack((*ctx).Rsp, 16),
+                };
+                record_hit(hit);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+
+        EXCEPTION_CONTINUE_EXECUTION
     }
 }
 
 /// Read a single byte from the current process.
 fn read_byte(address: u64) -> u8 {
-    // SAFETY: caller guarantees `address` is a valid readable address.
     unsafe { *(address as *const u8) }
 }
 
-/// Write a single byte to the current process, temporarily flipping page
-/// protection to executable+readwrite so we can patch code.
+/// Write a single byte to the current process, flipping page protection.
 fn write_byte(address: u64, byte: u8) -> Result<(), String> {
     let ptr = address as *const c_void;
     let mut old = 0u32;
-    // SAFETY: VirtualProtect on our own address space.
     let ok = unsafe { VirtualProtect(ptr, 1, PAGE_EXECUTE_READWRITE, &mut old) };
     if ok == 0 {
         return Err(last_err());
     }
-    // SAFETY: caller guarantees `address` is writable.
     unsafe { *(address as *mut u8) = byte; }
-    // Restore the original protection.
     unsafe {
         VirtualProtect(ptr, 1, old, &mut old);
     }
     Ok(())
 }
 
-/// Read `count` u64 words upward from `rsp` and format them as hex. This is a
-/// raw, best-effort stack walk (the stack may be unwound from a frame that is
-/// not strictly a chain of return addresses, but it is still a useful capture).
+/// Read `count` u64 words upward from `rsp` and format them as hex.
 fn capture_stack(rsp: u64, count: usize) -> Vec<String> {
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let addr = rsp.wrapping_add((i as u64) * 8);
-        // SAFETY: best-effort read; a stray value here is harmless.
         let val = unsafe { *(addr as *const u64) };
         out.push(format!("0x{val:016x}"));
     }
@@ -335,7 +637,6 @@ fn capture_stack(rsp: u64, count: usize) -> Vec<String> {
 
 /// Enumerate every thread in the current process and call `f` with its TID.
 fn for_each_thread(mut f: impl FnMut(u32)) {
-    // SAFETY: CreateToolhelp32Snapshot with TH32CS_SNAPTHREAD.
     let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snap == INVALID_HANDLE_VALUE {
         return;
@@ -343,7 +644,6 @@ fn for_each_thread(mut f: impl FnMut(u32)) {
     let pid = unsafe { GetCurrentProcessId() };
     let mut te: THREADENTRY32 = unsafe { std::mem::zeroed() };
     te.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
-    // SAFETY: `te` is a valid THREADENTRY32; snap is a valid snapshot handle.
     let mut has = unsafe { Thread32First(snap, &mut te) != 0 };
     while has {
         if te.th32OwnerProcessID == pid {
@@ -351,19 +651,15 @@ fn for_each_thread(mut f: impl FnMut(u32)) {
         }
         has = unsafe { Thread32Next(snap, &mut te) != 0 };
     }
-    // SAFETY: close the snapshot handle we opened.
     unsafe {
         CloseHandle(snap);
     }
 }
 
-/// Program DR0 = `dr0` and DR7 = `dr7` on every thread of the process
-/// (including the current thread, via its pseudo-handle). Passing `dr0 = 0`
-/// and `dr7 = 0` clears the watchpoint everywhere.
+/// Program DR0 = `dr0` and DR7 = `dr7` on every thread of the process.
 fn apply_debug_registers_all(dr0: u64, dr7: u64) {
     let current = unsafe { GetCurrentThreadId() };
     for_each_thread(|tid| {
-        // SAFETY: OpenThread/GetCurrentThread return valid thread handles.
         let handle = unsafe {
             if tid == current {
                 GetCurrentThread()
@@ -379,39 +675,30 @@ fn apply_debug_registers_all(dr0: u64, dr7: u64) {
         if handle.is_null() {
             return;
         }
-        // SAFETY: CONTEXT is zero-initialized (it is a large struct without a
-        // Default impl) and configured before use.
         let mut ctx: CONTEXT = unsafe { std::mem::zeroed() };
         ctx.ContextFlags =
             CONTEXT_DEBUG_REGISTERS_AMD64 | CONTEXT_CONTROL_AMD64 | CONTEXT_INTEGER_AMD64;
 
-        // Suspend non-current threads so Get/SetThreadContext is stable. The
-        // current thread cannot suspend itself; set its registers directly.
         let suspended = if tid == current {
             0xFFFF_FFFFu32
         } else {
-            // SAFETY: handle is a valid thread handle.
             unsafe { SuspendThread(handle) }
         };
 
-        // SAFETY: ctx is a valid CONTEXT.
         if unsafe { GetThreadContext(handle, &mut ctx) } != 0 {
             ctx.Dr0 = dr0;
             ctx.Dr7 = dr7;
-            // SAFETY: ctx is a valid CONTEXT.
             unsafe {
                 SetThreadContext(handle, &ctx);
             }
         }
 
         if suspended != 0xFFFF_FFFFu32 {
-            // SAFETY: handle is a valid thread handle we suspended.
             unsafe {
                 ResumeThread(handle);
             }
         }
         if tid != current {
-            // SAFETY: handle was opened by OpenThread and is no longer needed.
             unsafe {
                 CloseHandle(handle);
             }
@@ -419,19 +706,7 @@ fn apply_debug_registers_all(dr0: u64, dr7: u64) {
     });
 }
 
-/// Format the last Win32 error for reporting.
 fn last_err() -> String {
-    // SAFETY: GetLastError takes no arguments.
     let code = unsafe { GetLastError() };
     format!("Win32 error {code}")
-}
-
-/// No-op removal helper kept for symmetry; the VEH is intentionally left
-/// installed for the lifetime of the DLL.
-#[allow(dead_code)]
-fn remove_veh(handle: *mut c_void) {
-    // SAFETY: `handle` is a handle returned by AddVectoredExceptionHandler.
-    unsafe {
-        RemoveVectoredExceptionHandler(handle);
-    }
 }

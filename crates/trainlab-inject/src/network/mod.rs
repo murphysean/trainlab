@@ -118,6 +118,7 @@ mod tests {
     #[test]
     fn test_record_and_drain_packets() {
         set_enabled(true);
+        let _ = drain_network_events();
         record_packet(
             PacketKind::Tcp,
             PacketDirection::Outbound,
@@ -161,6 +162,7 @@ mod tests {
     #[test]
     fn test_http_packet_recording() {
         set_enabled(true);
+        let _ = drain_network_events();
         record_packet(
             PacketKind::Http,
             PacketDirection::Outbound,

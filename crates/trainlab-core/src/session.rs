@@ -1114,6 +1114,20 @@ impl SessionState {
         self.undo_log.retain(|e| e.address != address);
     }
 
+    /// Get a slice of all recorded undo entries.
+    pub fn undo_log(&self) -> &[UndoEntry] {
+        &self.undo_log
+    }
+
+    /// Find the most recent recorded original bytes for a target address.
+    pub fn find_undo_for_target(&self, address: u64) -> Option<Vec<u8>> {
+        self.undo_log
+            .iter()
+            .rev()
+            .find(|u| u.address == address && !u.original_bytes.is_empty())
+            .map(|u| u.original_bytes.clone())
+    }
+
     /// Number of recorded undo entries.
     #[allow(dead_code)] // used once mutating tools exist
     pub fn undo_len(&self) -> usize {

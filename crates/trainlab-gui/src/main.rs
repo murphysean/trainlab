@@ -839,38 +839,87 @@ impl TrainlabApp {
                                     ui.colored_label(egui::Color32::YELLOW, "(stub — no payload)");
                                 } else if ui.checkbox(&mut on, &cheat.label).changed() {
                                     if on {
-                                        if let Ok(mut s) = self_ptr.session.lock() {
-                                            s.set_cheat_toggle(cheat.id, true);
-                                        }
-                                        self_ptr.log(format!(
-                                            "toggle '{}' ENABLED (@ {target:#x})",
-                                            cheat.label
-                                        ));
-                                    } else if !original_bytes.is_empty() {
-                                        let r = self_ptr.request(&Request::Write {
-                                            address: *target,
-                                            data: original_bytes.clone(),
-                                        });
-                                        match r {
-                                            Some(Response::Write { bytes_written }) => {
+                                        let req = Request::InstallCave {
+                                            target: *target,
+                                            hook: hook.clone(),
+                                        };
+                                        match self_ptr.request(&req) {
+                                            Some(Response::CaveInstalled { cave, original, .. }) => {
+                                                // Verify live hook byte at target
+                                                let check_req = Request::Read { address: *target, len: 1 };
+                                                let verified = match self_ptr.request(&check_req) {
+                                                    Some(Response::Read { data }) => {
+                                                        matches!(data.first(), Some(0xe9 | 0xff | 0xeb))
+                                                    }
+                                                    _ => true,
+                                                };
+
                                                 if let Ok(mut s) = self_ptr.session.lock() {
-                                                    s.set_cheat_toggle(cheat.id, false);
+                                                    s.set_toggle_cave_info(cheat.id, original.clone(), cave);
+                                                    s.record_undo(*target, original.clone(), format!("toggle cheat '{}'", cheat.label));
+                                                    s.set_cheat_toggle(cheat.id, true);
                                                 }
+
+                                                if verified {
+                                                    self_ptr.log(format!(
+                                                        "toggle '{}' ENABLED (@ {target:#x} -> cave @ {cave:#x})",
+                                                        cheat.label
+                                                    ));
+                                                } else {
+                                                    self_ptr.log(format!(
+                                                        "toggle '{}' ENABLED (@ {target:#x} -> cave @ {cave:#x}) [WARNING: target byte did not show expected jump]",
+                                                        cheat.label
+                                                    ));
+                                                }
+                                            }
+                                            Some(Response::Error { message }) => {
                                                 self_ptr.log(format!(
-                                                    "toggle '{}' DISABLED (restored {bytes_written} bytes @ {target:#x})",
+                                                    "toggle '{}' enable FAILED (@ {target:#x}): {message}",
                                                     cheat.label
                                                 ));
                                             }
-                                            _ => self_ptr.log(format!(
-                                                "toggle '{}' disable FAILED (restore @ {target:#x})",
-                                                cheat.label
-                                            )),
+                                            _ => {
+                                                self_ptr.log(format!(
+                                                    "toggle '{}' enable FAILED (@ {target:#x}): no response from injected DLL",
+                                                    cheat.label
+                                                ));
+                                            }
                                         }
                                     } else {
-                                        self_ptr.log(format!(
-                                            "toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
-                                            cheat.label
-                                        ));
+                                        // To disable: determine original bytes from cheat or undo log
+                                        let restore_bytes = if !original_bytes.is_empty() {
+                                            Some(original_bytes.clone())
+                                        } else {
+                                            self_ptr.session.lock().ok().and_then(|s| s.find_undo_for_target(*target))
+                                        };
+
+                                        if let Some(data) = restore_bytes {
+                                            let r = self_ptr.request(&Request::Write {
+                                                address: *target,
+                                                data,
+                                            });
+                                            match r {
+                                                Some(Response::Write { bytes_written }) => {
+                                                    if let Ok(mut s) = self_ptr.session.lock() {
+                                                        s.set_cheat_toggle(cheat.id, false);
+                                                        s.remove_undo_for_target(*target);
+                                                    }
+                                                    self_ptr.log(format!(
+                                                        "toggle '{}' DISABLED (restored {bytes_written} bytes @ {target:#x})",
+                                                        cheat.label
+                                                    ));
+                                                }
+                                                _ => self_ptr.log(format!(
+                                                    "toggle '{}' disable FAILED (restore @ {target:#x})",
+                                                    cheat.label
+                                                )),
+                                            }
+                                        } else {
+                                            self_ptr.log(format!(
+                                                "toggle '{}' disable FAILED: no stored original bytes found in cheat or undo log for {target:#x}",
+                                                cheat.label
+                                            ));
+                                        }
                                     }
                                 }
                                 ui.label(format!("@ {target:#x}"));

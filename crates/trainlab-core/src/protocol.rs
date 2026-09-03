@@ -140,6 +140,8 @@ pub enum Request {
         address: u64,
         len: usize,
         one_shot: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mechanism: Option<String>,
     },
     /// Arm a lightweight single-fire software breakpoint (int3 `0xCC`) on a
     /// code address. When execution reaches `address` we capture registers and
@@ -278,7 +280,11 @@ pub enum Response {
     BreakpointsCleared,
     /// Reply to [`Request::PollHit`]. `hit` is `Some` if a watchpoint/breakpoint
     /// fired since the last poll.
-    PollHit { hit: Option<WatchHitInfo> },
+    PollHit {
+        hit: Option<WatchHitInfo>,
+        #[serde(default)]
+        hits: Vec<WatchHitInfo>,
+    },
     /// Reply to [`Request::CaptureReg`]. `id` identifies the capture for
     /// [`Request::ReadCaptures`] / [`Request::UninstallCapture`]; `scratch` is
     /// the DLL-allocated ring buffer address (readable via `read`); `target`

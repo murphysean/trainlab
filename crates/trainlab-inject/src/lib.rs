@@ -56,8 +56,13 @@ mod watch {
         pub stack: Vec<String>,
     }
 
-    pub fn arm_watch(_address: u64, _len: usize, _one_shot: bool) -> Result<(), String> {
-        Err("hardware watchpoints are not supported on this platform".into())
+    pub fn arm_watch(
+        _address: u64,
+        _len: usize,
+        _one_shot: bool,
+        _mechanism: Option<&str>,
+    ) -> Result<(), String> {
+        Err("hardware/page-guard watchpoints are not supported on this platform".into())
     }
 
     pub fn arm_break(_address: u64, _one_shot: bool) -> Result<(), String> {
@@ -66,6 +71,10 @@ mod watch {
 
     pub fn poll_hit() -> Option<HitInfo> {
         None
+    }
+
+    pub fn poll_hits() -> Vec<HitInfo> {
+        Vec::new()
     }
 
     pub fn clear() {}
@@ -465,15 +474,16 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
         Request::WatchWrites {
             address,
             len,
-            one_shot: _,
-        } => match watch::arm_watch(address, len, true) {
+            one_shot,
+            mechanism,
+        } => match watch::arm_watch(address, len, one_shot, mechanism.as_deref()) {
             Ok(()) => Response::WatchArmed,
             Err(e) => Response::Error { message: e },
         },
         Request::BreakOnCode {
             address,
-            one_shot: _,
-        } => match watch::arm_break(address, true) {
+            one_shot,
+        } => match watch::arm_break(address, one_shot) {
             Ok(()) => Response::BreakArmed,
             Err(e) => Response::Error { message: e },
         },
@@ -481,12 +491,15 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             watch::clear();
             Response::BreakpointsCleared
         }
-        Request::PollHit => match watch::poll_hit() {
-            Some(hit) => Response::PollHit {
-                hit: Some(hit_to_info(hit)),
-            },
-            None => Response::PollHit { hit: None },
-        },
+        Request::PollHit => {
+            let hits = watch::poll_hits();
+            let hit_dtos: Vec<protocol::WatchHitInfo> = hits.into_iter().map(hit_to_info).collect();
+            let first = hit_dtos.first().cloned();
+            Response::PollHit {
+                hit: first,
+                hits: hit_dtos,
+            }
+        }
         Request::CaptureReg {
             target,
             spec,

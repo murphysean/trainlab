@@ -37,6 +37,11 @@ pub struct GameProfile {
     /// Setup steps that resolve base addresses for the current launch.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
+    /// Named struct/object type definitions for this game. Loaded into the
+    /// session's type catalog on profile attach, making them available to
+    /// tools and cheats by type name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structs: Vec<crate::session::StructDef>,
     /// Optional initialization commands executed automatically when profile attaches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init_commands: Option<Vec<ProfileCommand>>,
@@ -529,6 +534,7 @@ mod tests {
                     offsets: vec!["0x10".into(), "0x28".into()],
                 },
             ],
+            structs: vec![],
             init_commands: None,
             render: None,
             cheats: vec![ProfileCheat {
@@ -577,6 +583,7 @@ mod tests {
             date: None,
             author: None,
             setup: vec![],
+            structs: vec![],
             init_commands: None,
             render: None,
             cheats: vec![],
@@ -600,6 +607,7 @@ mod tests {
             date: None,
             author: None,
             setup: vec![],
+            structs: vec![],
             init_commands: None,
             render: None,
             cheats: vec![ProfileCheat {
@@ -735,6 +743,54 @@ cheats: []
         let serialized = profile.to_yaml().expect("serialize");
         let back = GameProfile::from_yaml(&serialized).expect("roundtrip parse");
         assert_eq!(back.name, "Test Sins2 AobScan Region");
+    }
+
+    #[test]
+    fn test_structs_value_type_case_insensitivity() {
+        let yaml = r#"
+schema: trainlab-profile/v1
+game: sins2.exe
+name: Sins 2 Structs
+structs:
+  - name: ShipEntity
+    size: 0x200
+    fields:
+      - label: Health
+        offset_expr: "0x38"
+        value_type: f32
+      - label: Shield
+        offset_expr: "0x40"
+        value_type: F32
+      - label: PlayerPtr
+        offset_expr: "0x48"
+        value_type: ptr
+      - label: HullMax
+        offset_expr: "0x50"
+        value_type: Ptr
+      - label: Speed
+        offset_expr: "0x58"
+        value_type: i32
+      - label: Armor
+        offset_expr: "0x5c"
+        value_type: U32
+cheats: []
+"#;
+        let profile = GameProfile::from_yaml(yaml).expect("parse structs with lowercase and mixed value_type");
+        assert_eq!(profile.structs.len(), 1);
+        let s = &profile.structs[0];
+        assert_eq!(s.name, "ShipEntity");
+        assert_eq!(s.fields.len(), 6);
+        assert_eq!(s.fields[0].value_type, crate::scan::ValueType::F32);
+        assert_eq!(s.fields[1].value_type, crate::scan::ValueType::F32);
+        assert_eq!(s.fields[2].value_type, crate::scan::ValueType::Ptr);
+        assert_eq!(s.fields[3].value_type, crate::scan::ValueType::Ptr);
+        assert_eq!(s.fields[4].value_type, crate::scan::ValueType::I32);
+        assert_eq!(s.fields[5].value_type, crate::scan::ValueType::U32);
+
+        // Verify roundtrip
+        let serialized = profile.to_yaml().expect("serialize profile");
+        let back = GameProfile::from_yaml(&serialized).expect("roundtrip profile parse");
+        assert_eq!(back.structs[0].fields.len(), 6);
     }
 
     #[test]

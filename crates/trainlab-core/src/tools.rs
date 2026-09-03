@@ -258,6 +258,12 @@ pub struct SetMarkerArgs {
     /// Optional byte size if this marks a memory region (e.g. 0x10000000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
+    /// Semantic kind: "pointer" (default), "object", "buffer", or "code".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Optional struct type name reference (only meaningful when kind == "object").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub struct_type: Option<String>,
     pub note: Option<String>,
 }
 
@@ -1056,7 +1062,7 @@ pub fn execute_allocate_string(
             s.log_activity(&ctx.id, format!("allocated string ({kind}, {len} bytes) at {alloc_addr:#x}"));
             s.record_allocation(alloc_addr, len, format!("string ({kind})"), args.marker.clone());
             if let Some(m) = &args.marker {
-                let _ = s.set_marker(m, alloc_addr, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
+                let _ = s.set_marker_full(m, alloc_addr, Some(len), crate::session::MarkerKind::Buffer, None, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
             }
         }
 
@@ -1144,7 +1150,7 @@ pub fn execute_allocate_memory(
             s.log_activity(&ctx.id, format!("allocated memory ({size} bytes) at {alloc_addr:#x}"));
             s.record_allocation(alloc_addr, size, "raw memory buffer", args.marker.clone());
             if let Some(m) = &args.marker {
-                let _ = s.set_marker(m, alloc_addr, Some(&format!("Allocated memory buffer ({size} bytes)")));
+                let _ = s.set_marker_full(m, alloc_addr, Some(size), crate::session::MarkerKind::Buffer, None, Some(&format!("Allocated memory buffer ({size} bytes)")));
             }
         }
 
@@ -1785,12 +1791,24 @@ pub fn execute_pointer_chase(
     args: PointerChaseArgs,
 ) -> Result<ToolResult, ToolError> {
     let base = eval_addr_expr(session, &args.base, Some(mem))?;
+    // Check if the base expression resolves to an Object-kind marker. If so,
+    // skip the initial dereference — the base IS the object instance.
+    let base_is_object = {
+        let raw = args.base.trim().trim_start_matches('$');
+        session.lock().ok()
+            .and_then(|s| s.get_marker(raw).map(|m| m.kind == crate::session::MarkerKind::Object))
+            .unwrap_or(false)
+    };
     let mut offsets = Vec::new();
     for o in &args.offsets {
-        offsets.push(eval_addr_expr(session, o, Some(mem))?);
+        offsets.push(eval_addr_expr(session, o, Some(mem))?)
     }
 
-    let hops = crate::pointer::chase(mem, base, &offsets).map_err(|e| err(e.to_string()))?;
+    let hops = if base_is_object {
+        crate::pointer::chase_object(mem, base, &offsets).map_err(|e| err(e.to_string()))?
+    } else {
+        crate::pointer::chase(mem, base, &offsets).map_err(|e| err(e.to_string()))?
+    };
     let lines: Vec<String> = hops
         .iter()
         .enumerate()
@@ -1804,11 +1822,13 @@ pub fn execute_pointer_chase(
         .collect();
 
     let final_addr = hops.last().copied().unwrap_or(base);
+    let mode_note = if base_is_object { " (object mode: no initial deref)" } else { "" };
 
     Ok(ToolResult::with_data(
-        lines.join("\n"),
+        format!("{}{}", lines.join("\n"), mode_note),
         serde_json::json!({
             "base": base,
+            "base_is_object": base_is_object,
             "hops": hops,
             "resolved_address": final_addr,
             "client_id": ctx.id,
@@ -1824,21 +1844,34 @@ pub fn execute_set_marker(
     args: SetMarkerArgs,
 ) -> Result<ToolResult, ToolError> {
     let target_addr = eval_addr_expr(session, &args.address, mem)?;
+    let kind = match args.kind.as_deref() {
+        Some("object") => crate::session::MarkerKind::Object,
+        Some("buffer") => crate::session::MarkerKind::Buffer,
+        Some("code")   => crate::session::MarkerKind::Code,
+        _              => crate::session::MarkerKind::Pointer,
+    };
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
-    s.set_marker_region(&args.label, target_addr, args.size, args.note.as_deref()).map_err(err)?;
+    s.set_marker_full(&args.label, target_addr, args.size, kind, args.struct_type.clone(), args.note.as_deref()).map_err(err)?;
     let size_msg = match args.size {
         Some(sz) => format!(" (region: {target_addr:#x}..{:#x}, {sz:#x} bytes)", target_addr.saturating_add(sz as u64)),
         None => String::new(),
     };
-    s.log_activity(&ctx.id, format!("saved marker '${}' = {target_addr:#x}{size_msg}", args.label));
+    let kind_msg = if kind != crate::session::MarkerKind::Pointer {
+        format!(" [{kind:?}]")
+    } else {
+        String::new()
+    };
+    s.log_activity(&ctx.id, format!("saved marker '${}' = {target_addr:#x}{size_msg}{kind_msg}", args.label));
 
     Ok(ToolResult::with_data(
-        format!("saved marker '${}' = {target_addr:#x}{size_msg}", args.label),
+        format!("saved marker '${}' = {target_addr:#x}{size_msg}{kind_msg}", args.label),
         serde_json::json!({
             "label": args.label,
             "address": target_addr,
             "size": args.size,
-            "end_address": args.size.map(|s| target_addr.saturating_add(s as u64)),
+            "kind": format!("{kind:?}").to_lowercase(),
+            "struct_type": args.struct_type,
+            "end_address": args.size.map(|sz| target_addr.saturating_add(sz as u64)),
             "client_id": ctx.id,
         }),
     ))
@@ -1858,13 +1891,23 @@ pub fn execute_get_marker(
                 Some(sz) => format!("..{:#x} (+{sz:#x})", m.address.saturating_add(sz as u64)),
                 None => String::new(),
             };
-            let text = format!("{} = {:#018x}{}{}", m.label, m.address, region_str, if note.is_empty() { String::new() } else { format!("  ({note})") });
+            let kind_str = match m.kind {
+                crate::session::MarkerKind::Pointer => String::new(),
+                crate::session::MarkerKind::Object  => " [object]".to_string(),
+                crate::session::MarkerKind::Buffer  => " [buffer]".to_string(),
+                crate::session::MarkerKind::Code    => " [code]".to_string(),
+            };
+            let type_str = m.struct_type.as_deref().map(|t| format!(" <{t}>")).unwrap_or_default();
+            let text = format!("{} = {:#018x}{}{}{}{}", m.label, m.address, region_str, kind_str, type_str,
+                if note.is_empty() { String::new() } else { format!("  ({note})") });
             Ok(ToolResult::with_data(
                 text,
                 serde_json::json!({
                     "label": m.label,
                     "address": m.address,
                     "size": m.size,
+                    "kind": format!("{:?}", m.kind).to_lowercase(),
+                    "struct_type": m.struct_type,
                     "end_address": m.end_address(),
                     "note": m.note,
                     "client_id": ctx.id,
@@ -1896,7 +1939,15 @@ pub fn execute_list_markers(
                 Some(sz) => format!("..{:#x} (+{sz:#x})", m.address.saturating_add(sz as u64)),
                 None => String::new(),
             };
-            format!("{:<20} {:#018x}{}{}", m.label, m.address, region_str, if note.is_empty() { String::new() } else { format!("  ({note})") })
+            let kind_str = match m.kind {
+                crate::session::MarkerKind::Pointer => String::new(),
+                crate::session::MarkerKind::Object  => " [object]".to_string(),
+                crate::session::MarkerKind::Buffer  => " [buffer]".to_string(),
+                crate::session::MarkerKind::Code    => " [code]".to_string(),
+            };
+            let type_str = m.struct_type.as_deref().map(|t| format!(" <{t}>")).unwrap_or_default();
+            format!("{:<20} {:#018x}{}{}{}{}", m.label, m.address, region_str, kind_str, type_str,
+                if note.is_empty() { String::new() } else { format!("  ({note})") })
         })
         .collect();
 
@@ -1907,6 +1958,8 @@ pub fn execute_list_markers(
                 "label": m.label,
                 "address": m.address,
                 "size": m.size,
+                "kind": format!("{:?}", m.kind).to_lowercase(),
+                "struct_type": m.struct_type,
                 "end_address": m.end_address(),
                 "note": m.note,
             })).collect::<Vec<_>>(),
@@ -2481,6 +2534,7 @@ pub fn execute_save_profile(
         date,
         author,
         setup: setup_steps,
+        structs: vec![],
         init_commands,
         render,
         cheats: profile_cheats.clone(),
@@ -3133,6 +3187,8 @@ mod tests {
             label: "gold_addr".into(),
             address: "0x20".into(),
             size: None,
+            kind: None,
+            struct_type: None,
             note: Some("gold currency".into()),
         }).unwrap();
         assert!(m_set.message.contains("saved marker '$gold_addr' = 0x20"));

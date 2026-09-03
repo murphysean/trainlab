@@ -17,14 +17,22 @@ use serde::{Deserialize, Serialize};
 
 /// The width/interpretation of a scanned value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ValueType {
+    #[serde(alias = "I32", alias = "int", alias = "int32")]
     I32,
+    #[serde(alias = "U32", alias = "uint", alias = "uint32")]
     U32,
+    #[serde(alias = "F32", alias = "float")]
     F32,
+    #[serde(alias = "I64", alias = "int64")]
     I64,
+    #[serde(alias = "U64", alias = "uint64")]
     U64,
+    #[serde(alias = "F64", alias = "double")]
     F64,
     /// A pointer-sized value (8 bytes on x86-64).
+    #[serde(alias = "PTR", alias = "Ptr", alias = "pointer", alias = "usize")]
     Ptr,
 }
 

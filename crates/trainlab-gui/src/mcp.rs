@@ -531,9 +531,12 @@ pub struct WatchWritesArgs {
     /// Number of bytes to watch (1, 2, 4, or 8; default 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub len: Option<usize>,
-    /// If true, disarm after the first hit (default true).
+    /// If true, disarm after the first hit (default true). If false, continues accumulating hits until cleared.
     #[serde(default = "default_true")]
     pub one_shot: bool,
+    /// Watchpoint mechanism: "page_guard" (default, robust across all worker threads & Wine/Proton) or "hardware" (DR0/DR7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mechanism: Option<String>,
 }
 
 /// Arguments for [`break_on_code`].
@@ -1223,20 +1226,156 @@ impl TrainlabMcpServer {
     }
 
     /// Enable/disable a toggle cheat (installs/removes the cave hook).
-    #[tool(description = "Enable or disable a toggle cheat (e.g. god mode). Enabling installs the cave hook; disabling removes it (restores original bytes). Stages the cave install/undo through the D8 gate; call 'confirm_op' to apply.")]
+    #[tool(description = "Enable or disable a toggle cheat (e.g. god mode). Enabling immediately installs the cave hook; disabling removes it (restores original bytes).")]
     pub(crate) fn set_cheat_toggle(
         &self,
         Parameters(args): Parameters<SetCheatToggleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_set_cheat_toggle(&self.session, &ctx, trainlab_core::tools::SetCheatToggleArgs {
-            id: args.id,
-            enabled: args.enabled,
-        }).map_err(|e| err(e.message))?;
+        let (kind, label) = {
+            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let c = s.get_cheat(args.id).ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
+            (c.kind.clone(), c.label.clone())
+        };
 
-        Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(res.message),
-        ]))
+        match kind {
+            CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
+                if enabled == args.enabled {
+                    return Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text(format!(
+                            "toggle cheat #{} ('{}') already {}",
+                            args.id,
+                            label,
+                            if args.enabled { "enabled" } else { "disabled" }
+                        )),
+                    ]));
+                }
+
+                if args.enabled {
+                    if let trainlab_core::cave_hook::CaveHook::Override { payload, .. } = &hook {
+                        if payload.is_empty() {
+                            return Err(err(format!(
+                                "toggle cheat #{} ('{}') has an empty override hook with no payload; cannot enable stub toggle",
+                                args.id, label
+                            )));
+                        }
+                    }
+
+                    let resp = call_dll(&self.session, &Request::InstallCave {
+                        target,
+                        hook,
+                    }).map_err(err)?;
+
+                    match resp {
+                        Response::CaveInstalled { cave, original, .. } => {
+                            // Verify target memory has live hook
+                            let proc = game_process(&self.session)?;
+                            let check = proc.read(target, 1).unwrap_or_default();
+                            let verified = matches!(check.first(), Some(0xe9 | 0xff | 0xeb));
+
+                            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                            s.set_toggle_cave_info(args.id, original.clone(), cave);
+                            s.record_undo(target, original.clone(), format!("toggle cheat #{} ('{}')", args.id, label));
+                            s.set_cheat_toggle(args.id, true);
+                            s.log_activity("MCP", format!("toggle cheat #{} ('{}') enabled @ {target:#x} -> cave @ {cave:#x}", args.id, label));
+
+                            let msg = if verified {
+                                format!("toggle cheat #{} ('{}') enabled: cave installed @ {cave:#x} (target {target:#x} verified)", args.id, label)
+                            } else {
+                                format!("toggle cheat #{} ('{}') enabled: cave installed @ {cave:#x} (warning: live jump byte not detected at target {target:#x})", args.id, label)
+                            };
+
+                            Ok(CallToolResult::success(vec![
+                                rmcp::model::ContentBlock::text(msg),
+                            ]))
+                        }
+                        Response::Error { message } => Err(err(format!("failed to install cave: {message}"))),
+                        _ => Err(err("unexpected response from DLL during cave install")),
+                    }
+                } else {
+                    let restore_bytes = if !original_bytes.is_empty() {
+                        Some(original_bytes)
+                    } else {
+                        self.session.lock().ok().and_then(|s| s.find_undo_for_target(target))
+                    };
+
+                    let data = restore_bytes.ok_or_else(|| {
+                        err(format!("toggle cheat #{} ('{}') has no stored original bytes; cannot restore", args.id, label))
+                    })?;
+
+                    let resp = call_dll(&self.session, &Request::Write {
+                        address: target,
+                        data,
+                    }).map_err(err)?;
+
+                    match resp {
+                        Response::Write { bytes_written } => {
+                            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                            s.set_cheat_toggle(args.id, false);
+                            s.remove_undo_for_target(target);
+                            s.log_activity("MCP", format!("toggle cheat #{} ('{}') disabled (restored {bytes_written} bytes @ {target:#x})", args.id, label));
+
+                            Ok(CallToolResult::success(vec![
+                                rmcp::model::ContentBlock::text(format!(
+                                    "toggle cheat #{} ('{}') disabled: restored {bytes_written} bytes @ {target:#x}",
+                                    args.id, label
+                                )),
+                            ]))
+                        }
+                        Response::Error { message } => Err(err(format!("failed to restore original bytes: {message}"))),
+                        _ => Err(err("unexpected response from DLL during write")),
+                    }
+                }
+            }
+            CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+                if enabled == args.enabled {
+                    return Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text(format!(
+                            "patch cheat #{} ('{}') already {}",
+                            args.id,
+                            label,
+                            if args.enabled { "enabled" } else { "disabled" }
+                        )),
+                    ]));
+                }
+                if args.enabled && patch_bytes.is_empty() {
+                    return Err(err(format!("patch cheat #{} ('{}') has empty patch_bytes; cannot enable", args.id, label)));
+                }
+
+                let data = if args.enabled {
+                    patch_bytes
+                } else {
+                    if original_bytes.is_empty() {
+                        return Err(err(format!("patch cheat #{} ('{}') has no original bytes recorded; cannot disable", args.id, label)));
+                    }
+                    original_bytes
+                };
+
+                let resp = call_dll(&self.session, &Request::Write {
+                    address: target,
+                    data,
+                }).map_err(err)?;
+
+                match resp {
+                    Response::Write { bytes_written } => {
+                        let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                        s.set_cheat_toggle(args.id, args.enabled);
+                        let action_str = if args.enabled { "enabled" } else { "disabled" };
+                        let desc = cave_ref.as_deref().unwrap_or("patch");
+                        s.log_activity("MCP", format!("patch cheat #{} ('{}') {} ({bytes_written} bytes @ {target:#x}, {desc})", args.id, label, action_str));
+
+                        Ok(CallToolResult::success(vec![
+                            rmcp::model::ContentBlock::text(format!(
+                                "patch cheat #{} ('{}') {}: wrote {bytes_written} bytes @ {target:#x}",
+                                args.id, label, action_str
+                            )),
+                        ]))
+                    }
+                    Response::Error { message } => Err(err(format!("failed to write patch bytes: {message}"))),
+                    _ => Err(err("unexpected response from DLL during patch write")),
+                }
+            }
+            _ => Err(err(format!("cheat #{} ('{}') is not a toggle or patch cheat", args.id, label))),
+        }
     }
 
     /// List cheat profiles discovered in the `cheats/` directory.
@@ -1663,34 +1802,62 @@ impl TrainlabMcpServer {
         for c in cheats {
             match &c.kind {
                 CheatKind::Toggle { target, original_bytes, enabled, .. } => {
-                    if original_bytes.is_empty() {
-                        lines.push(format!("  • #{} '{}' @ {target:#x}: no original bytes recorded (enabled: {enabled})", c.id, c.label));
+                    let orig: Option<Vec<u8>> = if !original_bytes.is_empty() {
+                        Some(original_bytes.clone())
                     } else {
-                        let current = proc.read(*target, original_bytes.len()).unwrap_or_default();
-                        let is_original = current == *original_bytes;
+                        s.find_undo_for_target(*target)
+                    };
+
+                    let sample_len = orig.as_ref().map(|b| b.len().max(5)).unwrap_or(5);
+                    let live = proc.read(*target, sample_len).unwrap_or_default();
+                    let live_hex = live.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+
+                    if let Some(expected) = orig {
+                        let is_original = live.starts_with(&expected);
                         let status = if is_original {
                             "CLEAN (original bytes present)"
-                        } else if current.starts_with(&[0xff, 0x25]) || current.starts_with(&[0xe9]) || current.starts_with(&[0xeb]) {
+                        } else if live.starts_with(&[0xff, 0x25]) || live.starts_with(&[0xe9]) || live.starts_with(&[0xeb]) {
                             "PATCHED (live jump hook present)"
                         } else {
                             "DIRTY / MODIFIED"
                         };
-                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} (session enabled: {enabled})", c.id, c.label));
+                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
+                    } else {
+                        let status = if live.starts_with(&[0xff, 0x25]) || live.starts_with(&[0xe9]) || live.starts_with(&[0xeb]) {
+                            "PATCHED (live jump hook present, baseline unrecorded)"
+                        } else {
+                            "UNKNOWN (no original bytes recorded)"
+                        };
+                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
                     }
                 }
                 CheatKind::Patch { target, original_bytes, patch_bytes, enabled, .. } => {
-                    if original_bytes.is_empty() {
-                        lines.push(format!("  • #{} '{}' @ {target:#x}: no original bytes recorded (enabled: {enabled})", c.id, c.label));
+                    let orig: Option<Vec<u8>> = if !original_bytes.is_empty() {
+                        Some(original_bytes.clone())
                     } else {
-                        let current = proc.read(*target, original_bytes.len()).unwrap_or_default();
-                        let status = if current == *original_bytes {
+                        s.find_undo_for_target(*target)
+                    };
+
+                    let sample_len = orig.as_ref().map(|b| b.len()).unwrap_or_else(|| patch_bytes.len().max(5));
+                    let live = proc.read(*target, sample_len).unwrap_or_default();
+                    let live_hex = live.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+
+                    if let Some(expected) = orig {
+                        let status = if live.starts_with(&expected) {
                             "CLEAN (original bytes present)"
-                        } else if current == *patch_bytes {
+                        } else if !patch_bytes.is_empty() && live.starts_with(patch_bytes) {
                             "PATCHED (patch bytes present)"
                         } else {
                             "DIRTY / MODIFIED"
                         };
-                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} (session enabled: {enabled})", c.id, c.label));
+                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
+                    } else {
+                        let status = if !patch_bytes.is_empty() && live.starts_with(patch_bytes) {
+                            "PATCHED (patch bytes present)"
+                        } else {
+                            "UNKNOWN (no original bytes recorded)"
+                        };
+                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
                     }
                 }
                 _ => {}
@@ -2735,6 +2902,7 @@ impl TrainlabMcpServer {
             address,
             len,
             one_shot: args.one_shot,
+            mechanism: args.mechanism,
         }) {
             Ok(Response::WatchArmed) => {
                 if let Ok(mut s) = self.session.lock() {
@@ -2742,7 +2910,7 @@ impl TrainlabMcpServer {
                 }
                 Ok(CallToolResult::success(vec![
                     rmcp::model::ContentBlock::text(
-                        "watchpoint armed; poll with 'watch_poll' to retrieve the hit",
+                        "watchpoint armed; poll with 'watch_poll' to retrieve the hit(s)",
                     ),
                 ]))
             }
@@ -2786,7 +2954,7 @@ impl TrainlabMcpServer {
                 }
                 Ok(CallToolResult::success(vec![
                     rmcp::model::ContentBlock::text(
-                        "breakpoint armed; poll with 'watch_poll' to retrieve the hit",
+                        "breakpoint armed; poll with 'watch_poll' to retrieve the hit(s)",
                     ),
                 ]))
             }
@@ -2796,31 +2964,67 @@ impl TrainlabMcpServer {
         }
     }
 
-    /// Poll for a hit from an armed watchpoint/breakpoint.
-    #[tool(description = "Retrieve the most recent watchpoint/breakpoint hit (registers + stack). Returns nothing if no hit is pending.")]
+    /// Poll for hits from an armed watchpoint/breakpoint.
+    #[tool(description = "Retrieve accumulated watchpoint/breakpoint hits (registers + stack). Returns nothing if no hit is pending.")]
     fn watch_poll(&self) -> Result<CallToolResult, ErrorData> {
         match call_dll(&self.session, &Request::PollHit) {
-            Ok(Response::PollHit { hit: Some(info) }) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format_hit(
-                    info.rip,
-                    info.rax,
-                    info.rbx,
-                    info.rcx,
-                    info.rdx,
-                    info.rsi,
-                    info.rdi,
-                    info.rsp,
-                    info.rbp,
-                    &info.description,
-                    &info.stack,
-                )),
-            ])),
-            Ok(Response::PollHit { hit: None }) => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text("no pending hit"),
-            ])),
+            Ok(Response::PollHit { hits, hit }) => {
+                let all_hits = if !hits.is_empty() {
+                    hits
+                } else if let Some(h) = hit {
+                    vec![h]
+                } else {
+                    Vec::new()
+                };
+
+                if all_hits.is_empty() {
+                    Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text("no pending hit"),
+                    ]))
+                } else {
+                    let mut formatted = Vec::new();
+                    for (idx, info) in all_hits.iter().enumerate() {
+                        let header = if all_hits.len() > 1 {
+                            format!("--- Hit #{}/{} ---\n", idx + 1, all_hits.len())
+                        } else {
+                            String::new()
+                        };
+                        formatted.push(format!(
+                            "{}{}",
+                            header,
+                            format_hit(
+                                info.rip,
+                                info.rax,
+                                info.rbx,
+                                info.rcx,
+                                info.rdx,
+                                info.rsi,
+                                info.rdi,
+                                info.rsp,
+                                info.rbp,
+                                &info.description,
+                                &info.stack,
+                            )
+                        ));
+                    }
+                    Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text(formatted.join("\n\n")),
+                    ]))
+                }
+            }
             Ok(Response::Error { message }) => Err(err(message)),
             Ok(_) => Err(err("unexpected response from DLL")),
-            Err(e) => Err(err(e)),
+            Err(e) => {
+                let s_guard = self.session.lock().ok();
+                let connected = s_guard.as_ref().map_or(false, |s| s.connected());
+                if !connected {
+                    Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text("no pending hit"),
+                    ]))
+                } else {
+                    Err(err(e))
+                }
+            }
         }
     }
 
@@ -5417,6 +5621,20 @@ cheats: []
             force: false,
         }));
         assert!(res_break.is_err());
+    }
+
+    #[test]
+    fn test_watch_poll_multi_hit_formatting() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
+
+        // When no hits pending
+        let poll_empty = server.watch_poll().expect("watch_poll succeeds");
+        let txt_empty = match &poll_empty.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(txt_empty.contains("no pending hit"));
     }
 
 }

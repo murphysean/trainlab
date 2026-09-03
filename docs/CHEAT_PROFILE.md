@@ -146,6 +146,77 @@ cheats:
 | toggle cheat | `add_cheat` (`CheatKind::Toggle`) + `install_cave` / `set_cheat_toggle` |
 | live value read/write | `read` / `write` |
 
+## 4a. Markers: kinds, struct types, and dereference semantics
+
+Profiles (and sessions) use named **markers** to persist addresses across
+turns. Every marker carries a semantic **kind** that tells tools how to
+interpret the address, plus an optional `struct_type` referencing a named
+layout.
+
+### Marker kinds
+
+| kind | Meaning | Example |
+|------|---------|---------|
+| `pointer` (default) | A **slot** holding an address that must be dereferenced first (e.g. a module-relative base). | `sins2.exe+0x5ceda8` |
+| `object` | The marker **is** a struct/class instance in memory (e.g. a heap object). Offsets apply directly, no initial deref. | `$selection_manager`, `$player_base` |
+| `buffer` | A contiguous memory region / allocation (auto-tagged by string/memory allocation tools). | `$string_pool`, `$game_heap` |
+| `code` | A function entry, hook site, or code cave (auto-tagged by `install_cave`). | `$cave_entry`, `$resource_write_fn` |
+
+Markers are set via `set_marker` (optionally `kind` / `struct_type` args).
+`allocate_string` / `allocate_memory` auto-tag `Buffer`; `install_cave`
+auto-tags `Code`.
+
+### Dereference semantics for pointer_chase
+
+- **`pointer` / default base** — the traditional CE model:
+
+  ```
+  hop 0: ptr = read(base)                // deref the slot
+  hop 1..N: ptr = read(ptr + offset[i])
+  final = ptr + offset[last]
+  ```
+
+- **`object` base marker** — the base IS the struct; no initial deref of base:
+
+  ```
+  offsets ["0xd0"]       -> base + 0xd0                 (field address)
+  offsets ["0xd0","0x0"] -> ptr = read(base + 0xd0)
+                            final = ptr + 0x0
+  ```
+
+This fixes the subtle bug where an object marker was wrongly dereferenced at
+hop 0, walking the object's vtable into module rdata instead of reading a
+field. `pointer_chase` and the profile `PointerChase` command auto-detect an
+`object`-kind base marker and apply object semantics. If a chase lands in a
+module's code/rdata range from a heap-object base, set the base marker kind to
+`object`.
+
+### Struct definitions / type catalog
+
+Named layouts can be registered once and reused everywhere (markers, cheats,
+dump_struct), instead of re-supplying field offsets on every call.
+
+- Registered in the session via `register_struct_def` (`name`, optional `size`,
+  `fields: [{label, offset_expr, value_type}]`, `note`); queried with
+  `list_struct_defs` / `get_struct_def`; removed with `remove_struct_def`.
+- A marker can reference a type via `struct_type: "ShipEntity"`.
+- Profiles can carry a top-level `structs:` list, auto-loaded into the type
+  catalog on profile attach:
+
+  ```yaml
+  structs:
+    - name: ShipEntity
+      size: 0x200
+      note: "main ship struct"
+      fields:
+        - label: Health
+          offset_expr: "0x38"
+          value_type: f32
+        - label: Shield
+          offset_expr: "0x40"
+          value_type: f32
+  ```
+
 ## 5. Attach → init flow
 
 All frontends — GUI attach, MCP `load_profile`, web `/profiles/load` — follow
@@ -231,6 +302,10 @@ writes at 60 Hz" — both are valid, and both are expressible in the profile.
 - `save_profile` — serialize the current session's cheats to a `cheats/*.yaml`
 - `detect_profile` — given a running game, which profile matches? (via
   `find_profile_for_game`; exposed through `list_profiles` + `load_profile`)
+- `set_marker` — save a labeled marker for an address/region (optional `size`,
+  `kind`, `struct_type`, `note`)
+- `register_struct_def` / `list_struct_defs` / `remove_struct_def` — manage the
+  session type-catalog of named struct/object layouts
 
 ## 8. Design decisions / open questions
 
