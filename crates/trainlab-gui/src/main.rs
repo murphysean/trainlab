@@ -1718,7 +1718,10 @@ fn main() -> eframe::Result<()> {
                 tracing::info!("Applied GUI DPI scale factor: {}", app_config.gui.scale);
             }
 
-            // Start the MCP server on a background tokio runtime.
+            // Start the MCP & web server on a background tokio runtime if enabled.
+            let server_enabled = app_config.server.enabled;
+            let mcp_enabled = app_config.server.mcp_enabled;
+            let web_enabled = app_config.server.web_enabled;
             let mcp_host = app_config.server.mcp_host.clone();
             let mcp_port = app_config.server.mcp_port;
             let mcp_session = session.clone();
@@ -1826,12 +1829,16 @@ fn main() -> eframe::Result<()> {
                         }
                     });
 
-                    match mcp::serve(&mcp_host, mcp_port, mcp_session, Some(ctx)).await {
-                        Ok((url, ct)) => {
-                            tracing::info!(%url, "MCP server ready");
-                            ct.cancelled().await;
+                    if server_enabled && (mcp_enabled || web_enabled) {
+                        match mcp::serve(&mcp_host, mcp_port, mcp_enabled, web_enabled, mcp_session, Some(ctx)).await {
+                            Ok((url, ct)) => {
+                                tracing::info!(%url, mcp_enabled, web_enabled, "server ready");
+                                ct.cancelled().await;
+                            }
+                            Err(e) => tracing::error!("failed to start server: {e}"),
                         }
-                        Err(e) => tracing::error!("failed to start MCP server: {e}"),
+                    } else {
+                        tracing::info!("server disabled via configuration");
                     }
                 });
             });

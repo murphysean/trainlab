@@ -5037,10 +5037,11 @@ fn format_hit(
 /// This binds an axum router at `/mcp` hosting the Streamable HTTP transport,
 /// backed by an in-memory `LocalSessionManager`. It returns the base URL
 /// (`http://127.0.0.1:<port>/mcp`) and a cancellation token. It returns
-/// immediately after spawning the serving task.
 pub async fn serve(
     host: &str,
     port: u16,
+    mcp_enabled: bool,
+    web_enabled: bool,
     session: SharedSession,
     egui_ctx: Option<eframe::egui::Context>,
 ) -> anyhow::Result<(String, tokio_util::sync::CancellationToken)> {
@@ -5050,46 +5051,46 @@ pub async fn serve(
     };
 
     let ct = tokio_util::sync::CancellationToken::new();
-    let mut config = StreamableHttpServerConfig::default()
-        .with_sse_keep_alive(Some(std::time::Duration::from_secs(30)))
-        .with_cancellation_token(ct.child_token());
-    // The server binds to 0.0.0.0 so a laptop/desktop can reach it on the LAN
-    // (see LAUNCHING.md). rmcp's default `allowed_hosts` only permits loopback,
-    // which would reject every remote Host header (the client sends the LAN IP,
-    // which we can't know in advance). When binding to all interfaces, disable
-    // the host check so remote MCP clients can connect. Loopback-only binds keep
-    // the default allowlist.
-    if host == "0.0.0.0" {
-        config = config.disable_allowed_hosts();
+    let mut router = axum::Router::new();
+
+    if web_enabled {
+        let api_router = crate::api::router(session.clone(), egui_ctx.clone());
+        let dashboard_router = crate::api::dashboard_router();
+        router = router
+            .merge(dashboard_router)
+            .nest("/api", api_router)
+            .nest_service("/captures", tower_http::services::ServeDir::new("captures"))
+            .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))
+            .nest_service("/scans", tower_http::services::ServeDir::new("scans"))
+            .nest_service("/regions", tower_http::services::ServeDir::new("regions"))
+            .route("/log", axum::routing::get(serve_session_log));
     }
 
-    // Shared session state (game pid, markers, undo log, scan) across all MCP
-    // sessions. The GUI writes `game_pid`; scan-family tools open it here.
-    let session_factory = {
-        let session = session.clone();
-        let egui_ctx = egui_ctx.clone();
-        move || Ok(TrainlabMcpServer::with_session_and_ctx(session.clone(), egui_ctx.clone()))
-    };
-    let service: StreamableHttpService<TrainlabMcpServer, LocalSessionManager> =
-        StreamableHttpService::new(
-            session_factory,
-            std::sync::Arc::new(LocalSessionManager::default()),
-            config,
-        );
-    let api_router = crate::api::router(session.clone(), egui_ctx.clone());
-    let dashboard_router = crate::api::dashboard_router();
-    let router = axum::Router::new()
-        .merge(dashboard_router)
-        .nest("/api", api_router)
-        .nest_service("/mcp", service)
-        .nest_service("/captures", tower_http::services::ServeDir::new("captures"))
-        .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))
-        .nest_service("/scans", tower_http::services::ServeDir::new("scans"))
-        .nest_service("/regions", tower_http::services::ServeDir::new("regions"))
-        .route("/log", axum::routing::get(serve_session_log));
+    if mcp_enabled {
+        let mut config = StreamableHttpServerConfig::default()
+            .with_sse_keep_alive(Some(std::time::Duration::from_secs(30)))
+            .with_cancellation_token(ct.child_token());
+        if host == "0.0.0.0" {
+            config = config.disable_allowed_hosts();
+        }
+
+        let session_factory = {
+            let session = session.clone();
+            let egui_ctx = egui_ctx.clone();
+            move || Ok(TrainlabMcpServer::with_session_and_ctx(session.clone(), egui_ctx.clone()))
+        };
+        let service: StreamableHttpService<TrainlabMcpServer, LocalSessionManager> =
+            StreamableHttpService::new(
+                session_factory,
+                std::sync::Arc::new(LocalSessionManager::default()),
+                config,
+            );
+        router = router.nest_service("/mcp", service);
+    }
+
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let addr = listener.local_addr()?;
-    tracing::info!(%addr, "trainlab MCP server listening on /mcp");
+    tracing::info!(%addr, mcp_enabled, web_enabled, "trainlab HTTP server listening");
 
     tokio::spawn({
         let ct = ct.clone();
@@ -5100,7 +5101,12 @@ pub async fn serve(
         }
     });
 
-    Ok((format!("http://{addr}/mcp"), ct))
+    let url = if mcp_enabled {
+        format!("http://{addr}/mcp")
+    } else {
+        format!("http://{addr}/")
+    };
+    Ok((url, ct))
 }
 
 /// HTTP handler serving `trainlab_session.log` as a downloadable text file at `http://<host>:<port>/log`.
@@ -5133,7 +5139,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_roundtrip() -> anyhow::Result<()> {
-        let (url, ct) = serve("127.0.0.1", 0, Default::default(), None).await?;
+        let (url, ct) = serve("127.0.0.1", 0, true, true, Default::default(), None).await?;
         let url: std::sync::Arc<str> = url.into();
         let transport: StreamableHttpClientTransport<reqwest::Client> =
             StreamableHttpClientTransport::from_uri(url);
@@ -5248,7 +5254,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_tool_and_http_serving_roundtrip() -> anyhow::Result<()> {
-        let (url, ct) = serve("127.0.0.1", 0, Default::default(), None).await?;
+        let (url, ct) = serve("127.0.0.1", 0, true, true, Default::default(), None).await?;
         let mcp_url: std::sync::Arc<str> = url.clone().into();
         let transport: StreamableHttpClientTransport<reqwest::Client> =
             StreamableHttpClientTransport::from_uri(mcp_url);
@@ -5277,7 +5283,7 @@ mod tests {
     #[tokio::test]
     async fn network_packet_capture_and_http_serving_roundtrip() -> anyhow::Result<()> {
         let session = SharedSession::default();
-        let (url, ct) = serve("127.0.0.1", 0, session.clone(), None).await?;
+        let (url, ct) = serve("127.0.0.1", 0, true, true, session.clone(), None).await?;
         let base_url = url.trim_end_matches("/mcp");
 
         // 1. Manually write a captured packet file in captures/ to test HTTP static serving

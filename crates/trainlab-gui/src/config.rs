@@ -73,6 +73,15 @@ fn default_theme() -> String {
 /// MCP & Web server binding options. Permissive 0.0.0.0 by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// Master toggle for the server background task and TCP listener (default true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Whether to mount the MCP Streamable HTTP JSON-RPC endpoint at `/mcp` (default true).
+    #[serde(default = "default_true")]
+    pub mcp_enabled: bool,
+    /// Whether to serve the web dashboard, REST API (/api/*), captures, and logs (default true).
+    #[serde(default = "default_true")]
+    pub web_enabled: bool,
     /// Host address to bind the MCP / HTTP web server on.
     /// Defaults to "0.0.0.0" for LAN access, configurable to "127.0.0.1" for localhost-only.
     #[serde(default = "default_mcp_host")]
@@ -85,12 +94,18 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
+            mcp_enabled: true,
+            web_enabled: true,
             mcp_host: default_mcp_host(),
             mcp_port: default_mcp_port(),
         }
     }
 }
 
+fn default_true() -> bool {
+    true
+}
 fn default_mcp_host() -> String {
     "0.0.0.0".to_string()
 }
@@ -199,6 +214,17 @@ impl AppConfig {
         // Fullscreen
         if let Ok(val) = std::env::var("TRAINLAB_FULLSCREEN") {
             self.gui.fullscreen = val == "1" || val.eq_ignore_ascii_case("true");
+        }
+
+        // Server Toggles
+        if let Ok(val) = std::env::var("TRAINLAB_SERVER_ENABLED") {
+            self.server.enabled = val != "0" && !val.eq_ignore_ascii_case("false");
+        }
+        if let Ok(val) = std::env::var("TRAINLAB_MCP_ENABLED") {
+            self.server.mcp_enabled = val != "0" && !val.eq_ignore_ascii_case("false");
+        }
+        if let Ok(val) = std::env::var("TRAINLAB_WEB_ENABLED") {
+            self.server.web_enabled = val != "0" && !val.eq_ignore_ascii_case("false");
         }
 
         // MCP Server Host (localhost vs 0.0.0.0 LAN)

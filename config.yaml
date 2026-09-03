@@ -10,6 +10,12 @@ gui:
   theme: "dark"
 
 server:
+  # Master toggle for the background HTTP server and TCP port bind (default: true)
+  enabled: true
+  # Whether to mount the MCP Streamable HTTP JSON-RPC endpoint at /mcp (default: true)
+  mcp_enabled: true
+  # Whether to serve the web dashboard, REST API (/api/*), captures, and logs (default: true)
+  web_enabled: true
   # Host address to bind the MCP / HTTP web server on (default 0.0.0.0 for open network access).
   # Set to "127.0.0.1" to restrict access to localhost only.
   mcp_host: "0.0.0.0"
