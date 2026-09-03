@@ -283,10 +283,16 @@ pub fn request(session: &SharedSession, req: &Request) -> Result<Response, Strin
     request_at(&host, port, req, Some(session))
 }
 
-/// Ping the DLL at the given host/port. Returns the reported version.
-pub fn ping_at(host: &str, port: u16, session: Option<&SharedSession>) -> Result<String, String> {
+/// Ping the DLL at the given host/port. Returns the reported version and capabilities.
+pub fn ping_at(host: &str, port: u16, session: Option<&SharedSession>) -> Result<(String, Vec<String>), String> {
     match request_at(host, port, &Request::Ping, session) {
-        Ok(Response::Pong { version }) => Ok(version),
+        Ok(Response::Pong { version, capabilities }) => {
+            if let Some(s) = session
+                && let Ok(mut s_guard) = s.lock() {
+                    s_guard.set_dll_capabilities(capabilities.clone());
+                }
+            Ok((version, capabilities))
+        }
         Ok(Response::Error { message }) => Err(message),
         Ok(_) => Err("unexpected ping response".into()),
         Err(e) => Err(e),
@@ -303,10 +309,11 @@ pub fn check_connection(session: &SharedSession) -> Result<String, String> {
         (s.dll_host().to_string(), s.dll_port())
     };
     match ping_at(&host, port, Some(session)) {
-        Ok(v) => {
+        Ok((v, caps)) => {
             if let Ok(mut s) = session.lock() {
                 s.set_connected(true);
                 s.set_inject_version(Some(v.clone()));
+                s.set_dll_capabilities(caps);
             }
             Ok(v)
         }

@@ -176,6 +176,16 @@ pub struct SetMarkerArgs {
     /// Optional byte size if this marks a memory region (e.g. 0x10000000 for 256MB).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
+    /// Semantic kind of the marked address. Use "object" when the marker IS the struct/class
+    /// instance (offsets applied directly without deref); "pointer" (default) when the marker
+    /// is a pointer slot to be dereferenced; "buffer" for raw memory regions; "code" for
+    /// code/function sites. Affects pointer_chase behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Optional reference to a named struct type (from register_struct_def) describing the
+    /// layout at this address. Only meaningful when kind == "object".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub struct_type: Option<String>,
     /// Optional note describing what this address is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -194,6 +204,74 @@ pub struct RemoveMarkerArgs {
     /// Label of the marker to remove.
     pub label: String,
 }
+
+/// A single field for [`register_struct_def`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RegisterStructFieldArg {
+    /// Field name / label (e.g. "Health", "Shield", "OwnerID").
+    pub label: String,
+    /// Offset from the struct base as a hex or decimal string (e.g. "0x38", "56").
+    pub offset_expr: String,
+    /// Value type string: i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, ptr.
+    pub value_type: String,
+}
+
+/// Arguments for [`register_struct_def`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RegisterStructDefArgs {
+    /// Unique type name, e.g. "ShipEntity", "PlayerData", "SelectionManager".
+    pub name: String,
+    /// Total byte size of the struct, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+    /// Fields in this struct.
+    pub fields: Vec<RegisterStructFieldArg>,
+    /// Optional human note / source comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Arguments for [`remove_struct_def`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RemoveStructDefArgs {
+    /// Type name to remove (e.g. "ShipEntity").
+    pub name: String,
+}
+
+/// Arguments for [`get_network_log`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GetNetworkLogArgs {
+    /// Optional max number of packets to return (default: 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Optional pagination offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// Optional protocol filter: "tcp", "udp", "http", or "all".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proto: Option<String>,
+    /// Optional endpoint filter substring (matches IP, port, or URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+}
+
+/// Arguments for [`watch_network`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WatchNetworkArgs {
+    /// Optional filter string (matching host, port, or URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// Optional protocol filter: "tcp", "udp", "http", or "all".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proto: Option<String>,
+    /// Max packets to inspect in this turn (default: 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// Arguments for [`clear_network_log`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ClearNetworkLogArgs {}
 
 /// Arguments for [`undo_info`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1399,6 +1477,11 @@ impl TrainlabMcpServer {
                 let _ = s.set_marker(name, *addr, Some(&format!("Resolved base address for profile '{}'", profile.game)));
                 s.log_activity("PROFILE", format!("resolved setup marker '${name}' = {addr:#x}"));
             }
+            // Load struct type definitions from the profile into the session type catalog.
+            for def in &profile.structs {
+                s.register_struct_def(def.clone());
+                s.log_activity("PROFILE", format!("registered struct type '{}' ({} field(s))", def.name, def.fields.len()));
+            }
         }
 
         // Execute profile init_commands if defined so memory markers and allocations are established
@@ -2227,7 +2310,7 @@ impl TrainlabMcpServer {
     }
 
     /// Resolve a known pointer chain to the current address of a value.
-    #[tool(description = "Resolve a pointer chain (base + offsets) against the live game; returns each hop and the final value address. Use a chain you discovered, e.g. via pointer_scan.")]
+    #[tool(description = "Resolve a pointer chain (base + offsets) against the live game; returns each hop and the final value address. Use a chain you discovered, e.g. via pointer_scan. Dereference semantics: by default base is treated as a POINTER SLOT — hop 0 dereferences base, then each offset dereferences the running pointer (`base -> *base -> *(*base+off[0]) -> ... -> final`). If base references a marker whose kind is 'object' (the marker IS a struct instance, not a slot), the initial dereference is SKIPPED and offsets apply directly to the object: a single offset `['0xd0']` resolves to `base+0xd0`, and `['0xd0','0x0']` reads `*(base+0xd0)` then returns `ptr+0x0`. When a chase lands in module code/rdata from a heap-object base marker, set the base marker kind to 'object'.")]
     fn pointer_chase(
         &self,
         Parameters(args): Parameters<PointerChaseArgs>,
@@ -2245,7 +2328,7 @@ impl TrainlabMcpServer {
     }
 
     /// Set a labeled marker for an address or region (persists across turns).
-    #[tool(description = "Save a labeled marker for an address or region (optional size in bytes) so the agent can reference or scan it later.")]
+    #[tool(description = "Save a labeled marker for an address or region (optional size in bytes) so the agent can reference or scan it later. kind describes what the address represents: 'pointer' (default — a slot holding an address to dereference, e.g. a module+offset base), 'object' (the marker IS a struct/class instance, e.g. a heap object; offsets apply directly without an initial deref in pointer_chase), 'buffer' (a contiguous memory region/allocation), or 'code' (a function/hook/cave). struct_type is an optional reference to a named layout registered via register_struct_def, meaningful when kind='object'.")]
     pub(crate) fn set_marker(
         &self,
         Parameters(args): Parameters<SetMarkerArgs>,
@@ -2256,6 +2339,8 @@ impl TrainlabMcpServer {
             label: args.label,
             address: args.address,
             size: args.size,
+            kind: args.kind,
+            struct_type: args.struct_type,
             note: args.note,
         }).map_err(|e| err(e.message))?;
 
@@ -2757,6 +2842,150 @@ impl TrainlabMcpServer {
         }
     }
 
+    /// Retrieve captured network traffic log from the session.
+    #[tool(description = "Retrieve captured network packets (TCP/UDP/HTTP) logged by in-game hooks. Output is kept lightweight (summaries and short preview); returns relative file paths or download links for full packet dumps.")]
+    pub fn get_network_log(
+        &self,
+        Parameters(args): Parameters<GetNetworkLogArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        if !s.has_capability("network_capture") {
+            let caps = s.dll_capabilities().join(", ");
+            return Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(format!(
+                    "Notice: Connected DLL does not advertise 'network_capture' capability (reported capabilities: [{caps}]). Network interception may be disabled or running on an unsupported platform (e.g. Linux stub)."
+                )),
+            ]));
+        }
+
+        let proto = match args.proto.as_deref().map(|p| p.to_lowercase()).as_deref() {
+            Some("tcp") => Some(trainlab_core::protocol::PacketKind::Tcp),
+            Some("udp") => Some(trainlab_core::protocol::PacketKind::Udp),
+            Some("http") => Some(trainlab_core::protocol::PacketKind::Http),
+            _ => None,
+        };
+
+        let (packets, total) = s.list_network_packets(
+            args.limit.or(Some(20)),
+            args.offset,
+            proto,
+            args.filter.as_deref(),
+        );
+
+        if packets.is_empty() {
+            return Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(format!(
+                    "No captured network packets matching criteria (total logged: {total})."
+                )),
+            ]));
+        }
+
+        let mut lines = Vec::new();
+        lines.push(format!("Captured Network Packets (showing {} of {total}):", packets.len()));
+
+        for p in &packets {
+            let ep = p.remote_endpoint.as_deref().unwrap_or(p.local_endpoint.as_deref().unwrap_or("?"));
+            let dir_icon = match p.direction {
+                trainlab_core::protocol::PacketDirection::Inbound => "IN  ⬇",
+                trainlab_core::protocol::PacketDirection::Outbound => "OUT ⬆",
+            };
+
+            // Lightweight ASCII preview
+            let preview_str: String = p.payload_preview.iter()
+                .take(64)
+                .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                .collect();
+
+            let file_ref = p.artifact_file.as_deref().map(|f| format!(" [file: {f}]")).unwrap_or_default();
+            let url_ref = p.url.as_deref().map(|u| format!(" url: {u}")).unwrap_or_default();
+
+            lines.push(format!(
+                "  #{:04} [{}] {:<4} {:<22} size={:<4} preview=\"{}\"{url_ref}{file_ref}",
+                p.id,
+                dir_icon,
+                p.kind.as_str().to_uppercase(),
+                ep,
+                p.payload_len,
+                preview_str
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(lines.join("\n")),
+        ]))
+    }
+
+    /// Watch or inspect incoming network traffic with optional endpoint filtering.
+    #[tool(description = "Watch incoming/outgoing network packets matching an optional host/port or URL filter. Returns the latest matching packet summaries and lightweight previews.")]
+    pub fn watch_network(
+        &self,
+        Parameters(args): Parameters<WatchNetworkArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        if !s.has_capability("network_capture") {
+            return Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(
+                    "Network capture is unavailable: target DLL does not support 'network_capture'."
+                ),
+            ]));
+        }
+
+        let proto = match args.proto.as_deref().map(|p| p.to_lowercase()).as_deref() {
+            Some("tcp") => Some(trainlab_core::protocol::PacketKind::Tcp),
+            Some("udp") => Some(trainlab_core::protocol::PacketKind::Udp),
+            Some("http") => Some(trainlab_core::protocol::PacketKind::Http),
+            _ => None,
+        };
+
+        let (packets, total) = s.list_network_packets(
+            args.limit.or(Some(10)),
+            None,
+            proto,
+            args.filter.as_deref(),
+        );
+
+        if packets.is_empty() {
+            return Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(format!(
+                    "No matching network packets observed (total in buffer: {total})."
+                )),
+            ]));
+        }
+
+        let mut lines = Vec::new();
+        lines.push(format!("Network Traffic Watch (latest {} packets):", packets.len()));
+        for p in &packets {
+            let ep = p.remote_endpoint.as_deref().unwrap_or("?");
+            let dir_icon = match p.direction {
+                trainlab_core::protocol::PacketDirection::Inbound => "IN ",
+                trainlab_core::protocol::PacketDirection::Outbound => "OUT",
+            };
+            let preview: String = p.payload_preview.iter()
+                .take(48)
+                .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                .collect();
+            let file_ref = p.artifact_file.as_deref().map(|f| format!(" [download: {f}]")).unwrap_or_default();
+            lines.push(format!("  #{:04} [{}] {:<4} {:<20} ({} B): \"{}\"{file_ref}", p.id, dir_icon, p.kind.as_str(), ep, p.payload_len, preview));
+        }
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(lines.join("\n")),
+        ]))
+    }
+
+    /// Clear the network traffic log buffer.
+    #[tool(description = "Clear all captured network packets from the active session buffer.")]
+    pub fn clear_network_log(
+        &self,
+        Parameters(_args): Parameters<ClearNetworkLogArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        let cleared = s.clear_network_packets();
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(format!("Cleared {cleared} captured network packet(s) from session.")),
+        ]))
+    }
+
     /// Write bytes or a typed value to game memory directly (with auto-undo snapshotting).
     #[tool(description = "Write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Executes immediately and records an undo snapshot.")]
     pub(crate) fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, ErrorData> {
@@ -2902,7 +3131,7 @@ impl TrainlabMcpServer {
                     format!("install_cave at {:#x}", target),
                 );
                 if let Some(m) = &args.marker {
-                    let _ = s.set_marker(m, cave, Some(&format!("Code cave allocated for target {target:#x}")));
+                    let _ = s.set_marker_full(m, cave, None, trainlab_core::session::MarkerKind::Code, None, Some(&format!("Code cave allocated for target {target:#x}")));
                 }
                 // Auto-set markers for any labels defined in the assembly
                 for (lbl_name, offset) in &label_offsets {
@@ -3079,7 +3308,7 @@ impl TrainlabMcpServer {
                             format!("install_cave at {:#x}", target),
                         );
                         if let Some(m) = marker {
-                            let _ = s.set_marker(m, cave, Some(&format!("Code cave allocated for target {target:#x}")));
+                            let _ = s.set_marker_full(m, cave, None, trainlab_core::session::MarkerKind::Code, None, Some(&format!("Code cave allocated for target {target:#x}")));
                         }
                         // Auto-set markers for any labels defined in the assembly
                         for (lbl_name, offset) in label_offsets {
@@ -3228,6 +3457,70 @@ impl TrainlabMcpServer {
         self.request_repaint();
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
+        ]))
+    }
+
+    /// Register or overwrite a named struct/object type definition in the session type catalog.
+    #[tool(description = "Register a named struct/class layout definition (type name + fields with offsets and value types) in the session type catalog. Once registered, use set_marker with kind='object' and struct_type='TypeName' to tag markers. Future dump_struct calls can reference the type by name.")]
+    fn register_struct_def(
+        &self,
+        Parameters(args): Parameters<RegisterStructDefArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let def = trainlab_core::session::StructDef {
+            name: args.name.clone(),
+            size: args.size,
+            fields: args.fields.into_iter().map(|f| {
+                let vt = parse_value_type(&f.value_type).unwrap_or(trainlab_core::scan::ValueType::I32);
+                trainlab_core::session::StructField {
+                    label: f.label,
+                    offset_expr: f.offset_expr,
+                    value_type: vt,
+                }
+            }).collect(),
+            note: args.note,
+        };
+        let field_count = def.fields.len();
+        let size_str = def.size.map(|s| format!(" ({s:#x} bytes)")).unwrap_or_default();
+        self.session.lock().unwrap().register_struct_def(def);
+        self.request_repaint();
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(format!("registered struct type '{}'{size_str} with {field_count} field(s)", args.name)),
+        ]))
+    }
+
+    /// List all registered struct definitions in the session type catalog.
+    #[tool(description = "List all named struct/object type definitions currently registered in the session type catalog.")]
+    fn list_struct_defs(&self) -> Result<CallToolResult, ErrorData> {
+        let s = self.session.lock().unwrap();
+        let defs = s.list_struct_defs();
+        if defs.is_empty() {
+            return Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text("no struct definitions registered")]));
+        }
+        let lines: Vec<String> = defs.iter().map(|d| {
+            let size_str = d.size.map(|sz| format!(" ({sz:#x} bytes)")).unwrap_or_default();
+            let fields_str: Vec<String> = d.fields.iter().map(|f| {
+                format!("  +{}: {} ({:?})", f.offset_expr, f.label, f.value_type)
+            }).collect();
+            format!("{}{}:\n{}", d.name, size_str,
+                if fields_str.is_empty() { "  (no fields)".into() } else { fields_str.join("\n") })
+        }).collect();
+        Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(lines.join("\n\n"))]))
+    }
+
+    /// Remove a named struct definition from the session type catalog.
+    #[tool(description = "Remove a named struct/object type definition from the session type catalog by type name.")]
+    fn remove_struct_def(
+        &self,
+        Parameters(args): Parameters<RemoveStructDefArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let removed = self.session.lock().unwrap().remove_struct_def(&args.name);
+        self.request_repaint();
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(if removed.is_some() {
+                format!("removed struct type '{}'", args.name)
+            } else {
+                format!("struct type '{}' not found", args.name)
+            }),
         ]))
     }
 
@@ -3479,7 +3772,7 @@ pub(crate) fn execute_profile_commands(
                     trainlab_core::protocol::Response::CaveInstalled { cave, original, .. } => {
                         if let Some(m) = marker
                             && let Ok(mut s) = session.lock() {
-                                let _ = s.set_marker(m, cave, Some(&format!("Cave for target {target_addr:#x}")));
+                                let _ = s.set_marker_full(m, cave, None, trainlab_core::session::MarkerKind::Code, None, Some(&format!("Cave for target {target_addr:#x}")));
                             }
                         if let Ok(mut s) = session.lock() {
                             // Auto-set markers for any labels defined in the assembly
@@ -3643,6 +3936,13 @@ pub(crate) fn execute_profile_commands(
             crate::profile::ProfileCommand::PointerChase { marker, base, offsets, .. } => {
                 let mut curr_addr = parse_addr_expr(session, base)
                     .map_err(|e| format!("cmd {idx}: bad base '{base}': {e:?}"))?;
+                // Detect Object-kind markers: skip the initial dereference — the base IS the object.
+                let base_is_object = {
+                    let raw = base.trim().trim_start_matches('$');
+                    session.lock().ok()
+                        .and_then(|s| s.get_marker(raw).map(|m| m.kind == trainlab_core::session::MarkerKind::Object))
+                        .unwrap_or(false)
+                };
                 // T-131: Parse offsets strictly — error on malformed offsets instead of silently dropping them.
                 let parsed_offs: Vec<u64> = offsets.iter().map(|o| {
                     let clean = o.trim_start_matches('+').trim();
@@ -3651,21 +3951,62 @@ pub(crate) fn execute_profile_commands(
                         .map_err(|e| format!("cmd {idx}: bad pointer chase offset '{o}': {e}"))
                 }).collect::<Result<Vec<_>, _>>()?;
 
-                for off in &parsed_offs {
-                    let read_res = crate::controller::request(
-                        session,
-                        &trainlab_core::protocol::Request::Read { address: curr_addr, len: 8 },
-                    ).map_err(|e| format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}: {e}"))?;
-
-                    match read_res {
-                        trainlab_core::protocol::Response::Read { data } if data.len() == 8 => {
-                            let ptr = u64::from_le_bytes(data.try_into().unwrap());
-                            curr_addr = ptr.wrapping_add(*off);
+                if base_is_object {
+                    // Object mode: base IS the struct; no initial dereference of base.
+                    if parsed_offs.is_empty() {
+                        // No offsets — curr_addr stays as base.
+                    } else if parsed_offs.len() == 1 {
+                        // Single offset: field address = base + offset, no deref needed.
+                        curr_addr = curr_addr.wrapping_add(parsed_offs[0]);
+                    } else {
+                        // Multiple offsets: read(base + off[0]) as first hop, then chase remaining.
+                        let first_read_addr = curr_addr.wrapping_add(parsed_offs[0]);
+                        let read_res = crate::controller::request(
+                            session,
+                            &trainlab_core::protocol::Request::Read { address: first_read_addr, len: 8 },
+                        ).map_err(|e| format!("cmd {idx}: pointer chase object-mode read failed at {first_read_addr:#x}: {e}"))?;
+                        match read_res {
+                            trainlab_core::protocol::Response::Read { data } if data.len() == 8 => {
+                                curr_addr = u64::from_le_bytes(data.try_into().unwrap());
+                            }
+                            trainlab_core::protocol::Response::Error { message } => {
+                                return Err(format!("cmd {idx}: pointer chase object-mode read error at {first_read_addr:#x}: {message}"));
+                            }
+                            _ => return Err(format!("cmd {idx}: pointer chase object-mode short read at {first_read_addr:#x}")),
                         }
-                        trainlab_core::protocol::Response::Error { message } => {
-                            return Err(format!("cmd {idx}: pointer chase read error at {curr_addr:#x}: {message}"));
+                        for off in &parsed_offs[1..] {
+                            let read_res = crate::controller::request(
+                                session,
+                                &trainlab_core::protocol::Request::Read { address: curr_addr, len: 8 },
+                            ).map_err(|e| format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}: {e}"))?;
+                            match read_res {
+                                trainlab_core::protocol::Response::Read { data } if data.len() == 8 => {
+                                    let ptr = u64::from_le_bytes(data.try_into().unwrap());
+                                    curr_addr = ptr.wrapping_add(*off);
+                                }
+                                trainlab_core::protocol::Response::Error { message } => {
+                                    return Err(format!("cmd {idx}: pointer chase read error at {curr_addr:#x}: {message}"));
+                                }
+                                _ => return Err(format!("cmd {idx}: pointer chase short read at {curr_addr:#x}")),
+                            }
                         }
-                        _ => return Err(format!("cmd {idx}: pointer chase short read or unexpected response at {curr_addr:#x}")),
+                    }
+                } else {
+                    for off in &parsed_offs {
+                        let read_res = crate::controller::request(
+                            session,
+                            &trainlab_core::protocol::Request::Read { address: curr_addr, len: 8 },
+                        ).map_err(|e| format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}: {e}"))?;
+                        match read_res {
+                            trainlab_core::protocol::Response::Read { data } if data.len() == 8 => {
+                                let ptr = u64::from_le_bytes(data.try_into().unwrap());
+                                curr_addr = ptr.wrapping_add(*off);
+                            }
+                            trainlab_core::protocol::Response::Error { message } => {
+                                return Err(format!("cmd {idx}: pointer chase read error at {curr_addr:#x}: {message}"));
+                            }
+                            _ => return Err(format!("cmd {idx}: pointer chase short read or unexpected response at {curr_addr:#x}")),
+                        }
                     }
                 }
                 if let Ok(mut s) = session.lock() {
@@ -4287,6 +4628,7 @@ pub async fn serve(
         .merge(dashboard_router)
         .nest("/api", api_router)
         .nest_service("/mcp", service)
+        .nest_service("/captures", tower_http::services::ServeDir::new("captures"))
         .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))
         .nest_service("/scans", tower_http::services::ServeDir::new("scans"))
         .nest_service("/regions", tower_http::services::ServeDir::new("regions"))
@@ -4476,6 +4818,142 @@ mod tests {
         client.cancel().await?;
         ct.cancel();
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_packet_capture_and_http_serving_roundtrip() -> anyhow::Result<()> {
+        let session = SharedSession::default();
+        let (url, ct) = serve("127.0.0.1", 0, session.clone(), None).await?;
+        let base_url = url.trim_end_matches("/mcp");
+
+        // 1. Manually write a captured packet file in captures/ to test HTTP static serving
+        let _ = std::fs::create_dir_all("captures");
+        let test_packet = std::path::Path::new("captures").join("packet_9999.bin");
+        std::fs::write(&test_packet, b"NETWORK_PAYLOAD_TEST_BYTES")?;
+
+        let http_url = format!("{base_url}/captures/packet_9999.bin");
+        let res = reqwest::get(&http_url).await?;
+        assert!(res.status().is_success(), "HTTP get capture failed with status: {}", res.status());
+        let body = res.bytes().await?;
+        assert_eq!(&body[..], b"NETWORK_PAYLOAD_TEST_BYTES");
+
+        // 2. Add packet to session and test GET /api/network
+        {
+            let mut s = session.lock().unwrap();
+            s.record_network_packet(trainlab_core::protocol::NetworkPacketDto {
+                id: 9999,
+                timestamp_ms: 123456789,
+                kind: trainlab_core::protocol::PacketKind::Udp,
+                direction: trainlab_core::protocol::PacketDirection::Outbound,
+                local_endpoint: Some("127.0.0.1:4000".into()),
+                remote_endpoint: Some("192.168.1.50:27015".into()),
+                url: None,
+                headers: None,
+                payload_len: 26,
+                payload_preview: b"NETWORK_PAYLOAD_TEST_BYTES".to_vec(),
+                artifact_file: Some("captures/packet_9999.bin".into()),
+            });
+        }
+
+        let api_url = format!("{base_url}/api/network");
+        let api_res = reqwest::get(&api_url).await?;
+        assert!(api_res.status().is_success());
+        let api_json: serde_json::Value = api_res.json().await?;
+        assert_eq!(api_json["total"], 1);
+        assert_eq!(api_json["packets"][0]["id"], 9999);
+        assert_eq!(api_json["packets"][0]["kind"], "Udp");
+
+        let _ = std::fs::remove_file(&test_packet);
+        ct.cancel();
+        Ok(())
+    }
+
+    #[test]
+    fn test_mcp_network_tools() {
+        let session = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(session.clone(), None);
+
+        // 1. Without network_capture capability, notices are returned gracefully
+        let res_no_cap = server.get_network_log(Parameters(GetNetworkLogArgs {
+            limit: None,
+            offset: None,
+            proto: None,
+            filter: None,
+        })).unwrap();
+        let text_no_cap = match &res_no_cap.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text_no_cap.contains("does not advertise 'network_capture'"));
+
+        // 2. Set capability and populate packets
+        {
+            let mut s = session.lock().unwrap();
+            s.set_dll_capabilities(vec!["memory".into(), "network_capture".into()]);
+            s.record_network_packet(trainlab_core::protocol::NetworkPacketDto {
+                id: 101,
+                timestamp_ms: 1000,
+                kind: trainlab_core::protocol::PacketKind::Tcp,
+                direction: trainlab_core::protocol::PacketDirection::Outbound,
+                local_endpoint: Some("127.0.0.1:50000".into()),
+                remote_endpoint: Some("93.184.216.34:80".into()),
+                url: None,
+                headers: None,
+                payload_len: 18,
+                payload_preview: b"GET / HTTP/1.1\r\n\r\n".to_vec(),
+                artifact_file: Some("captures/packet_101.bin".into()),
+            });
+        }
+
+        // 3. Test get_network_log
+        let res_log = server.get_network_log(Parameters(GetNetworkLogArgs {
+            limit: Some(10),
+            offset: None,
+            proto: Some("tcp".into()),
+            filter: Some("93.184".into()),
+        })).unwrap();
+        let text_log = match &res_log.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text_log.contains("#0101"));
+        assert!(text_log.contains("TCP"));
+        assert!(text_log.contains("GET / HTTP/1.1"));
+        assert!(text_log.contains("[file: captures/packet_101.bin]"));
+
+        // 4. Test watch_network
+        let res_watch = server.watch_network(Parameters(WatchNetworkArgs {
+            filter: Some("93.184".into()),
+            proto: None,
+            limit: Some(5),
+        })).unwrap();
+        let text_watch = match &res_watch.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text_watch.contains("#0101"));
+        assert!(text_watch.contains("GET / HTTP/1.1"));
+
+        // 5. Test clear_network_log
+        let res_clear = server.clear_network_log(Parameters(ClearNetworkLogArgs {})).unwrap();
+        let text_clear = match &res_clear.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text_clear.contains("Cleared 1 captured network packet(s)"));
+
+        // Confirm buffer is now empty
+        let res_empty = server.get_network_log(Parameters(GetNetworkLogArgs {
+            limit: None,
+            offset: None,
+            proto: None,
+            filter: None,
+        })).unwrap();
+        let text_empty = match &res_empty.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text_empty.contains("No captured network packets"));
     }
 
     #[test]

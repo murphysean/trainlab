@@ -32,6 +32,9 @@ mod captures;
 /// In-game graphics API detection, swapchain present hook, and input capture.
 pub mod render;
 
+/// In-game Winsock & WinHTTP network traffic inspection.
+pub mod network;
+
 /// Non-Windows stubs so the crate still builds (and behaves gracefully) on
 /// Linux. All watchpoint/breakpoint requests return a "not supported" error.
 #[cfg(not(windows))]
@@ -96,6 +99,9 @@ pub fn start(port: u16) -> std::io::Result<u16> {
     // Initialize graphics API detection and render loop hooks
     render::init();
 
+    // Initialize network traffic hooks
+    network::init();
+
     thread::Builder::new()
         .name("trainlab-inject".into())
         .spawn(move || {
@@ -113,10 +119,10 @@ pub fn start(port: u16) -> std::io::Result<u16> {
                         // connection is cheap here.
                         let _ = thread::Builder::new()
                             .name("trainlab-inject-conn".into())
-                            .spawn(move || handle_connection(stream));
+                            .spawn(move || handle_client(stream));
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "accept failed");
+                        tracing::warn!(error = %e, "error accepting connection");
                     }
                 }
             }
@@ -125,9 +131,8 @@ pub fn start(port: u16) -> std::io::Result<u16> {
     Ok(actual)
 }
 
-/// Handle a single client connection, processing requests until the client
-/// disconnects.
-fn handle_connection(mut stream: TcpStream) {
+/// Handle a single connection from the GUI.
+fn handle_client(mut stream: TcpStream) {
     use std::io::Write;
     use std::time::Duration;
     use trainlab_core::protocol::Message;
@@ -156,6 +161,17 @@ fn handle_connection(mut stream: TcpStream) {
                         }
                     }
                 }
+
+                let net_events = network::drain_network_events();
+                for evt in net_events {
+                    let evt_msg = Message::Event(evt);
+                    if let Ok(out) = protocol::encode(&evt_msg) {
+                        if push_stream.write_all(&out).is_err() {
+                            return; // Client disconnected or stream closed
+                        }
+                    }
+                }
+
                 thread::sleep(Duration::from_millis(16));
             }
         });
@@ -281,9 +297,25 @@ fn handle_request_guarded(mem: &SelfProcess, req: Request) -> Response {
 
 fn handle_request(mem: &SelfProcess, req: Request) -> Response {
     match req {
-        Request::Ping => Response::Pong {
-            version: trainlab_core::VERSION.to_string(),
-        },
+        Request::Ping => {
+            #[cfg(windows)]
+            let capabilities = vec![
+                "memory".to_string(),
+                "caves".to_string(),
+                "render".to_string(),
+                "network_capture".to_string(),
+            ];
+            #[cfg(not(windows))]
+            let capabilities = vec![
+                "memory".to_string(),
+                "caves".to_string(),
+            ];
+
+            Response::Pong {
+                version: trainlab_core::VERSION.to_string(),
+                capabilities,
+            }
+        }
         Request::Read { address, len } => match mem.read(address, len) {
             Ok(data) => Response::Read { data },
             Err(e) => Response::Error { message: e.to_string() },
@@ -525,6 +557,19 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 hook_wndproc,
                 xinput_hooks,
             }
+        }
+        Request::GetNetworkLog { .. } => {
+            Response::NetworkLog {
+                packets: Vec::new(),
+                total_captured: 0,
+            }
+        }
+        Request::ClearNetworkLog => {
+            Response::NetworkLogCleared { cleared: 0 }
+        }
+        Request::ConfigureNetworkHook { enabled } => {
+            network::set_enabled(enabled);
+            Response::NetworkHookConfigured { enabled }
         }
     }
 }

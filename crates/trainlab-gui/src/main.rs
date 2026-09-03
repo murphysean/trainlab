@@ -119,6 +119,10 @@ struct TrainlabApp {
     // Run Applications state
     custom_app_path: String,
     custom_app_args: String,
+    // Network Traffic state
+    net_proto_filter: String,
+    net_endpoint_filter: String,
+    selected_packet_id: Option<u64>,
     // Active Tab state
     active_tab: ActiveTab,
     // Auto-run profile init_commands on attach
@@ -154,6 +158,7 @@ enum ActiveTab {
     MemoryScan,
     TaggedMarkers,
     PointersInspection,
+    NetworkTraffic,
     RunApplications,
     ActivityLog,
 }
@@ -199,6 +204,9 @@ impl TrainlabApp {
             playground_cheat_label: "".into(),
             custom_app_path: "".into(),
             custom_app_args: "".into(),
+            net_proto_filter: "All".into(),
+            net_endpoint_filter: "".into(),
+            selected_packet_id: None,
             active_tab: ActiveTab::Cheats,
             auto_init: true,
             window_visible: true,
@@ -1849,7 +1857,8 @@ impl eframe::App for TrainlabApp {
                         ActiveTab::Cheats => ActiveTab::MemoryScan,
                         ActiveTab::MemoryScan => ActiveTab::TaggedMarkers,
                         ActiveTab::TaggedMarkers => ActiveTab::PointersInspection,
-                        ActiveTab::PointersInspection => ActiveTab::RunApplications,
+                        ActiveTab::PointersInspection => ActiveTab::NetworkTraffic,
+                        ActiveTab::NetworkTraffic => ActiveTab::RunApplications,
                         ActiveTab::RunApplications => ActiveTab::ActivityLog,
                         ActiveTab::ActivityLog => ActiveTab::Cheats,
                     };
@@ -1859,7 +1868,8 @@ impl eframe::App for TrainlabApp {
                         ActiveTab::MemoryScan => ActiveTab::Cheats,
                         ActiveTab::TaggedMarkers => ActiveTab::MemoryScan,
                         ActiveTab::PointersInspection => ActiveTab::TaggedMarkers,
-                        ActiveTab::RunApplications => ActiveTab::PointersInspection,
+                        ActiveTab::NetworkTraffic => ActiveTab::PointersInspection,
+                        ActiveTab::RunApplications => ActiveTab::NetworkTraffic,
                         ActiveTab::ActivityLog => ActiveTab::RunApplications,
                     };
                 }
@@ -1899,6 +1909,21 @@ impl eframe::App for TrainlabApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     }
+                }
+                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::NetworkPacket(mut pkt)) => {
+                    // If payload preview exists, write full payload artifact into captures/ directory for HTTP serving
+                    if !pkt.payload_preview.is_empty() {
+                        let _ = std::fs::create_dir_all("captures");
+                        let filename = format!("packet_{}.bin", pkt.id);
+                        let file_path = std::path::Path::new("captures").join(&filename);
+                        if std::fs::write(&file_path, &pkt.payload_preview).is_ok() {
+                            pkt.artifact_file = Some(format!("captures/{filename}"));
+                        }
+                    }
+                    if let Ok(mut s) = self.session.lock() {
+                        s.record_network_packet(pkt);
+                    }
+                    ctx.request_repaint();
                 }
                 trainlab_core::event::BusEvent::Log(_) => {
                     ctx.request_repaint();
@@ -2111,8 +2136,16 @@ impl eframe::App for TrainlabApp {
                             if ui.button("Connect").clicked() {
                                 let req = Request::Ping;
                                 match self.request(&req) {
-                                    Some(Response::Pong { version }) => {
-                                        self.log(format!("connected, inject v{version}"));
+                                    Some(Response::Pong { version, capabilities }) => {
+                                        if let Ok(mut s) = self.session.lock() {
+                                            s.set_dll_capabilities(capabilities.clone());
+                                        }
+                                        let cap_str = if capabilities.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(" [{}]", capabilities.join(", "))
+                                        };
+                                        self.log(format!("connected, inject v{version}{cap_str}"));
                                     }
                                     Some(Response::Error { message }) => {
                                         self.log(format!("error: {message}"));
@@ -2157,6 +2190,7 @@ impl eframe::App for TrainlabApp {
                     ui.selectable_value(&mut self.active_tab, ActiveTab::MemoryScan, "🔍 Memory Scanning");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::TaggedMarkers, "📌 Tagged Markers");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::PointersInspection, "🎯 Pointers & Inspection");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::NetworkTraffic, "🌐 Network Traffic");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::RunApplications, "🚀 Applications");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::ActivityLog, "📋 Activity Log");
                 });
@@ -2419,6 +2453,9 @@ impl eframe::App for TrainlabApp {
                                     }
                                 });
                         }
+                        ActiveTab::NetworkTraffic => {
+                            self.show_network_traffic_panel(ui);
+                        }
                         ActiveTab::RunApplications => {
                             self.show_run_applications_panel(ui);
                         }
@@ -2568,7 +2605,167 @@ impl TrainlabApp {
             });
         }
     }
+
+    /// Render the Network Traffic Inspector panel.
+    fn show_network_traffic_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("🌐 Network Traffic Inspector");
+        ui.label("Inspect intercepted Winsock TCP/UDP and WinHTTP REST API traffic in real-time.");
+        ui.add_space(5.0);
+
+        let (has_cap, hooks_enabled) = if let Ok(s) = self.session.lock() {
+            (s.has_capability("network_capture"), s.network_hooks_enabled())
+        } else {
+            (false, false)
+        };
+
+        if !has_cap {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 160, 40),
+                "⚠ Note: Target DLL does not report the 'network_capture' capability. Network detours are disabled or unsupported on this platform."
+            );
+            ui.add_space(5.0);
+        }
+
+        ui.horizontal(|ui| {
+            let mut enabled = hooks_enabled;
+            if ui.checkbox(&mut enabled, "Enable In-Game Network Hooking").changed() {
+                if let Ok(mut s) = self.session.lock() {
+                    s.set_network_hooks_enabled(enabled);
+                }
+                let _ = self.request(&Request::ConfigureNetworkHook { enabled });
+            }
+
+            ui.separator();
+
+            if ui.button("🗑 Clear Packet Log").clicked() {
+                if let Ok(mut s) = self.session.lock() {
+                    s.clear_network_packets();
+                }
+                self.selected_packet_id = None;
+            }
+
+            ui.separator();
+
+            ui.label("Protocol:");
+            egui::ComboBox::from_id_source("net_proto_filter_cb")
+                .selected_text(&self.net_proto_filter)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.net_proto_filter, "All".into(), "All");
+                    ui.selectable_value(&mut self.net_proto_filter, "TCP".into(), "TCP");
+                    ui.selectable_value(&mut self.net_proto_filter, "UDP".into(), "UDP");
+                    ui.selectable_value(&mut self.net_proto_filter, "HTTP".into(), "HTTP");
+                });
+
+            ui.label("Filter:");
+            ui.text_edit_singleline(&mut self.net_endpoint_filter);
+        });
+
+        ui.add_space(10.0);
+
+        let proto = match self.net_proto_filter.as_str() {
+            "TCP" => Some(trainlab_core::protocol::PacketKind::Tcp),
+            "UDP" => Some(trainlab_core::protocol::PacketKind::Udp),
+            "HTTP" => Some(trainlab_core::protocol::PacketKind::Http),
+            _ => None,
+        };
+        let filter_str = self.net_endpoint_filter.trim();
+        let filter_opt = if filter_str.is_empty() { None } else { Some(filter_str) };
+
+        let (packets, total) = if let Ok(s) = self.session.lock() {
+            s.list_network_packets(Some(100), None, proto, filter_opt)
+        } else {
+            (Vec::new(), 0)
+        };
+
+        ui.label(format!("Showing {} of {} logged packet(s):", packets.len(), total));
+        ui.add_space(5.0);
+
+        // Split view: Packet list table on top, selected packet payload preview on bottom
+        egui::ScrollArea::vertical()
+            .max_height(280.0)
+            .show(ui, |ui| {
+                egui::Grid::new("network_packets_grid")
+                    .striped(true)
+                    .min_col_width(60.0)
+                    .show(ui, |ui| {
+                        ui.strong("ID");
+                        ui.strong("Dir");
+                        ui.strong("Proto");
+                        ui.strong("Endpoint / URL");
+                        ui.strong("Size");
+                        ui.strong("Preview");
+                        ui.strong("File");
+                        ui.end_row();
+
+                        for p in &packets {
+                            let is_selected = self.selected_packet_id == Some(p.id);
+                            let dir_label = match p.direction {
+                                trainlab_core::protocol::PacketDirection::Inbound => "IN ⬇",
+                                trainlab_core::protocol::PacketDirection::Outbound => "OUT ⬆",
+                            };
+                            let ep = p.url.as_deref().or(p.remote_endpoint.as_deref()).unwrap_or("-");
+
+                            let preview: String = p.payload_preview.iter()
+                                .take(32)
+                                .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                                .collect();
+
+                            if ui.selectable_label(is_selected, format!("#{:04}", p.id)).clicked() {
+                                self.selected_packet_id = Some(p.id);
+                            }
+                            ui.label(dir_label);
+                            ui.label(p.kind.as_str().to_uppercase());
+                            ui.label(ep);
+                            ui.label(format!("{} B", p.payload_len));
+                            ui.monospace(preview);
+
+                            if let Some(file) = &p.artifact_file {
+                                ui.hyperlink_to("💾 Download", format!("http://{}/{}", self.mcp_addr.trim_end_matches("/mcp").trim_start_matches("http://"), file));
+                            } else {
+                                ui.label("-");
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+
+        // Selected packet detail inspector
+        if let Some(sel_id) = self.selected_packet_id {
+            if let Some(pkt) = packets.iter().find(|p| p.id == sel_id) {
+                ui.add_space(10.0);
+                ui.separator();
+                ui.heading(format!("Packet #{:04} Details", pkt.id));
+                ui.horizontal(|ui| {
+                    ui.label(format!("Protocol: {}", pkt.kind.as_str().to_uppercase()));
+                    ui.label(format!("Direction: {:?}", pkt.direction));
+                    ui.label(format!("Size: {} bytes", pkt.payload_len));
+                    if let Some(f) = &pkt.artifact_file {
+                        ui.label(format!("Saved on disk: {f}"));
+                    }
+                });
+
+                if let Some(url) = &pkt.url {
+                    ui.label(format!("URL / Request: {url}"));
+                }
+                if let Some(hdr) = &pkt.headers {
+                    ui.collapsing("Headers", |ui| {
+                        ui.monospace(hdr);
+                    });
+                }
+
+                ui.add_space(5.0);
+                ui.heading("Payload Hex / ASCII Preview:");
+                let preview_bytes = &pkt.payload_preview;
+                egui::ScrollArea::vertical()
+                    .max_height(140.0)
+                    .show(ui, |ui| {
+                        ui.monospace(hexdump(preview_bytes));
+                    });
+            }
+        }
+    }
 }
+
 
 
 /// Resolve the DLL path. If `input` is a bare file name (no separator), join

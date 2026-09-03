@@ -13,6 +13,37 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use crate::{cave_hook, protocol, scan};
 
+/// The semantic kind of a [`Marker`], describing what the marked address represents.
+///
+/// Used by tools such as `pointer_chase` to determine whether the base address
+/// should be dereferenced (pointer slot) or used directly (live object instance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerKind {
+    /// A pointer slot — the marker address holds a pointer value that must be
+    /// dereferenced to reach the object. This is the traditional CE
+    /// `module+offset` starting point. (default)
+    #[default]
+    Pointer,
+    /// A live object instance — the marker address IS the object base and
+    /// offsets are applied directly without a prior dereference. Set this when
+    /// you have found the actual struct/class instance address (e.g. via AOB
+    /// + follow, or pointer_scan result).
+    Object,
+    /// A contiguous memory buffer or allocation (strings, ring buffers, heaps).
+    /// `size` is typically set alongside this kind.
+    Buffer,
+    /// Code / function entry point, trampoline, or hook site.
+    Code,
+}
+
+impl MarkerKind {
+    /// Returns `true` for the default `Pointer` variant (used to skip serialization).
+    pub fn is_pointer(&self) -> bool {
+        *self == MarkerKind::Pointer
+    }
+}
+
 /// A labeled address (or address region) the agent persists across turns (D7).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Marker {
@@ -20,6 +51,14 @@ pub struct Marker {
     /// Optional byte size of the marked region.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
+    /// Semantic kind describing what the marked address represents.
+    /// Defaults to `Pointer` for backward compatibility.
+    #[serde(default, skip_serializing_if = "MarkerKind::is_pointer")]
+    pub kind: MarkerKind,
+    /// Optional reference to a named [`StructDef`] describing the layout at
+    /// this address. Only meaningful when `kind == Object`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub struct_type: Option<String>,
     pub label: String,
     pub note: Option<String>,
 }
@@ -66,6 +105,26 @@ pub struct StructField {
     pub offset_expr: String,
     /// Value type of this field (i32, f32, etc.).
     pub value_type: crate::scan::ValueType,
+}
+
+/// A named struct/object type definition — a reusable layout catalog entry.
+///
+/// Registered in the session's `struct_defs` map and optionally exported to
+/// profiles so that markers, cheats, and tools can reference layouts by type
+/// name instead of re-specifying field lists on every call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructDef {
+    /// The unique type name, e.g. "ShipEntity", "PlayerData", "SelectionManager".
+    pub name: String,
+    /// Total byte size of the struct, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+    /// Fields defined within this struct.
+    #[serde(default)]
+    pub fields: Vec<StructField>,
+    /// Optional human note / source comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The kind of a cheat.
@@ -338,6 +397,8 @@ pub struct SessionState {
     operation_in_progress: Option<String>,
     /// Markers keyed by label (case-sensitive).
     markers: BTreeMap<String, Marker>,
+    /// Named struct/object type definitions (type catalog), keyed by type name.
+    struct_defs: BTreeMap<String, StructDef>,
     /// Undo log in the order mutations were made.
     undo_log: Vec<UndoEntry>,
     /// Monotonic counter for undo ids.
@@ -386,6 +447,16 @@ pub struct SessionState {
     profile_author: Option<String>,
     /// Active profile date.
     profile_date: Option<String>,
+    /// Advertised capabilities reported by the injected DLL over IPC.
+    dll_capabilities: Vec<String>,
+    /// Network traffic capture log (ring buffer capped at capacity).
+    network_packets: Vec<crate::protocol::NetworkPacketDto>,
+    /// Capacity limit for in-memory network packet ring buffer.
+    network_packets_capacity: usize,
+    /// Next monotonic ID for captured network packets.
+    next_network_packet_id: u64,
+    /// Whether network traffic interception hooks are enabled.
+    network_hooks_enabled: bool,
     /// Active setup steps currently associated with the session.
     setup_steps: Vec<crate::profile::SetupStep>,
     /// Active initialization commands associated with the session.
@@ -769,6 +840,92 @@ impl SessionState {
         self.inject_version.as_deref()
     }
 
+    /// Record the capabilities advertised by the DLL.
+    pub fn set_dll_capabilities(&mut self, capabilities: Vec<String>) {
+        self.dll_capabilities = capabilities;
+    }
+
+    /// Retrieve the capabilities advertised by the DLL.
+    pub fn dll_capabilities(&self) -> &[String] {
+        &self.dll_capabilities
+    }
+
+    /// Check whether the connected DLL advertises a given capability (e.g. "network_capture").
+    pub fn has_capability(&self, cap: &str) -> bool {
+        self.dll_capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap))
+    }
+
+    /// Record a captured network packet into the session ring buffer.
+    pub fn record_network_packet(&mut self, mut packet: crate::protocol::NetworkPacketDto) -> u64 {
+        if packet.id == 0 {
+            self.next_network_packet_id = self.next_network_packet_id.saturating_add(1);
+            packet.id = self.next_network_packet_id;
+        } else if packet.id >= self.next_network_packet_id {
+            self.next_network_packet_id = packet.id + 1;
+        }
+
+        let cap = if self.network_packets_capacity == 0 { 2000 } else { self.network_packets_capacity };
+        if self.network_packets.len() >= cap {
+            self.network_packets.remove(0);
+        }
+        let id = packet.id;
+        self.network_packets.push(packet);
+        id
+    }
+
+    /// List captured network packets with optional filtering and pagination.
+    pub fn list_network_packets(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+        filter_proto: Option<crate::protocol::PacketKind>,
+        filter_endpoint: Option<&str>,
+    ) -> (Vec<crate::protocol::NetworkPacketDto>, usize) {
+        let ep_lower = filter_endpoint.map(|e| e.trim().to_lowercase());
+        let filtered: Vec<crate::protocol::NetworkPacketDto> = self.network_packets.iter().filter(|p| {
+            if let Some(proto) = filter_proto {
+                if p.kind != proto {
+                    return false;
+                }
+            }
+            if let Some(ref ep) = ep_lower {
+                if !ep.is_empty() {
+                    let remote_match = p.remote_endpoint.as_deref().map_or(false, |r| r.to_lowercase().contains(ep));
+                    let local_match = p.local_endpoint.as_deref().map_or(false, |l| l.to_lowercase().contains(ep));
+                    let url_match = p.url.as_deref().map_or(false, |u| u.to_lowercase().contains(ep));
+                    if !remote_match && !local_match && !url_match {
+                        return false;
+                    }
+                }
+            }
+            true
+        }).cloned().collect();
+
+        let total = filtered.len();
+        let off = offset.unwrap_or(0);
+        let lim = limit.unwrap_or(50);
+
+        let slice = filtered.into_iter().skip(off).take(lim).collect();
+        (slice, total)
+    }
+
+    /// Clear the network packet ring buffer. Returns the count of cleared packets.
+    pub fn clear_network_packets(&mut self) -> usize {
+        let count = self.network_packets.len();
+        self.network_packets.clear();
+        count
+    }
+
+    /// Check if network hooks are enabled.
+    pub fn network_hooks_enabled(&self) -> bool {
+        self.network_hooks_enabled
+    }
+
+    /// Enable or disable network traffic hooks.
+    pub fn set_network_hooks_enabled(&mut self, enabled: bool) {
+        self.network_hooks_enabled = enabled;
+    }
+
     /// Set active profile metadata and setup steps.
     pub fn set_active_profile(&mut self, profile: &crate::profile::GameProfile) {
         self.profile_name = Some(profile.name.clone());
@@ -836,6 +993,19 @@ impl SessionState {
         size: Option<usize>,
         note: Option<&str>,
     ) -> Result<(), String> {
+        self.set_marker_full(label, address, size, MarkerKind::default(), None, note)
+    }
+
+    /// Set (create or overwrite) a marker with full metadata including semantic kind and struct type.
+    pub fn set_marker_full(
+        &mut self,
+        label: &str,
+        address: u64,
+        size: Option<usize>,
+        kind: MarkerKind,
+        struct_type: Option<String>,
+        note: Option<&str>,
+    ) -> Result<(), String> {
         let label = label.trim().to_string();
         if label.is_empty() {
             return Err("marker label cannot be empty".into());
@@ -845,6 +1015,8 @@ impl SessionState {
             Marker {
                 address,
                 size,
+                kind,
+                struct_type,
                 label: label.clone(),
                 note: note.map(|s| s.to_string()),
             },
@@ -878,6 +1050,26 @@ impl SessionState {
     /// Clear all markers.
     pub fn clear_markers(&mut self) {
         self.markers.clear();
+    }
+
+    /// Register or overwrite a named struct definition in the type catalog.
+    pub fn register_struct_def(&mut self, def: StructDef) {
+        self.struct_defs.insert(def.name.clone(), def);
+    }
+
+    /// Get a struct definition by type name.
+    pub fn get_struct_def(&self, name: &str) -> Option<&StructDef> {
+        self.struct_defs.get(name.trim())
+    }
+
+    /// List all registered struct definitions sorted by name.
+    pub fn list_struct_defs(&self) -> Vec<&StructDef> {
+        self.struct_defs.values().collect()
+    }
+
+    /// Remove a struct definition by name; returns it if it existed.
+    pub fn remove_struct_def(&mut self, name: &str) -> Option<StructDef> {
+        self.struct_defs.remove(name.trim())
     }
 
     /// Record a mutation and return its undo id.
@@ -1431,4 +1623,133 @@ mod tests {
         assert!(ctx_mcp.scan.is_none());
         assert!(ctx_web.scan.is_none());
     }
+
+    #[test]
+    fn marker_kind_defaults_to_pointer() {
+        let mut s = SessionState::new();
+        s.set_marker("ptr", 0x1000, None).unwrap();
+        let m = s.get_marker("ptr").unwrap();
+        assert_eq!(m.kind, MarkerKind::Pointer);
+        assert!(m.struct_type.is_none());
+    }
+
+    #[test]
+    fn marker_kind_object_with_struct_type() {
+        let mut s = SessionState::new();
+        s.set_marker_full("sel_mgr", 0x2000, None, MarkerKind::Object, Some("SelectionManager".into()), Some("live instance")).unwrap();
+        let m = s.get_marker("sel_mgr").unwrap();
+        assert_eq!(m.kind, MarkerKind::Object);
+        assert_eq!(m.struct_type.as_deref(), Some("SelectionManager"));
+        assert_eq!(m.note.as_deref(), Some("live instance"));
+    }
+
+    #[test]
+    fn marker_kind_buffer_auto() {
+        let mut s = SessionState::new();
+        s.set_marker_full("heap", 0x3000, Some(0x100000), MarkerKind::Buffer, None, None).unwrap();
+        let m = s.get_marker("heap").unwrap();
+        assert_eq!(m.kind, MarkerKind::Buffer);
+        assert_eq!(m.size, Some(0x100000));
+    }
+
+    #[test]
+    fn struct_def_registry_roundtrip() {
+        let mut s = SessionState::new();
+        assert!(s.list_struct_defs().is_empty());
+
+        s.register_struct_def(StructDef {
+            name: "ShipEntity".into(),
+            size: Some(0x200),
+            fields: vec![
+                StructField { label: "Health".into(), offset_expr: "0x38".into(), value_type: crate::scan::ValueType::F32 },
+                StructField { label: "Shield".into(), offset_expr: "0x40".into(), value_type: crate::scan::ValueType::F32 },
+            ],
+            note: Some("main ship struct".into()),
+        });
+        s.register_struct_def(StructDef {
+            name: "PlayerData".into(),
+            size: None,
+            fields: vec![],
+            note: None,
+        });
+
+        assert_eq!(s.list_struct_defs().len(), 2);
+
+        let def = s.get_struct_def("ShipEntity").unwrap();
+        assert_eq!(def.size, Some(0x200));
+        assert_eq!(def.fields.len(), 2);
+        assert_eq!(def.fields[0].label, "Health");
+
+        // Overwrite
+        s.register_struct_def(StructDef { name: "ShipEntity".into(), size: Some(0x210), fields: vec![], note: None });
+        assert_eq!(s.get_struct_def("ShipEntity").unwrap().size, Some(0x210));
+
+        // Remove
+        assert!(s.remove_struct_def("PlayerData").is_some());
+        assert!(s.get_struct_def("PlayerData").is_none());
+        assert_eq!(s.list_struct_defs().len(), 1);
+    }
+
+    #[test]
+    fn test_session_network_packet_recording_and_filtering() {
+        use crate::protocol::{NetworkPacketDto, PacketDirection, PacketKind};
+        let mut s = SessionState::new();
+
+        s.set_dll_capabilities(vec!["memory".into(), "network_capture".into()]);
+        assert!(s.has_capability("network_capture"));
+        assert!(s.has_capability("MEMORY"));
+        assert!(!s.has_capability("unknown_cap"));
+
+        let p1 = NetworkPacketDto {
+            id: 0,
+            timestamp_ms: 1000,
+            kind: PacketKind::Udp,
+            direction: PacketDirection::Outbound,
+            local_endpoint: Some("127.0.0.1:5000".into()),
+            remote_endpoint: Some("192.168.1.1:27015".into()),
+            url: None,
+            headers: None,
+            payload_len: 32,
+            payload_preview: vec![1, 2, 3],
+            artifact_file: None,
+        };
+
+        let p2 = NetworkPacketDto {
+            id: 0,
+            timestamp_ms: 2000,
+            kind: PacketKind::Http,
+            direction: PacketDirection::Inbound,
+            local_endpoint: Some("127.0.0.1:5001".into()),
+            remote_endpoint: Some("api.gamebackend.com:443".into()),
+            url: Some("https://api.gamebackend.com/v1/auth".into()),
+            headers: Some("Content-Type: application/json".into()),
+            payload_len: 128,
+            payload_preview: b"{\"token\":\"xyz\"}".to_vec(),
+            artifact_file: None,
+        };
+
+        let id1 = s.record_network_packet(p1);
+        let id2 = s.record_network_packet(p2);
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+
+        // Filter by protocol
+        let (udp_packets, total_udp) = s.list_network_packets(None, None, Some(PacketKind::Udp), None);
+        assert_eq!(total_udp, 1);
+        assert_eq!(udp_packets.len(), 1);
+        assert_eq!(udp_packets[0].id, 1);
+
+        // Filter by endpoint / URL
+        let (api_packets, total_api) = s.list_network_packets(None, None, None, Some("gamebackend"));
+        assert_eq!(total_api, 1);
+        assert_eq!(api_packets.len(), 1);
+        assert_eq!(api_packets[0].kind, PacketKind::Http);
+
+        // Clear log
+        assert_eq!(s.clear_network_packets(), 2);
+        let (all, total) = s.list_network_packets(None, None, None, None);
+        assert_eq!(total, 0);
+        assert!(all.is_empty());
+    }
 }
+

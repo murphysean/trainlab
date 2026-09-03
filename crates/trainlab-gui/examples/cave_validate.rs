@@ -166,8 +166,13 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             println!("[MCP] {}", extract_text(&r));
             match dll_rpc(&trainlab_core::protocol::Request::Ping) {
-                Ok(trainlab_core::protocol::Response::Pong { version }) => {
-                    println!("[DLL] alive, inject v{version}");
+                Ok(trainlab_core::protocol::Response::Pong { version, capabilities }) => {
+                    let cap_str = if capabilities.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (capabilities: {})", capabilities.join(", "))
+                    };
+                    println!("[DLL] alive, inject v{version}{cap_str}");
                 }
                 other => println!("[DLL] unexpected: {other:?}"),
             }

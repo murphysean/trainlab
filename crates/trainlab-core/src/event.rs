@@ -81,6 +81,18 @@ pub enum SessionEvent {
         path: String,
         pid: Option<u32>,
     },
+    /// A network packet was captured and logged in the session.
+    NetworkPacketLogged {
+        id: u64,
+        proto: String,
+        dir: String,
+        endpoint: String,
+        payload_len: usize,
+    },
+    /// The network capture log was cleared.
+    NetworkLogCleared {
+        cleared_count: usize,
+    },
 }
 
 /// Event bus holding the broadcast sender.

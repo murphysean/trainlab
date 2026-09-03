@@ -43,6 +43,8 @@ pub enum Event {
     WindowCommand { command: String },
     /// Injected DLL overlay is initialized and ready to receive cheats.
     OverlayReady,
+    /// Real-time captured network packet event from Winsock/WinHTTP hooks.
+    NetworkPacket(NetworkPacketDto),
 }
 
 /// Asynchronous push notification types emitted by the injected DLL.
@@ -197,13 +199,30 @@ pub enum Request {
         /// Whether to initialize controller polling hooks.
         xinput_hooks: bool,
     },
+    /// Retrieve captured network packets from the DLL ring buffer or session log.
+    GetNetworkLog {
+        limit: Option<usize>,
+        offset: Option<usize>,
+        filter_proto: Option<PacketKind>,
+        filter_endpoint: Option<String>,
+    },
+    /// Clear the captured network packets buffer.
+    ClearNetworkLog,
+    /// Configure or toggle network traffic interception.
+    ConfigureNetworkHook {
+        enabled: bool,
+    },
 }
 
 /// The response to a [`Request`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    /// Reply to [`Request::Ping`].
-    Pong { version: String },
+    /// Reply to [`Request::Ping`]. Includes version and advertised DLL capabilities.
+    Pong {
+        version: String,
+        #[serde(default)]
+        capabilities: Vec<String>,
+    },
     /// Reply to [`Request::Read`].
     Read { data: Vec<u8> },
     /// Reply to [`Request::Write`].
@@ -316,6 +335,15 @@ pub enum Response {
         hook_wndproc: bool,
         xinput_hooks: bool,
     },
+    /// Reply to [`Request::GetNetworkLog`].
+    NetworkLog {
+        packets: Vec<NetworkPacketDto>,
+        total_captured: usize,
+    },
+    /// Reply to [`Request::ClearNetworkLog`].
+    NetworkLogCleared { cleared: usize },
+    /// Reply to [`Request::ConfigureNetworkHook`].
+    NetworkHookConfigured { enabled: bool },
     /// An error occurred while handling the request.
     Error { message: String },
 }
@@ -405,3 +433,105 @@ pub fn decode<T: for<'de> Deserialize<'de>>(frame: &[u8]) -> Result<T, bincode::
     }
     bincode::deserialize(&frame[4..4 + len])
 }
+
+/// Protocol classification of captured network packets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PacketKind {
+    Tcp,
+    Udp,
+    Http,
+}
+
+impl PacketKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PacketKind::Tcp => "tcp",
+            PacketKind::Udp => "udp",
+            PacketKind::Http => "http",
+        }
+    }
+}
+
+/// Direction of network traffic relative to the game process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PacketDirection {
+    Inbound,
+    Outbound,
+}
+
+impl PacketDirection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PacketDirection::Inbound => "inbound",
+            PacketDirection::Outbound => "outbound",
+        }
+    }
+}
+
+/// A structured representation of a captured network packet or HTTP request/response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkPacketDto {
+    pub id: u64,
+    pub timestamp_ms: u64,
+    pub kind: PacketKind,
+    pub direction: PacketDirection,
+    pub local_endpoint: Option<String>,
+    pub remote_endpoint: Option<String>,
+    pub url: Option<String>,
+    pub headers: Option<String>,
+    pub payload_len: usize,
+    /// Truncated preview bytes for wire transport / lightweight inspection (e.g. up to 256 bytes).
+    pub payload_preview: Vec<u8>,
+    /// Optional relative path or URL to full dumped payload if offloaded to disk.
+    pub artifact_file: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_network_packet_roundtrip() {
+        let packet = NetworkPacketDto {
+            id: 42,
+            timestamp_ms: 1725300000,
+            kind: PacketKind::Udp,
+            direction: PacketDirection::Outbound,
+            local_endpoint: Some("127.0.0.1:54321".into()),
+            remote_endpoint: Some("192.168.1.100:27015".into()),
+            url: None,
+            headers: None,
+            payload_len: 12,
+            payload_preview: vec![0xde, 0xad, 0xbe, 0xef],
+            artifact_file: Some("captures/packet_42.bin".into()),
+        };
+
+        let msg = Message::Event(Event::NetworkPacket(packet.clone()));
+        let encoded = encode(&msg).expect("failed to encode NetworkPacket event");
+        let decoded: Message = decode(&encoded).expect("failed to decode NetworkPacket event");
+
+        if let Message::Event(Event::NetworkPacket(p)) = decoded {
+            assert_eq!(p, packet);
+        } else {
+            panic!("expected NetworkPacket event");
+        }
+    }
+
+    #[test]
+    fn test_pong_capabilities_roundtrip() {
+        let pong = Response::Pong {
+            version: "0.1.0".into(),
+            capabilities: vec!["memory".into(), "network_capture".into()],
+        };
+        let encoded = encode(&pong).expect("failed to encode Pong");
+        let decoded: Response = decode(&encoded).expect("failed to decode Pong");
+
+        if let Response::Pong { version, capabilities } = decoded {
+            assert_eq!(version, "0.1.0");
+            assert_eq!(capabilities, vec!["memory", "network_capture"]);
+        } else {
+            panic!("expected Pong response");
+        }
+    }
+}
+

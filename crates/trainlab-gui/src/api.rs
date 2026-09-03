@@ -57,6 +57,9 @@ pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -
         .route("/apps/launch", post(launch_app_handler))
         .route("/log", get(get_activity_log))
         .route("/events", get(sse_events_handler))
+        .route("/network", get(get_network_packets))
+        .route("/network/clear", post(clear_network_packets_handler))
+        .route("/network/toggle", post(toggle_network_hooks_handler))
         // T-120: Add confirm/reject/pending endpoints for D8 staged ops.
         .route("/pending", get(list_pending_ops))
         .route("/confirm_op", post(confirm_op_handler))
@@ -129,6 +132,12 @@ pub struct SetMarkerReq {
     pub address: String,
     #[serde(default)]
     pub size: Option<usize>,
+    /// Semantic kind: "pointer" (default), "object", "buffer", or "code".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Optional struct type name reference (only meaningful when kind == "object").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub struct_type: Option<String>,
     pub note: Option<String>,
 }
 
@@ -442,6 +451,8 @@ async fn set_marker(
         label: req.name.clone(),
         address: req.address.clone(),
         size: req.size,
+        kind: req.kind.clone(),
+        struct_type: req.struct_type.clone(),
         note: req.note.clone(),
     })).map_err(|e| err(e.message))?;
 
@@ -608,6 +619,85 @@ async fn launch_app_handler(
     };
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "path": req.path, "pid": pid })))
+}
+
+// --- Network traffic handlers ---
+
+#[derive(Debug, Deserialize)]
+pub struct NetworkQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub proto: Option<String>,
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetworkLogResponse {
+    pub packets: Vec<trainlab_core::protocol::NetworkPacketDto>,
+    pub total: usize,
+    pub hooks_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToggleNetworkReq {
+    pub enabled: bool,
+}
+
+/// `GET /api/network` — retrieve captured packets with filtering and pagination.
+async fn get_network_packets(
+    State(state): State<ApiState>,
+    axum::extract::Query(params): axum::extract::Query<NetworkQuery>,
+) -> Result<Json<NetworkLogResponse>, (StatusCode, Json<ApiError>)> {
+    let s = lock_session_or_500(&state)?;
+    let proto = match params.proto.as_deref().map(|p| p.to_lowercase()).as_deref() {
+        Some("tcp") => Some(trainlab_core::protocol::PacketKind::Tcp),
+        Some("udp") => Some(trainlab_core::protocol::PacketKind::Udp),
+        Some("http") => Some(trainlab_core::protocol::PacketKind::Http),
+        _ => None,
+    };
+
+    let (packets, total) = s.list_network_packets(
+        params.limit,
+        params.offset,
+        proto,
+        params.filter.as_deref(),
+    );
+    let hooks_enabled = s.network_hooks_enabled();
+
+    Ok(Json(NetworkLogResponse {
+        packets,
+        total,
+        hooks_enabled,
+    }))
+}
+
+/// `POST /api/network/clear` — clear session packet buffer.
+async fn clear_network_packets_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let cleared = {
+        let mut s = lock_session_or_500(&state)?;
+        s.clear_network_packets()
+    };
+    state.request_repaint();
+    Ok(Json(serde_json::json!({ "status": "ok", "cleared": cleared })))
+}
+
+/// `POST /api/network/toggle` — toggle in-game network interception.
+async fn toggle_network_hooks_handler(
+    State(state): State<ApiState>,
+    Json(req): Json<ToggleNetworkReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    {
+        let mut s = lock_session_or_500(&state)?;
+        s.set_network_hooks_enabled(req.enabled);
+    }
+    // Forward command to DLL if connected
+    let _ = crate::controller::request(&state.session, &trainlab_core::protocol::Request::ConfigureNetworkHook {
+        enabled: req.enabled,
+    });
+    state.request_repaint();
+    Ok(Json(serde_json::json!({ "status": "ok", "enabled": req.enabled })))
 }
 
 // --- T-120: Pending op handlers ---
