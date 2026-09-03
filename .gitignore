@@ -29,5 +29,9 @@ sdtool/
 # Logs
 *.log
 
+# Uploads directory
+uploads/
+**/uploads/
+
 # Local goose state
 /.goose/

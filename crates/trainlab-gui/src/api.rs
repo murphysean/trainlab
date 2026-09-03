@@ -3,7 +3,8 @@
 //! Provides JSON HTTP REST endpoints for remote control, web dashboards,
 //! and script integrations alongside the MCP server.
 
-use axum::extract::{Json, State};
+use axum::body::Bytes;
+use axum::extract::{FromRequest, Json, Multipart, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Router;
@@ -66,6 +67,7 @@ pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -
         .route("/reject_op", post(reject_op_handler))
         .route("/pins", get(get_pins).post(set_pin_handler))
         .route("/pins/clear", post(clear_pins_handler))
+        .route("/upload", post(upload_handler))
         .with_state(state)
 }
 
@@ -222,6 +224,63 @@ pub struct PendingOpDto {
     pub kind: String,
     pub address: String,
     pub preview: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UploadResponse {
+    pub filename: String,
+    pub path: String,
+    pub absolute_path: String,
+    pub size: usize,
+    pub url: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct UploadQuery {
+    pub filename: Option<String>,
+}
+
+/// Helper function to save uploaded file bytes with collision-free naming:
+/// `name.ext` -> `name.ext`, `name_1.ext`, `name_2.ext`, etc.
+pub fn save_uploaded_file(requested_filename: &str, bytes: &[u8]) -> Result<UploadResponse, String> {
+    let clean_name = std::path::Path::new(requested_filename)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("upload.bin");
+    let clean_name = if clean_name.trim().is_empty() { "upload.bin" } else { clean_name.trim() };
+
+    let uploads_dir = std::path::Path::new("uploads");
+    std::fs::create_dir_all(uploads_dir)
+        .map_err(|e| format!("failed to create uploads directory: {e}"))?;
+
+    let path_obj = std::path::Path::new(clean_name);
+    let stem = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("upload");
+    let ext = path_obj.extension().and_then(|e| e.to_str());
+
+    let mut candidate_name = clean_name.to_string();
+    let mut counter = 1;
+    while uploads_dir.join(&candidate_name).exists() {
+        candidate_name = match ext {
+            Some(e) => format!("{stem}_{counter}.{e}"),
+            None => format!("{stem}_{counter}"),
+        };
+        counter += 1;
+    }
+
+    let target_path = uploads_dir.join(&candidate_name);
+    std::fs::write(&target_path, bytes)
+        .map_err(|e| format!("failed to write uploaded file '{candidate_name}': {e}"))?;
+
+    let abs_path = std::fs::canonicalize(&target_path)
+        .unwrap_or_else(|_| target_path.clone());
+
+    Ok(UploadResponse {
+        filename: candidate_name.clone(),
+        path: target_path.to_string_lossy().to_string(),
+        absolute_path: abs_path.to_string_lossy().to_string(),
+        size: bytes.len(),
+        url: format!("/uploads/{candidate_name}"),
+    })
 }
 
 /// T-122: Helper for safe session locking. For handlers returning `Result`,
@@ -826,4 +885,59 @@ async fn sse_events_handler(
     };
 
     Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()))
+}
+
+/// HTTP endpoint `POST /api/upload`:
+/// Accepts either multipart/form-data (field "file") or raw request body.
+/// Optional query parameter `?filename=name.ext` specifies the preferred filename.
+/// Saves to `uploads/name{num}.{ext}` and returns `UploadResponse`.
+async fn upload_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<UploadQuery>,
+    request: axum::extract::Request,
+) -> Result<Json<UploadResponse>, (StatusCode, Json<ApiError>)> {
+    let content_type = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let (filename, bytes) = if content_type.starts_with("multipart/form-data") {
+        let mut multipart = Multipart::from_request(request, &state)
+            .await
+            .map_err(|e| err(format!("invalid multipart request: {e}")))?;
+
+        let mut found: Option<(String, Vec<u8>)> = None;
+        while let Ok(Some(field)) = multipart.next_field().await {
+            let field_filename = field.file_name().map(|s| s.to_string());
+            let data = field.bytes().await.map_err(|e| err(format!("failed to read multipart field bytes: {e}")))?;
+            let name = query.filename.clone()
+                .or(field_filename)
+                .unwrap_or_else(|| "upload.bin".to_string());
+            found = Some((name, data.to_vec()));
+            break;
+        }
+        found.ok_or_else(|| err("no file field found in multipart upload"))?
+    } else {
+        let body_bytes = axum::body::to_bytes(request.into_body(), 50 * 1024 * 1024)
+            .await
+            .map_err(|e| err(format!("failed to read request body: {e}")))?;
+        let filename = query.filename.clone().unwrap_or_else(|| "upload.bin".to_string());
+        (filename, body_bytes.to_vec())
+    };
+
+    if bytes.is_empty() {
+        return Err(err("uploaded file content is empty"));
+    }
+
+    let res = save_uploaded_file(&filename, &bytes).map_err(err)?;
+
+    // Log upload in activity log
+    if let Ok(mut s) = state.session.lock() {
+        s.log_activity("UPLOAD", format!("saved '{}' ({} bytes) -> {}", res.filename, res.size, res.path));
+    }
+
+    state.request_repaint();
+    Ok(Json(res))
 }

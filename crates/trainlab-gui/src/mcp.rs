@@ -818,10 +818,13 @@ where
 /// Arguments for [`allocate_string`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AllocateStringArgs {
-    /// The string content (raw bytes/text of the program, script, or config) to place in the game process. Optional if 'size' is provided.
+    /// The string content (raw bytes/text of the program, script, or config) to place in the game process. Optional if 'path' or 'size' is provided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    /// Size in bytes to allocate if 'content' is not provided.
+    /// Optional file path on the host/trainer filesystem to read payload content from (e.g. 'uploads/probe.lua' or an absolute path). Eliminates MCP token output limits for large scripts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Size in bytes to allocate if 'content' or 'path' is not provided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
     /// Optional byte to fill allocated buffer with (defaults to 0).
@@ -837,6 +840,18 @@ pub struct AllocateStringArgs {
 
 fn default_string_kind() -> String {
     "c".to_string()
+}
+
+/// Arguments for [`upload_file`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UploadFileArgs {
+    /// The filename to save under the uploads directory (e.g. "probe.lua" or "config.json").
+    pub filename: String,
+    /// Content of the file as UTF-8 string or hex-encoded bytes.
+    pub content: String,
+    /// If true, content is treated as a hex string (e.g. "90 90 c3") rather than raw text. Default false.
+    #[serde(default)]
+    pub is_hex: bool,
 }
 
 /// Arguments for [`allocate_memory`].
@@ -2635,6 +2650,43 @@ impl TrainlabMcpServer {
         ]))
     }
 
+    /// Upload a file or script to the trainer server's uploads directory.
+    #[tool(description = "Upload a file or script to the trainer server's 'uploads/' directory and return its server-side path and URL. The returned path can then be passed directly into 'allocate_string' (via the 'path' argument) without sending large script bodies repeatedly over the MCP protocol.")]
+    fn upload_file(
+        &self,
+        Parameters(args): Parameters<UploadFileArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let bytes = if args.is_hex {
+            parse_hex_bytes(&args.content)?
+        } else {
+            args.content.into_bytes()
+        };
+
+        let res = crate::api::save_uploaded_file(&args.filename, &bytes)
+            .map_err(|e| err(e))?;
+
+        let (host, port) = {
+            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            (s.dll_host().to_string(), s.dll_port())
+        };
+        let url_host = if host == "0.0.0.0" { "127.0.0.1".to_string() } else { host };
+        let url = format!("http://{url_host}:{port}/uploads/{}", res.filename);
+
+        let resp_json = serde_json::json!({
+            "filename": res.filename,
+            "path": res.path,
+            "absolute_path": res.absolute_path,
+            "size": res.size,
+            "url": url,
+        });
+
+        self.request_repaint();
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(resp_json.to_string()),
+        ]))
+    }
+
     /// Allocate and lay out a string inside the game process and return its layout pointers.
     #[tool(description = "Allocate and lay out a string inside the game process (C string, Rust fat pointer, JSON/YAML/XML/JS config) and return its address and layout. Supported kinds: 'c' (default, NUL-terminated), 'rust' (returns ptr and len), 'json', 'yaml', 'xml', 'js', 'config'. Can pass 'size' instead of 'content' to allocate a zero/fill-initialized buffer.")]
     fn allocate_string(
@@ -2645,6 +2697,7 @@ impl TrainlabMcpServer {
         let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
         let res = trainlab_core::tools::execute_allocate_string(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateStringArgs {
             content: args.content,
+            path: args.path,
             size: args.size,
             fill_byte: args.fill_byte,
             kind: args.kind,
@@ -4324,11 +4377,12 @@ pub(crate) fn execute_profile_commands(
                     _ => return Err(format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed")),
                 }
             }
-            crate::profile::ProfileCommand::AllocateString { content, size, fill_byte, string_kind, marker, .. } => {
+            crate::profile::ProfileCommand::AllocateString { content, path, size, fill_byte, string_kind, marker, .. } => {
                 let proc = game_process(session).map_err(|e| format!("cmd {idx}: allocate_string process access error: {e:?}"))?;
                 let ctx = trainlab_core::session::ClientContext::new("profile", trainlab_core::session::ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
                 let res = trainlab_core::tools::execute_allocate_string(session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateStringArgs {
                     content: content.clone(),
+                    path: path.clone(),
                     size: *size,
                     fill_byte: *fill_byte,
                     kind: string_kind.clone(),
@@ -5326,6 +5380,7 @@ pub async fn serve(
             .nest("/api", api_router)
             .nest_service("/captures", tower_http::services::ServeDir::new("captures"))
             .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))
+            .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
             .nest_service("/scans", tower_http::services::ServeDir::new("scans"))
             .nest_service("/regions", tower_http::services::ServeDir::new("regions"))
             .route("/log", axum::routing::get(serve_session_log));
@@ -5594,6 +5649,70 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_file_upload_and_http_serving_roundtrip() -> anyhow::Result<()> {
+        let session = SharedSession::default();
+        let (url, ct) = serve("127.0.0.1", 0, true, true, session.clone(), None).await?;
+        let base_url = url.trim_end_matches("/mcp");
+
+        let test_name = format!("agent_test_{}.lua", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+
+        // 1. Test POST /api/upload with raw bytes & query filename
+        let client = reqwest::Client::new();
+        let upload_url = format!("{base_url}/api/upload?filename={test_name}");
+        let res = client.post(&upload_url)
+            .body("function probe() return 42 end")
+            .send()
+            .await?;
+
+        assert!(res.status().is_success(), "Upload POST failed: {}", res.status());
+        let json: serde_json::Value = res.json().await?;
+        assert_eq!(json["filename"], test_name);
+        assert_eq!(json["size"], 30);
+        let returned_path = json["path"].as_str().unwrap().to_string();
+
+        // 2. Test HTTP GET /uploads/<test_name>
+        let get_url = format!("{base_url}/uploads/{test_name}");
+        let get_res = client.get(&get_url).send().await?;
+        assert!(get_res.status().is_success());
+        let body = get_res.text().await?;
+        assert_eq!(body, "function probe() return 42 end");
+
+        // 3. Test collision numbering: second upload with same name
+        let res2 = client.post(&upload_url)
+            .body("function probe_v2() return 99 end")
+            .send()
+            .await?;
+        let json2: serde_json::Value = res2.json().await?;
+        let expected_collided = test_name.replace(".lua", "_1.lua");
+        assert_eq!(json2["filename"], expected_collided);
+        let returned_path2 = json2["path"].as_str().unwrap().to_string();
+
+        // 4. Test MCP upload_file tool
+        let server = TrainlabMcpServer::with_session_and_ctx(session.clone(), None);
+        let mcp_res = server.upload_file(Parameters(UploadFileArgs {
+            filename: "mcp_probe.lua".into(),
+            content: "local x = 100".into(),
+            is_hex: false,
+        })).unwrap();
+
+        let text = match &mcp_res.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text block"),
+        };
+        let mcp_json: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(mcp_json["filename"], "mcp_probe.lua");
+        let mcp_path = mcp_json["path"].as_str().unwrap().to_string();
+
+        // Clean up test files
+        let _ = std::fs::remove_file(&returned_path);
+        let _ = std::fs::remove_file(&returned_path2);
+        let _ = std::fs::remove_file(&mcp_path);
+
+        ct.cancel();
+        Ok(())
+    }
+
     #[test]
     fn test_mcp_network_tools() {
         let session = SharedSession::default();
@@ -5691,6 +5810,7 @@ mod tests {
         // Invalid kind rejected
         let res_err = server.allocate_string(Parameters(AllocateStringArgs {
             content: Some("print('hello')".into()),
+            path: None,
             size: None,
             fill_byte: None,
             kind: "lua".into(), // Explicitly rejected per spec
@@ -5701,6 +5821,7 @@ mod tests {
         // Valid kind accepted (content provided)
         let res_ok_c = server.allocate_string(Parameters(AllocateStringArgs {
             content: Some("print('hello')".into()),
+            path: None,
             size: None,
             fill_byte: None,
             kind: "c".into(),
@@ -5714,6 +5835,7 @@ mod tests {
         // Valid kind accepted (size provided without content)
         let res_ok_size = server.allocate_string(Parameters(AllocateStringArgs {
             content: None,
+            path: None,
             size: Some(16384),
             fill_byte: Some(0),
             kind: "c".into(),

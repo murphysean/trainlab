@@ -255,10 +255,13 @@ pub enum ProfileCommand {
     },
     /// Allocate a string inside target memory.
     AllocateString {
-        /// String text content (optional if size is provided).
+        /// String text content (optional if path or size is provided).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<String>,
-        /// Buffer size in bytes (optional if content is provided).
+        /// Optional file path on host to read string content from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Buffer size in bytes (optional if content or path is provided).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         size: Option<usize>,
         /// Optional byte to fill allocated buffer with.

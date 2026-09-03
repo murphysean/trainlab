@@ -29,7 +29,7 @@ rmcp = { version = "3.0", features = [
     "transport-streamable-http-client-reqwest",
     "client",
 ] }
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 # Cross-platform process memory access
 # (we'll implement our own thin wrapper in trainlab-core)
 # Logging

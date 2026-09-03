@@ -107,6 +107,8 @@ pub struct AllocateStringArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_byte: Option<u8>,
@@ -1002,13 +1004,15 @@ pub fn execute_allocate_string(
         return Err(err(format!("unknown string kind '{kind}' (expected 'c', 'rust', 'json', 'yaml', 'xml', 'js', or 'config')")));
     }
 
-    let mut bytes = if let Some(content) = args.content {
+    let mut bytes = if let Some(path_str) = args.path {
+        std::fs::read(&path_str).map_err(|e| err(format!("failed to read file '{path_str}' for allocate_string: {e}")))?
+    } else if let Some(content) = args.content {
         content.into_bytes()
     } else if let Some(size) = args.size {
         let fill = args.fill_byte.unwrap_or(0);
         vec![fill; size]
     } else {
-        return Err(err("either 'content' or 'size' must be provided for allocate_string"));
+        return Err(err("either 'path', 'content', or 'size' must be provided for allocate_string"));
     };
 
     if is_c_like && !bytes.ends_with(&[0]) {
@@ -3446,5 +3450,42 @@ mod tests {
         let s = session.lock().unwrap();
         let m = s.get_marker("player_str").unwrap();
         assert_eq!(m.address, 0x100);
+    }
+
+    #[test]
+    fn test_execute_allocate_string_with_path() {
+        let session = SharedSession::default();
+        let ctx = ClientContext::new("test", ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
+
+        struct DummyMem;
+        impl ProcessMemory for DummyMem {
+            fn read(&self, _addr: u64, _len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> { Ok(vec![]) }
+            fn write(&self, _addr: u64, _data: &[u8]) -> Result<usize, crate::memory::MemoryError> { Ok(0) }
+            fn regions(&self) -> Result<Vec<crate::memory::Region>, crate::memory::MemoryError> { Ok(vec![]) }
+        }
+
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join(format!("test_alloc_{}.lua", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()));
+        std::fs::write(&test_file, b"local payload = 1234;").unwrap();
+
+        // On non-windows platforms, execute_allocate_string will try to allocate or return "requires Windows target or attached game process"
+        let res = execute_allocate_string(&session, &ctx, &DummyMem, AllocateStringArgs {
+            content: None,
+            path: Some(test_file.to_string_lossy().to_string()),
+            size: None,
+            fill_byte: None,
+            kind: "c".into(),
+            marker: Some("payload_marker".into()),
+        });
+
+        // Verify the file was read without failing on file reading
+        match res {
+            Ok(_) => {} // On windows
+            Err(e) => {
+                assert!(!e.message.contains("failed to read file"));
+            }
+        }
+
+        let _ = std::fs::remove_file(&test_file);
     }
 }
