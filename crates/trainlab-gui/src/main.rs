@@ -2969,22 +2969,35 @@ fn hexdump(data: &[u8]) -> String {
 
 /// Remove latent captures, snapshots, scans, and previous session logs upon application startup.
 fn clean_startup_artifacts() {
-    for dir in &["captures", "snapshots", "scans", "regions"] {
-        let p = std::path::Path::new(dir);
-        if p.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(p) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let _ = std::fs::remove_file(path);
+    let mut base_dirs = vec![std::path::PathBuf::from(".")];
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent() {
+            if !base_dirs.contains(&exe_dir.to_path_buf()) {
+                base_dirs.push(exe_dir.to_path_buf());
+            }
+        }
+
+    for base in &base_dirs {
+        for sub in &["captures", "snapshots", "scans", "regions"] {
+            let target_dir = base.join(sub);
+            if target_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&target_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let _ = std::fs::remove_file(path);
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Reset trainlab_session.log for fresh clean session tracking
-    let _ = std::fs::remove_file("trainlab_session.log");
+        // Reset trainlab_session.log for fresh clean session tracking
+        let log_file = base.join("trainlab_session.log");
+        if log_file.is_file() {
+            let _ = std::fs::remove_file(log_file);
+        }
+    }
 }
 
 #[cfg(test)]
