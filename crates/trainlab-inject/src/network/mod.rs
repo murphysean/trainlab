@@ -153,21 +153,59 @@ pub fn drain_network_events() -> Vec<Event> {
     }
 }
 
-/// Initialize network traffic hooks if supported on the platform.
-pub fn init() {
+/// Initialize network traffic hooks if supported on the platform with granular flags.
+pub fn init_with_config(winsock: bool, winhttp: bool) {
     #[cfg(windows)]
     {
         std::thread::Builder::new()
             .name("trainlab-net-init".into())
-            .spawn(|| {
-                winsock::init_winsock_hooks();
-                winhttp::init_winhttp_hooks();
+            .spawn(move || {
+                if winsock {
+                    winsock::init_winsock_hooks();
+                }
+                if winhttp {
+                    winhttp::init_winhttp_hooks();
+                }
             })
             .ok();
     }
     #[cfg(not(windows))]
     {
+        let _ = (winsock, winhttp);
         tracing::info!("network traffic hooking is not supported on non-Windows platforms (stubbed)");
+    }
+}
+
+/// Initialize network traffic hooks with all enabled (legacy/default).
+pub fn init() {
+    init_with_config(true, true);
+}
+
+/// Probe loaded network modules in the process.
+pub fn detect_network_modules() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleA;
+        let mut modules = Vec::new();
+        let targets = [
+            ("ws2_32.dll", "ws2_32.dll\0"),
+            ("winhttp.dll", "winhttp.dll\0"),
+            ("wininet.dll", "wininet.dll\0"),
+            ("steam_api64.dll", "steam_api64.dll\0"),
+            ("steamnetworkingsockets.dll", "steamnetworkingsockets.dll\0"),
+        ];
+        for (name, dll_null) in targets {
+            unsafe {
+                if !GetModuleHandleA(dll_null.as_ptr()).is_null() {
+                    modules.push(name.to_string());
+                }
+            }
+        }
+        modules
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
     }
 }
 

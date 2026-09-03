@@ -332,50 +332,46 @@ impl TrainlabApp {
                                     }
                                 }
                             }
-                        } else {
-                            // Default: enable standard overlay and input hooks if no profile specifies otherwise
-                            let _ = controller::request(&session, &Request::ConfigureRender {
-                                overlay: true,
-                                hook_wndproc: true,
-                                xinput_hooks: true,
-                            });
                         }
-                    } else {
-                        // Default: enable standard overlay and input hooks
-                        let _ = controller::request(&session, &Request::ConfigureRender {
-                            overlay: true,
-                            hook_wndproc: true,
-                            xinput_hooks: true,
-                        });
                     }
 
-                    // Explicit handshake: Wait for DLL graphics hooks / engine initialization to settle
-                    match controller::request(&session, &Request::WaitForReady) {
-                        Ok(Response::Ready { api, input_hook, present_hooked, frame_count, combo_count }) => {
+                    // Perform consolidated capability & feature negotiation handshake
+                    let app_cfg = config::AppConfig::load();
+                    let mut features = app_cfg.inject_features.clone();
+                    let dll_port = app_cfg.inject.dll_port;
+                    let mcp_port = app_cfg.server.mcp_port;
+                    if !features.network.ignore_ports.contains(&dll_port) {
+                        features.network.ignore_ports.push(dll_port);
+                    }
+                    if !features.network.ignore_ports.contains(&mcp_port) {
+                        features.network.ignore_ports.push(mcp_port);
+                    }
+
+                    match controller::request(&session, &Request::InitializeSession { features }) {
+                        Ok(Response::SessionReady { capabilities, diagnostics }) => {
                             if let Ok(mut s) = session.lock() {
-                                s.log_activity("UI", format!("DLL ready: {api} | Input: {input_hook} (present hooked: {present_hooked}, {frame_count} frames, {combo_count} combos)"));
+                                s.set_dll_capabilities(capabilities.clone());
+                                s.set_network_hooks_enabled(capabilities.contains(&"network_capture".to_string()));
+                                s.log_activity("UI", format!(
+                                    "DLL session initialized on {} ({}) | Input: {} | Active capabilities: [{}]",
+                                    diagnostics.target_os,
+                                    diagnostics.graphics_api,
+                                    diagnostics.input_subsystem,
+                                    capabilities.join(", ")
+                                ));
+                                if !diagnostics.detected_overlays.is_empty() {
+                                    s.log_activity("UI", format!("Detected in-game overlays: {:?}", diagnostics.detected_overlays));
+                                }
+                                if !diagnostics.loaded_network_modules.is_empty() {
+                                    s.log_activity("UI", format!("Loaded game network modules: {:?}", diagnostics.loaded_network_modules));
+                                }
                             }
                         }
                         _ => {
                             if let Ok(mut s) = session.lock() {
-                                s.log_activity("UI", "DLL ready handshake completed (default)");
+                                s.log_activity("UI", "DLL session initialization completed (default)");
                             }
                         }
-                    }
-
-                    // Configure network hook filter: ignore our own IPC port (31337) and MCP port (8123), and ignore loopback by default
-                    let (dll_port, mcp_port) = {
-                        let cfg = config::AppConfig::load();
-                        (cfg.inject.dll_port, cfg.server.mcp_port)
-                    };
-                    let _ = controller::request(&session, &Request::ConfigureNetworkHook {
-                        enabled: true,
-                        ignore_ports: vec![dll_port, mcp_port],
-                        capture_loopback: false,
-                    });
-                    if let Ok(mut s) = session.lock() {
-                        s.set_network_hooks_enabled(true);
-                        s.log_activity("UI", format!("network hook configured: ignoring ports [{dll_port}, {mcp_port}], loopback filtered"));
                     }
                 }
                 Err(e) => {
@@ -1664,6 +1660,9 @@ fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = config::AppConfig::load();
+
+    // Clean out latent captures, snapshots, memory dumps, and previous session logs upon startup
+    clean_startup_artifacts();
 
     // Check if startup delay is requested via TRAINLAB_STARTUP_DELAY env var
     if let Ok(delay_str) = std::env::var("TRAINLAB_STARTUP_DELAY")
@@ -2966,6 +2965,26 @@ fn hexdump(data: &[u8]) -> String {
         out.push_str(&format!("{b:02x} "));
     }
     out
+}
+
+/// Remove latent captures, snapshots, scans, and previous session logs upon application startup.
+fn clean_startup_artifacts() {
+    for dir in &["captures", "snapshots", "scans", "regions"] {
+        let p = std::path::Path::new(dir);
+        if p.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(p) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Reset trainlab_session.log for fresh clean session tracking
+    let _ = std::fs::remove_file("trainlab_session.log");
 }
 
 #[cfg(test)]

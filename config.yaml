@@ -1,0 +1,39 @@
+# Trainlab Configuration
+# Permissive / open by default: all features enabled, bound to 0.0.0.0 for LAN access.
+# Restrict or toggle off specific features as needed below.
+
+gui:
+  scale: 1.0
+  width: 1280.0
+  height: 800.0
+  fullscreen: false
+  theme: "dark"
+
+server:
+  # Host address to bind the MCP / HTTP web server on (default 0.0.0.0 for open network access).
+  # Set to "127.0.0.1" to restrict access to localhost only.
+  mcp_host: "0.0.0.0"
+  mcp_port: 8123
+
+inject:
+  dll_host: "127.0.0.1"
+  dll_port: 31337
+  dll_path: "trainlab_inject.dll"
+
+# Injected DLL feature configuration (opt-out / blacklist semantics)
+# By default, all capabilities are requested and enabled.
+inject_features:
+  display:
+    overlay: true              # DXGI/D3D in-game overlay rendering
+  input:
+    wndproc: true              # Window message hook for keyboard hotkeys
+    xinput: true               # Controller polling detour for gamepad nav
+  network:
+    winsock: true              # Winsock send/recv/sendto/recvfrom detours
+    winhttp: true              # WinHTTP REST API detours
+    capture_loopback: false     # Set to true to include 127.0.0.1 loopback traffic
+    ignore_ports: []           # Additional ports to filter out (trainer IPC & MCP ignored automatically)
+  memory:
+    watchpoints: true          # Page guard / hardware debug register memory writes
+    breakpoints: true          # Single-fire INT3 software breakpoints
+    trampoline_capture: true   # Passive non-stalling register capture ring buffers

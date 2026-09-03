@@ -105,11 +105,8 @@ pub fn start(port: u16) -> std::io::Result<u16> {
     let actual = listener.local_addr()?.port();
     tracing::info!(host = bind_addr, port = actual, "trainlab-inject listening");
 
-    // Initialize graphics API detection and render loop hooks
+    // Initialize passive detection (e.g. third-party overlay scanning) without installing hooks
     render::init();
-
-    // Initialize network traffic hooks
-    network::init();
 
     thread::Builder::new()
         .name("trainlab-inject".into())
@@ -584,6 +581,81 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             network::configure(enabled, &ignore_ports, capture_loopback);
             Response::NetworkHookConfigured { enabled }
         }
+        Request::InitializeSession { features } => {
+            // 1. Display & Render Hooks
+            render::configure(features.display.overlay, features.input.wndproc, features.input.xinput);
+
+            // 2. Network Hooks
+            if features.network.winsock || features.network.winhttp {
+                network::init_with_config(features.network.winsock, features.network.winhttp);
+            }
+            network::configure(
+                features.network.winsock || features.network.winhttp,
+                &features.network.ignore_ports,
+                features.network.capture_loopback,
+            );
+
+            // 3. Collect active advertised capabilities
+            let mut capabilities = vec![
+                "memory".to_string(),
+                "aob_scan".to_string(),
+                "pointer_chase".to_string(),
+                "cave_injection".to_string(),
+            ];
+
+            if features.display.overlay {
+                capabilities.push("overlay".to_string());
+            }
+            if features.input.wndproc {
+                capabilities.push("wndproc_hook".to_string());
+            }
+            if features.input.xinput {
+                capabilities.push("xinput_hook".to_string());
+            }
+            if features.network.winsock || features.network.winhttp {
+                capabilities.push("network_capture".to_string());
+            }
+            if features.memory.watchpoints {
+                capabilities.push("watchpoints".to_string());
+                capabilities.push("watchpoint_hardware".to_string());
+                capabilities.push("watchpoint_pageguard".to_string());
+            }
+            if features.memory.breakpoints {
+                capabilities.push("breakpoints".to_string());
+            }
+            if features.memory.trampoline_capture {
+                capabilities.push("capture_reg".to_string());
+            }
+
+            // 4. Runtime diagnostics
+            let (api, _, _, _, _, input_hook, _, detected_overlays) = render::get_status();
+            let loaded_network_modules = network::detect_network_modules();
+
+            let target_os = if cfg!(windows) {
+                // Check for Wine/Proton indicator in registry or environment
+                if std::env::var("WINEPREFIX").is_ok() || std::env::var("PROTON_VERSION").is_ok() {
+                    "Windows (Wine/Proton)".to_string()
+                } else {
+                    "Windows (Native)".to_string()
+                }
+            } else {
+                "Non-Windows (Stubbed)".to_string()
+            };
+
+            let diagnostics = trainlab_core::protocol::EnvironmentDiagnostics {
+                target_os,
+                graphics_api: if api.is_empty() { "Pending detection".to_string() } else { api },
+                input_subsystem: input_hook,
+                loaded_network_modules,
+                detected_overlays,
+                watchpoints_supported: cfg!(windows),
+            };
+
+            Response::SessionReady {
+                capabilities,
+                diagnostics,
+            }
+        }
     }
 }
 
@@ -835,6 +907,27 @@ mod tests {
                 assert!(!xinput_hooks);
             }
             other => panic!("expected RenderConfigured, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_initialize_session_handshake() {
+        let mem = SelfProcess;
+        let req = Request::InitializeSession {
+            features: trainlab_core::protocol::InjectFeaturesConfig::default(),
+        };
+        let frame = protocol::encode(&req).unwrap();
+        let decoded: Request = protocol::decode(&frame).unwrap();
+        let resp = handle_request_guarded(&mem, decoded);
+        match resp {
+            Response::SessionReady { capabilities, diagnostics } => {
+                assert!(capabilities.contains(&"memory".to_string()));
+                assert!(capabilities.contains(&"aob_scan".to_string()));
+                assert!(capabilities.contains(&"overlay".to_string()));
+                assert!(capabilities.contains(&"network_capture".to_string()));
+                assert!(!diagnostics.target_os.is_empty());
+            }
+            other => panic!("expected SessionReady, got {other:?}"),
         }
     }
 

@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use trainlab_core::protocol::InjectFeaturesConfig;
 
 /// Root configuration structure.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -18,6 +19,9 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub inject: InjectConfig,
+    /// Injected DLL feature enablement configuration (permissive/opt-out defaults).
+    #[serde(default)]
+    pub inject_features: InjectFeaturesConfig,
 }
 
 /// GUI window & appearance settings.
@@ -66,11 +70,11 @@ fn default_theme() -> String {
     "dark".to_string()
 }
 
-/// MCP server binding options.
+/// MCP & Web server binding options. Permissive 0.0.0.0 by default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Host address to bind the MCP server on.
-    /// Use "127.0.0.1" for localhost-only security, or "0.0.0.0" for LAN access.
+    /// Host address to bind the MCP / HTTP web server on.
+    /// Defaults to "0.0.0.0" for LAN access, configurable to "127.0.0.1" for localhost-only.
     #[serde(default = "default_mcp_host")]
     pub mcp_host: String,
     /// Port to listen on (default 8123).
@@ -88,7 +92,7 @@ impl Default for ServerConfig {
 }
 
 fn default_mcp_host() -> String {
-    "127.0.0.1".to_string()
+    "0.0.0.0".to_string()
 }
 fn default_mcp_port() -> u16 {
     8123

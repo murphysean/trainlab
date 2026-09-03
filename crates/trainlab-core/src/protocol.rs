@@ -220,6 +220,10 @@ pub enum Request {
         #[serde(default)]
         capture_loopback: bool,
     },
+    /// Initialize the injected DLL session with requested features and filters (consolidated capability handshake).
+    InitializeSession {
+        features: InjectFeaturesConfig,
+    },
 }
 
 /// The response to a [`Request`].
@@ -356,8 +360,142 @@ pub enum Response {
     NetworkLogCleared { cleared: usize },
     /// Reply to [`Request::ConfigureNetworkHook`].
     NetworkHookConfigured { enabled: bool },
+    /// Reply to [`Request::InitializeSession`] with advertised capabilities and environment diagnostics.
+    SessionReady {
+        capabilities: Vec<String>,
+        diagnostics: EnvironmentDiagnostics,
+    },
     /// An error occurred while handling the request.
     Error { message: String },
+}
+
+/// Injected DLL feature enablement configuration (permissive/opt-out defaults).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectFeaturesConfig {
+    #[serde(default)]
+    pub display: DisplayFeatures,
+    #[serde(default)]
+    pub input: InputFeatures,
+    #[serde(default)]
+    pub network: NetworkFeatures,
+    #[serde(default)]
+    pub memory: MemoryFeatures,
+}
+
+impl Default for InjectFeaturesConfig {
+    fn default() -> Self {
+        Self {
+            display: DisplayFeatures::default(),
+            input: InputFeatures::default(),
+            network: NetworkFeatures::default(),
+            memory: MemoryFeatures::default(),
+        }
+    }
+}
+
+/// Display and rendering hook features.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayFeatures {
+    /// In-game DXGI/Present swapchain overlay rendering. Default: true.
+    #[serde(default = "default_true")]
+    pub overlay: bool,
+}
+
+impl Default for DisplayFeatures {
+    fn default() -> Self {
+        Self { overlay: true }
+    }
+}
+
+/// Input interception features.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputFeatures {
+    /// Window message hook for keyboard hotkeys (WndProc). Default: true.
+    #[serde(default = "default_true")]
+    pub wndproc: bool,
+    /// XInput gamepad polling hook for controller navigation. Default: true.
+    #[serde(default = "default_true")]
+    pub xinput: bool,
+}
+
+impl Default for InputFeatures {
+    fn default() -> Self {
+        Self {
+            wndproc: true,
+            xinput: true,
+        }
+    }
+}
+
+/// Network traffic interception features.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkFeatures {
+    /// Winsock socket hook (`send`, `recv`, `sendto`, `recvfrom`). Default: true.
+    #[serde(default = "default_true")]
+    pub winsock: bool,
+    /// WinHTTP API hook (`WinHttpSendRequest`, `WinHttpReadData`). Default: true.
+    #[serde(default = "default_true")]
+    pub winhttp: bool,
+    /// Whether to capture loopback (127.0.0.1 / localhost) traffic. Default: false.
+    #[serde(default = "default_false")]
+    pub capture_loopback: bool,
+    /// Ports to ignore from capture (e.g. internal IPC or MCP ports).
+    #[serde(default)]
+    pub ignore_ports: Vec<u16>,
+}
+
+impl Default for NetworkFeatures {
+    fn default() -> Self {
+        Self {
+            winsock: true,
+            winhttp: true,
+            capture_loopback: false,
+            ignore_ports: Vec::new(),
+        }
+    }
+}
+
+/// Memory scanning and debugging features.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryFeatures {
+    /// Page guard & hardware debug register watchpoints. Default: true.
+    #[serde(default = "default_true")]
+    pub watchpoints: bool,
+    /// Single-fire software breakpoints (`int3`). Default: true.
+    #[serde(default = "default_true")]
+    pub breakpoints: bool,
+    /// Passive non-stalling register capture trampolines. Default: true.
+    #[serde(default = "default_true")]
+    pub trampoline_capture: bool,
+}
+
+impl Default for MemoryFeatures {
+    fn default() -> Self {
+        Self {
+            watchpoints: true,
+            breakpoints: true,
+            trampoline_capture: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_false() -> bool {
+    false
+}
+
+/// Runtime diagnostics reported by the injected DLL upon initialization.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnvironmentDiagnostics {
+    pub target_os: String,
+    pub graphics_api: String,
+    pub input_subsystem: String,
+    pub loaded_network_modules: Vec<String>,
+    pub detected_overlays: Vec<String>,
+    pub watchpoints_supported: bool,
 }
 
 /// A serialized cheat representation sent to the injected in-game overlay.
