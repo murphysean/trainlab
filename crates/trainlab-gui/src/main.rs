@@ -138,6 +138,10 @@ struct TrainlabApp {
     is_scanning: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // Event bus receiver to subscribe to all unified session/wire/log events
     bus_rx: tokio::sync::broadcast::Receiver<trainlab_core::event::BusEvent>,
+    // Whether to periodically sync live marker memory values (1 Hz) or keep cached
+    markers_live_sync: bool,
+    // Whether to auto-scroll/stick to bottom in activity log views
+    log_stick_to_bottom: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +231,8 @@ impl TrainlabApp {
             is_attaching: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             is_scanning: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus_rx,
+            markers_live_sync: true,
+            log_stick_to_bottom: true,
         };
         app.auto_match_profile();
         app.sync_registered_hotkeys();
@@ -420,7 +426,15 @@ impl TrainlabApp {
 
         if !markers.is_empty() {
             ui.separator();
-            ui.heading("📌 Saved Markers (Live Memory Inspector)");
+            ui.horizontal(|ui| {
+                ui.heading("📌 Saved Markers (Live Memory Inspector)");
+                ui.separator();
+                ui.checkbox(&mut self.markers_live_sync, "Live Sync (1 Hz)")
+                    .on_hover_text("When enabled, polls marker values at 1 Hz debounce. Turn off to completely pause background memory reads.");
+                if ui.button("🔄 Refresh Now").clicked() {
+                    self.cheat_values_cache.clear();
+                }
+            });
             ui.label("Read and modify memory values live at any saved marker address:");
 
             let mut write_op: Option<(u64, String, trainlab_core::scan::ValueType)> = None;
@@ -444,7 +458,11 @@ impl TrainlabApp {
 
                         // Read 8 bytes at marker address to display live interpretations (debounced cache)
                         let read_res = if *addr != 0 {
-                            self.read_cached(*addr, 8)
+                            if self.markers_live_sync {
+                                self.read_cached(*addr, 8)
+                            } else {
+                                self.cheat_values_cache.get(addr).and_then(|(_, v)| v.clone())
+                            }
                         } else {
                             None
                         };
@@ -538,12 +556,19 @@ impl TrainlabApp {
     }
 
     /// Cached live reads to avoid firing blocking TCP read requests on every UI frame.
+    /// Values refresh at ~1 Hz (1000ms), and failed reads back off to 2500ms to avoid locking the UI thread.
     fn read_cached(&mut self, address: u64, len: usize) -> Option<Vec<u8>> {
         let now = std::time::Instant::now();
-        if let Some((cached_time, cached_val)) = self.cheat_values_cache.get(&address)
-            && now.duration_since(*cached_time) < std::time::Duration::from_millis(250) {
+        if let Some((cached_time, cached_val)) = self.cheat_values_cache.get(&address) {
+            let ttl = if cached_val.is_some() {
+                std::time::Duration::from_millis(1000)
+            } else {
+                std::time::Duration::from_millis(2500)
+            };
+            if now.duration_since(*cached_time) < ttl {
                 return cached_val.clone();
             }
+        }
         let r = self.request(&Request::Read { address, len });
         let val = match r {
             Some(Response::Read { data }) => Some(data),
@@ -2274,7 +2299,11 @@ impl eframe::App for TrainlabApp {
                     });
 
                     ui.add_space(15.0);
-                    ui.heading("Activity Log");
+                    ui.horizontal(|ui| {
+                        ui.heading("Activity Log");
+                        ui.checkbox(&mut self.log_stick_to_bottom, "Scroll to bottom")
+                            .on_hover_text("Keep view scrolled to latest activity log messages");
+                    });
                     let activity_log = self
                         .session
                         .lock()
@@ -2282,6 +2311,7 @@ impl eframe::App for TrainlabApp {
                         .unwrap_or_default();
                     egui::ScrollArea::vertical()
                         .max_height(150.0)
+                        .stick_to_bottom(self.log_stick_to_bottom)
                         .show(ui, |ui| {
                             for line in &activity_log {
                                 if line.starts_with("UI:") {
@@ -2577,7 +2607,12 @@ impl eframe::App for TrainlabApp {
                             self.show_run_applications_panel(ui);
                         }
                         ActiveTab::ActivityLog => {
-                            ui.heading("📋 Activity & Event Log");
+                            ui.horizontal(|ui| {
+                                ui.heading("📋 Activity & Event Log");
+                                ui.separator();
+                                ui.checkbox(&mut self.log_stick_to_bottom, "Scroll to bottom")
+                                    .on_hover_text("Keep view pinned to the latest activity log messages");
+                            });
                             ui.label("Full history of human UI actions and MCP agent commands executed in this session:");
                             ui.add_space(5.0);
 
@@ -2588,6 +2623,7 @@ impl eframe::App for TrainlabApp {
                                 .unwrap_or_default();
                             egui::ScrollArea::both()
                                 .auto_shrink([false, false])
+                                .stick_to_bottom(self.log_stick_to_bottom)
                                 .show(ui, |ui| {
                                     for line in &activity_log {
                                         if line.starts_with("UI:") {
