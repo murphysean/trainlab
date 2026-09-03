@@ -224,6 +224,12 @@ pub enum Request {
     InitializeSession {
         features: InjectFeaturesConfig,
     },
+    /// Sync active dynamic memory pins to the injected DLL's frame-cadence loop.
+    SyncPins {
+        pins: Vec<PinSpec>,
+    },
+    /// Clear all active dynamic memory pins in the injected DLL.
+    ClearPins,
 }
 
 /// The response to a [`Request`].
@@ -365,6 +371,10 @@ pub enum Response {
         capabilities: Vec<String>,
         diagnostics: EnvironmentDiagnostics,
     },
+    /// Reply to [`Request::SyncPins`].
+    PinsSynced { count: usize },
+    /// Reply to [`Request::ClearPins`].
+    PinsCleared,
     /// An error occurred while handling the request.
     Error { message: String },
 }
@@ -436,6 +446,9 @@ pub struct NetworkFeatures {
     /// WinHTTP API hook (`WinHttpSendRequest`, `WinHttpReadData`). Default: true.
     #[serde(default = "default_true")]
     pub winhttp: bool,
+    /// SChannel TLS/HTTPS plaintext hook (`EncryptMessage`, `DecryptMessage`). Default: true.
+    #[serde(default = "default_true")]
+    pub schannel: bool,
     /// Whether to capture loopback (127.0.0.1 / localhost) traffic. Default: false.
     #[serde(default = "default_false")]
     pub capture_loopback: bool,
@@ -449,15 +462,19 @@ impl Default for NetworkFeatures {
         Self {
             winsock: true,
             winhttp: true,
+            schannel: true,
             capture_loopback: false,
             ignore_ports: Vec::new(),
         }
     }
 }
 
-/// Memory scanning and debugging features.
+/// Memory scanning, debugging, and value enforcement features.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryFeatures {
+    /// In-process frame-cadence value pinning in render loop. Default: true.
+    #[serde(default = "default_true")]
+    pub frame_pinning: bool,
     /// Page guard & hardware debug register watchpoints. Default: true.
     #[serde(default = "default_true")]
     pub watchpoints: bool,
@@ -472,6 +489,7 @@ pub struct MemoryFeatures {
 impl Default for MemoryFeatures {
     fn default() -> Self {
         Self {
+            frame_pinning: true,
             watchpoints: true,
             breakpoints: true,
             trampoline_capture: true,
@@ -496,6 +514,48 @@ pub struct EnvironmentDiagnostics {
     pub loaded_network_modules: Vec<String>,
     pub detected_overlays: Vec<String>,
     pub watchpoints_supported: bool,
+}
+
+/// A value pinning specification executed every cadence (frame in DLL or timer in GUI).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PinSpec {
+    pub id: u64,
+    pub label: String,
+    pub enabled: bool,
+    pub ops: Vec<PinOp>,
+    #[serde(default)]
+    pub provider: PinProvider,
+}
+
+/// Execution provider for a pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PinProvider {
+    /// Optimal: inside injected DLL on render frame presentation.
+    #[default]
+    InProcessFrame,
+    /// Fallback: external GUI background timer loop.
+    ExternalTimer,
+}
+
+/// Individual micro-instruction executed sequentially within a pin cadence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PinOp {
+    /// Safeguard: assert address is not null (0x0). If 0x0, abort remainder of this pin's ops.
+    AssertNotNull { address: u64 },
+    /// Constant write: write bytes to target address.
+    WriteConstant { address: u64, data: Vec<u8> },
+    /// Dynamic copy / arithmetic write: `dst = src` or `dst = src + addend`.
+    CopyValue {
+        src_address: u64,
+        dst_address: u64,
+        value_type: crate::scan::ValueType,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        addend: Option<f64>,
+        #[serde(default)]
+        max_only: bool,
+    },
 }
 
 /// A serialized cheat representation sent to the injected in-game overlay.

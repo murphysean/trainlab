@@ -43,6 +43,9 @@ pub struct GuiConfig {
     /// UI Theme ("dark" or "light").
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Fallback external timer rate for value pinning (default 30 Hz).
+    #[serde(default = "default_pin_rate_hz")]
+    pub pin_rate_hz: u32,
 }
 
 impl Default for GuiConfig {
@@ -53,8 +56,13 @@ impl Default for GuiConfig {
             height: default_height(),
             fullscreen: false,
             theme: default_theme(),
+            pin_rate_hz: default_pin_rate_hz(),
         }
     }
+}
+
+fn default_pin_rate_hz() -> u32 {
+    30
 }
 
 fn default_scale() -> f32 {

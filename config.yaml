@@ -37,6 +37,7 @@ inject_features:
   network:
     winsock: true              # Winsock send/recv/sendto/recvfrom detours
     winhttp: true              # WinHTTP REST API detours
+    schannel: true             # SChannel TLS/HTTPS plaintext detours (EncryptMessage/DecryptMessage)
     capture_loopback: false     # Set to true to include 127.0.0.1 loopback traffic
     ignore_ports: []           # Additional ports to filter out (trainer IPC & MCP ignored automatically)
   memory:

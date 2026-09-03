@@ -586,11 +586,15 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             render::configure(features.display.overlay, features.input.wndproc, features.input.xinput);
 
             // 2. Network Hooks
-            if features.network.winsock || features.network.winhttp {
-                network::init_with_config(features.network.winsock, features.network.winhttp);
+            if features.network.winsock || features.network.winhttp || features.network.schannel {
+                network::init_with_config(
+                    features.network.winsock,
+                    features.network.winhttp,
+                    features.network.schannel,
+                );
             }
             network::configure(
-                features.network.winsock || features.network.winhttp,
+                features.network.winsock || features.network.winhttp || features.network.schannel,
                 &features.network.ignore_ports,
                 features.network.capture_loopback,
             );
@@ -626,6 +630,9 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             if features.memory.trampoline_capture {
                 capabilities.push("capture_reg".to_string());
             }
+            if features.display.overlay && features.memory.frame_pinning {
+                capabilities.push("frame_pinning".to_string());
+            }
 
             // 4. Runtime diagnostics
             let (api, _, _, _, _, input_hook, _, detected_overlays) = render::get_status();
@@ -655,6 +662,19 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 capabilities,
                 diagnostics,
             }
+        }
+        Request::SyncPins { pins } => {
+            let count = pins.len();
+            if let Ok(mut lock) = render::overlay::ACTIVE_PINS.lock() {
+                *lock = pins;
+            }
+            Response::PinsSynced { count }
+        }
+        Request::ClearPins => {
+            if let Ok(mut lock) = render::overlay::ACTIVE_PINS.lock() {
+                lock.clear();
+            }
+            Response::PinsCleared
         }
     }
 }

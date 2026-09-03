@@ -11,6 +11,8 @@ use trainlab_core::protocol::{Event, NetworkPacketDto, PacketDirection, PacketKi
 pub mod winsock;
 #[cfg(windows)]
 pub mod winhttp;
+#[cfg(windows)]
+pub mod schannel;
 
 /// Global network hook configuration and captured packet ring buffer.
 static NETWORK_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -154,7 +156,7 @@ pub fn drain_network_events() -> Vec<Event> {
 }
 
 /// Initialize network traffic hooks if supported on the platform with granular flags.
-pub fn init_with_config(winsock: bool, winhttp: bool) {
+pub fn init_with_config(winsock: bool, winhttp: bool, schannel: bool) {
     #[cfg(windows)]
     {
         std::thread::Builder::new()
@@ -166,19 +168,22 @@ pub fn init_with_config(winsock: bool, winhttp: bool) {
                 if winhttp {
                     winhttp::init_winhttp_hooks();
                 }
+                if schannel {
+                    schannel::init_schannel_hooks();
+                }
             })
             .ok();
     }
     #[cfg(not(windows))]
     {
-        let _ = (winsock, winhttp);
+        let _ = (winsock, winhttp, schannel);
         tracing::info!("network traffic hooking is not supported on non-Windows platforms (stubbed)");
     }
 }
 
 /// Initialize network traffic hooks with all enabled (legacy/default).
 pub fn init() {
-    init_with_config(true, true);
+    init_with_config(true, true, true);
 }
 
 /// Probe loaded network modules in the process.
@@ -191,6 +196,8 @@ pub fn detect_network_modules() -> Vec<String> {
             ("ws2_32.dll", "ws2_32.dll\0"),
             ("winhttp.dll", "winhttp.dll\0"),
             ("wininet.dll", "wininet.dll\0"),
+            ("secur32.dll", "secur32.dll\0"),
+            ("sspicli.dll", "sspicli.dll\0"),
             ("steam_api64.dll", "steam_api64.dll\0"),
             ("steamnetworkingsockets.dll", "steamnetworkingsockets.dll\0"),
         ];

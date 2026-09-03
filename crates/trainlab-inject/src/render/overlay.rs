@@ -2,9 +2,10 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use trainlab_core::protocol::{Event, OverlayCheatDto};
+use trainlab_core::protocol::{Event, OverlayCheatDto, PinOp, PinSpec};
 
 pub static CHEATS: Mutex<Vec<OverlayCheatDto>> = Mutex::new(Vec::new());
+pub static ACTIVE_PINS: Mutex<Vec<PinSpec>> = Mutex::new(Vec::new());
 
 // Outbound event queue (events generated inside the overlay to be broadcasted over IPC)
 pub static OUTBOUND_EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
@@ -348,17 +349,133 @@ pub fn drain_outbound_events() -> Vec<Event> {
     }
 }
 
-/// Execute on-frame value pinning for any pinned cheats.
+/// Execute on-frame value pinning for any pinned cheats and dynamic PinSpecs.
 pub fn execute_pinning_cadence() {
+    use trainlab_core::memory::ProcessMemory;
+    let mem = trainlab_core::memory::SelfProcess;
+
+    // 1. Legacy/simple cheat pinning
     if let Ok(cheats) = CHEATS.lock() {
-        let mem = trainlab_core::memory::SelfProcess;
         for c in cheats.iter() {
             if c.enabled
                 && let Some(pinned_bytes) = &c.pinned_bytes
                     && c.address != 0 && !pinned_bytes.is_empty() {
-                        use trainlab_core::memory::ProcessMemory;
                         let _ = mem.write(c.address, pinned_bytes);
                     }
+        }
+    }
+
+    // 2. Dynamic multi-op PinSpecs (Tier 1 on-frame execution)
+    if let Ok(pins) = ACTIVE_PINS.lock() {
+        for pin in pins.iter() {
+            if !pin.enabled {
+                continue;
+            }
+
+            let mut abort_pin = false;
+            for op in &pin.ops {
+                if abort_pin {
+                    break;
+                }
+                match op {
+                    PinOp::AssertNotNull { address } => {
+                        if *address == 0 {
+                            abort_pin = true;
+                            break;
+                        }
+                        // Check if pointer at address or the address itself is readable and non-null
+                        if let Ok(buf) = mem.read(*address, 8) {
+                            if buf.iter().all(|&b| b == 0) {
+                                abort_pin = true;
+                                break;
+                            }
+                        } else {
+                            abort_pin = true;
+                            break;
+                        }
+                    }
+                    PinOp::WriteConstant { address, data } => {
+                        if *address != 0 && !data.is_empty() {
+                            let _ = mem.write(*address, data);
+                        }
+                    }
+                    PinOp::CopyValue { src_address, dst_address, value_type, addend, max_only } => {
+                        if *src_address == 0 || *dst_address == 0 {
+                            abort_pin = true;
+                            continue;
+                        }
+                        let size = value_type.size();
+                        if let Ok(src_bytes) = mem.read(*src_address, size) {
+                            let val_f64 = match value_type {
+                                trainlab_core::scan::ValueType::I32 => {
+                                    if src_bytes.len() >= 4 {
+                                        i32::from_le_bytes(src_bytes[..4].try_into().unwrap()) as f64
+                                    } else { 0.0 }
+                                }
+                                trainlab_core::scan::ValueType::U32 => {
+                                    if src_bytes.len() >= 4 {
+                                        u32::from_le_bytes(src_bytes[..4].try_into().unwrap()) as f64
+                                    } else { 0.0 }
+                                }
+                                trainlab_core::scan::ValueType::F32 => {
+                                    if src_bytes.len() >= 4 {
+                                        f32::from_le_bytes(src_bytes[..4].try_into().unwrap()) as f64
+                                    } else { 0.0 }
+                                }
+                                trainlab_core::scan::ValueType::I64 => {
+                                    if src_bytes.len() >= 8 {
+                                        i64::from_le_bytes(src_bytes[..8].try_into().unwrap()) as f64
+                                    } else { 0.0 }
+                                }
+                                trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => {
+                                    if src_bytes.len() >= 8 {
+                                        u64::from_le_bytes(src_bytes[..8].try_into().unwrap()) as f64
+                                    } else { 0.0 }
+                                }
+                                trainlab_core::scan::ValueType::F64 => {
+                                    if src_bytes.len() >= 8 {
+                                        f64::from_le_bytes(src_bytes[..8].try_into().unwrap())
+                                    } else { 0.0 }
+                                }
+                            };
+
+                            let final_val = if let Some(add) = addend {
+                                val_f64 + add
+                            } else {
+                                val_f64
+                            };
+
+                            if *max_only {
+                                if let Ok(dst_bytes) = mem.read(*dst_address, size) {
+                                    let cur_dst = match value_type {
+                                        trainlab_core::scan::ValueType::I32 => i32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
+                                        trainlab_core::scan::ValueType::U32 => u32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
+                                        trainlab_core::scan::ValueType::F32 => f32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
+                                        trainlab_core::scan::ValueType::I64 => i64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()) as f64,
+                                        trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => u64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()) as f64,
+                                        trainlab_core::scan::ValueType::F64 => f64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()),
+                                    };
+                                    if cur_dst >= final_val {
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            let write_bytes = match value_type {
+                                trainlab_core::scan::ValueType::I32 => (final_val as i32).to_le_bytes().to_vec(),
+                                trainlab_core::scan::ValueType::U32 => (final_val as u32).to_le_bytes().to_vec(),
+                                trainlab_core::scan::ValueType::F32 => (final_val as f32).to_le_bytes().to_vec(),
+                                trainlab_core::scan::ValueType::I64 => (final_val as i64).to_le_bytes().to_vec(),
+                                trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => (final_val as u64).to_le_bytes().to_vec(),
+                                trainlab_core::scan::ValueType::F64 => final_val.to_le_bytes().to_vec(),
+                            };
+                            let _ = mem.write(*dst_address, &write_bytes);
+                        } else {
+                            abort_pin = true;
+                        }
+                    }
+                }
+            }
         }
     }
 }

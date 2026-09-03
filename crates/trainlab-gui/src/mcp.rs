@@ -286,6 +286,59 @@ pub struct ConfigureNetworkArgs {
     pub ignore_ports: Option<Vec<u16>>,
 }
 
+/// Arguments for [`pin_value`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PinValueArgs {
+    /// Target memory address or marker (e.g. "$player_health" or "0x7ff7a8b0").
+    pub address: String,
+    /// Value to keep pinned/frozen (e.g. "9999", "100.0", or hex "0x270f").
+    pub value: String,
+    /// Value type: i32, u32, f32, i64, u64, f64, or ptr. Default is i32.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+    /// Optional label for this pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional safeguard: assert address is not null before writing (default true).
+    #[serde(default)]
+    pub assert_not_null: Option<bool>,
+}
+
+/// Arguments for [`pin_copy`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PinCopyArgs {
+    /// Source memory address or marker (e.g. "$max_health").
+    pub src: String,
+    /// Destination memory address or marker to enforce (e.g. "$cur_health").
+    pub dst: String,
+    /// Value type: i32, u32, f32, i64, u64, f64, or ptr. Default is i32.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+    /// Optional addend to add to src value each cadence: dst = src + addend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addend: Option<f64>,
+    /// Only update if computed value is greater than existing dst value (top-up).
+    #[serde(default)]
+    pub max_only: Option<bool>,
+    /// Optional label for this pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional safeguard: assert pointers are non-null before executing (default true).
+    #[serde(default)]
+    pub assert_not_null: Option<bool>,
+}
+
+/// Arguments for [`unpin`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UnpinArgs {
+    /// Unique ID of the pin to remove.
+    pub id: u64,
+}
+
+/// Arguments for [`clear_pins`] and [`list_pins`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListPinsArgs {}
+
 /// Arguments for [`undo_info`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct UndoInfoArgs {
@@ -3250,6 +3303,218 @@ impl TrainlabMcpServer {
         ]))
     }
 
+    /// Pin an address to a constant value using the optimal provider (Tier 1 on-frame in DLL or Tier 2 external timer).
+    #[tool(description = "Pin / freeze an address to a constant value. Automatically routes to Tier 1 on-frame DXGI render loop (when DLL is injected) or Tier 2 external periodic timer cadence. Includes fail-safe assertions so if a pointer becomes null, writes are aborted cleanly without crashes.")]
+    pub fn pin_value(
+        &self,
+        Parameters(args): Parameters<PinValueArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let address = parse_addr(&self.session, &args.address)?;
+        let vt = match args.value_type.as_deref().map(|s| s.to_lowercase()).as_deref() {
+            Some("u32") => trainlab_core::scan::ValueType::U32,
+            Some("f32") | Some("float") => trainlab_core::scan::ValueType::F32,
+            Some("i64") => trainlab_core::scan::ValueType::I64,
+            Some("u64") => trainlab_core::scan::ValueType::U64,
+            Some("f64") | Some("double") => trainlab_core::scan::ValueType::F64,
+            Some("ptr") => trainlab_core::scan::ValueType::Ptr,
+            _ => trainlab_core::scan::ValueType::I32,
+        };
+
+        let bytes = parse_value_bytes(&args.value, vt)?;
+        let assert_not_null = args.assert_not_null.unwrap_or(true);
+        let mut ops = Vec::new();
+        if assert_not_null {
+            ops.push(trainlab_core::protocol::PinOp::AssertNotNull { address });
+        }
+        ops.push(trainlab_core::protocol::PinOp::WriteConstant { address, data: bytes.clone() });
+
+        let label = args.label.unwrap_or_else(|| format!("pin_{:#x}", address));
+
+        // Determine optimal provider
+        let (pin_id, provider) = {
+            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let provider = if s.has_capability("frame_pinning") {
+                trainlab_core::protocol::PinProvider::InProcessFrame
+            } else {
+                trainlab_core::protocol::PinProvider::ExternalTimer
+            };
+            let id = s.add_pin(label.clone(), ops.clone(), provider);
+            (id, provider)
+        };
+
+        // If in-process frame provider, sync active pins to DLL
+        if provider == trainlab_core::protocol::PinProvider::InProcessFrame {
+            let all_pins = {
+                let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                s.list_pins().to_vec()
+            };
+            let _ = crate::controller::request(&self.session, &trainlab_core::protocol::Request::SyncPins { pins: all_pins });
+        }
+
+        self.request_repaint();
+
+        let desc = match provider {
+            trainlab_core::protocol::PinProvider::InProcessFrame => {
+                format!("Pinned {address:#x} to '{}' (Tier 1: In-Process DXGI On-Frame, pin id #{pin_id})", args.value)
+            }
+            trainlab_core::protocol::PinProvider::ExternalTimer => {
+                format!("Pinned {address:#x} to '{}' (Tier 2: External Timer Cadence, pin id #{pin_id})", args.value)
+            }
+        };
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(desc),
+        ]))
+    }
+
+    /// Pin dynamic value copy / arithmetic from a source to a destination.
+    #[tool(description = "Pin dynamic value copy / sync from src to dst (e.g. dst = src, dst = src + addend, or dst = max(dst, src)). Automatically routes to Tier 1 on-frame DXGI render loop or Tier 2 external timer.")]
+    pub fn pin_copy(
+        &self,
+        Parameters(args): Parameters<PinCopyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let src_address = parse_addr(&self.session, &args.src)?;
+        let dst_address = parse_addr(&self.session, &args.dst)?;
+
+        let vt = match args.value_type.as_deref().map(|s| s.to_lowercase()).as_deref() {
+            Some("u32") => trainlab_core::scan::ValueType::U32,
+            Some("f32") | Some("float") => trainlab_core::scan::ValueType::F32,
+            Some("i64") => trainlab_core::scan::ValueType::I64,
+            Some("u64") => trainlab_core::scan::ValueType::U64,
+            Some("f64") | Some("double") => trainlab_core::scan::ValueType::F64,
+            Some("ptr") => trainlab_core::scan::ValueType::Ptr,
+            _ => trainlab_core::scan::ValueType::I32,
+        };
+
+        let assert_not_null = args.assert_not_null.unwrap_or(true);
+        let mut ops = Vec::new();
+        if assert_not_null {
+            ops.push(trainlab_core::protocol::PinOp::AssertNotNull { address: src_address });
+            ops.push(trainlab_core::protocol::PinOp::AssertNotNull { address: dst_address });
+        }
+        ops.push(trainlab_core::protocol::PinOp::CopyValue {
+            src_address,
+            dst_address,
+            value_type: vt,
+            addend: args.addend,
+            max_only: args.max_only.unwrap_or(false),
+        });
+
+        let label = args.label.unwrap_or_else(|| format!("copy_{:#x}_to_{:#x}", src_address, dst_address));
+
+        // Determine optimal provider
+        let (pin_id, provider) = {
+            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let provider = if s.has_capability("frame_pinning") {
+                trainlab_core::protocol::PinProvider::InProcessFrame
+            } else {
+                trainlab_core::protocol::PinProvider::ExternalTimer
+            };
+            let id = s.add_pin(label.clone(), ops.clone(), provider);
+            (id, provider)
+        };
+
+        // If in-process frame provider, sync active pins to DLL
+        if provider == trainlab_core::protocol::PinProvider::InProcessFrame {
+            let all_pins = {
+                let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                s.list_pins().to_vec()
+            };
+            let _ = crate::controller::request(&self.session, &trainlab_core::protocol::Request::SyncPins { pins: all_pins });
+        }
+
+        self.request_repaint();
+
+        let desc = match provider {
+            trainlab_core::protocol::PinProvider::InProcessFrame => {
+                format!("Dynamic pin registered: {src_address:#x} -> {dst_address:#x} (Tier 1: In-Process DXGI On-Frame, pin id #{pin_id})")
+            }
+            trainlab_core::protocol::PinProvider::ExternalTimer => {
+                format!("Dynamic pin registered: {src_address:#x} -> {dst_address:#x} (Tier 2: External Timer Cadence, pin id #{pin_id})")
+            }
+        };
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(desc),
+        ]))
+    }
+
+    /// Remove an active pin by ID.
+    #[tool(description = "Remove a previously registered value pin by its ID.")]
+    pub fn unpin(
+        &self,
+        Parameters(args): Parameters<UnpinArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let removed = {
+            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            s.remove_pin(args.id)
+        };
+
+        if removed {
+            let all_pins = {
+                let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                s.list_pins().to_vec()
+            };
+            let _ = crate::controller::request(&self.session, &trainlab_core::protocol::Request::SyncPins { pins: all_pins });
+            self.request_repaint();
+            Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(format!("Removed pin #{}", args.id)),
+            ]))
+        } else {
+            Err(err(format!("Pin #{} not found", args.id)))
+        }
+    }
+
+    /// List all active value pins and their execution providers.
+    #[tool(description = "List all active value pins, their instructions, and their execution providers (Tier 1 In-Process vs Tier 2 External Timer).")]
+    pub fn list_pins(
+        &self,
+        Parameters(_args): Parameters<ListPinsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let pins = {
+            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            s.list_pins().to_vec()
+        };
+
+        if pins.is_empty() {
+            return Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text("No active value pins."),
+            ]));
+        }
+
+        let mut lines = Vec::new();
+        lines.push(format!("Active Pins ({} total):", pins.len()));
+        for p in &pins {
+            let prov = match p.provider {
+                trainlab_core::protocol::PinProvider::InProcessFrame => "Tier 1: On-Frame (DLL)",
+                trainlab_core::protocol::PinProvider::ExternalTimer => "Tier 2: External Timer (GUI)",
+            };
+            lines.push(format!("  #{} '{}' [{}] ({} ops, enabled: {})", p.id, p.label, prov, p.ops.len(), p.enabled));
+        }
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(lines.join("\n")),
+        ]))
+    }
+
+    /// Clear all active value pins.
+    #[tool(description = "Clear / remove all active value pins.")]
+    pub fn clear_pins(
+        &self,
+        Parameters(_args): Parameters<ListPinsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        {
+            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            s.clear_pins();
+        }
+        let _ = crate::controller::request(&self.session, &trainlab_core::protocol::Request::ClearPins);
+        self.request_repaint();
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("All value pins cleared."),
+        ]))
+    }
+
     /// Write bytes or a typed value to game memory directly (with auto-undo snapshotting).
     #[tool(description = "Write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Executes immediately and records an undo snapshot.")]
     pub(crate) fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, ErrorData> {
@@ -5893,4 +6158,87 @@ cheats: []
         assert!(txt_empty.contains("no pending hit"));
     }
 
+    #[test]
+    fn test_dual_tier_pinning_provider_selection() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
+
+        // 1. Without frame_pinning capability in DLL -> routes to Tier 2: ExternalTimer
+        let res_tier2 = server.pin_value(Parameters(PinValueArgs {
+            address: "0x140001000".to_string(),
+            value: "9999".to_string(),
+            value_type: Some("i32".to_string()),
+            label: Some("player_hp".to_string()),
+            assert_not_null: Some(true),
+        })).expect("pin_value succeeds");
+
+        let msg = match &res_tier2.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text block"),
+        };
+        assert!(msg.contains("Tier 2: External Timer Cadence"), "Expected Tier 2, got: {msg}");
+
+        // Verify pin was stored in session
+        {
+            let lock = s.lock().unwrap();
+            let pins = lock.list_pins();
+            assert_eq!(pins.len(), 1);
+            assert_eq!(pins[0].provider, trainlab_core::protocol::PinProvider::ExternalTimer);
+            assert_eq!(pins[0].ops.len(), 2); // AssertNotNull + WriteConstant
+        }
+
+        // 2. When frame_pinning is advertised -> routes to Tier 1: InProcessFrame
+        {
+            let mut lock = s.lock().unwrap();
+            lock.set_dll_capabilities(vec!["frame_pinning".to_string(), "overlay".to_string()]);
+        }
+
+        let res_tier1 = server.pin_value(Parameters(PinValueArgs {
+            address: "0x140002000".to_string(),
+            value: "100.0".to_string(),
+            value_type: Some("f32".to_string()),
+            label: Some("player_shield".to_string()),
+            assert_not_null: Some(true),
+        })).expect("pin_value succeeds");
+
+        let msg_tier1 = match &res_tier1.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text block"),
+        };
+        assert!(msg_tier1.contains("Tier 1: In-Process DXGI On-Frame"), "Expected Tier 1, got: {msg_tier1}");
+
+        {
+            let lock = s.lock().unwrap();
+            let pins = lock.list_pins();
+            assert_eq!(pins.len(), 2);
+            assert_eq!(pins[1].provider, trainlab_core::protocol::PinProvider::InProcessFrame);
+        }
+
+        // 3. Test list_pins and unpin
+        let list_res = server.list_pins(Parameters(ListPinsArgs {})).expect("list_pins succeeds");
+        let list_txt = match &list_res.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text block"),
+        };
+        assert!(list_txt.contains("Active Pins (2 total)"));
+
+        let unpin_res = server.unpin(Parameters(UnpinArgs { id: 1 })).expect("unpin succeeds");
+        let unpin_txt = match &unpin_res.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text block"),
+        };
+        assert!(unpin_txt.contains("Removed pin #1"));
+
+        {
+            let lock = s.lock().unwrap();
+            assert_eq!(lock.list_pins().len(), 1);
+        }
+
+        // 4. Test clear_pins
+        server.clear_pins(Parameters(ListPinsArgs {})).expect("clear_pins succeeds");
+        {
+            let lock = s.lock().unwrap();
+            assert_eq!(lock.list_pins().len(), 0);
+        }
+    }
 }

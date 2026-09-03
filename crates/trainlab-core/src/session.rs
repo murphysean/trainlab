@@ -465,6 +465,10 @@ pub struct SessionState {
     profile_render: Option<crate::profile::RenderConfig>,
     /// Pending window command requested remotely via REST API or MCP ("show" or "hide").
     pending_window_cmd: Option<String>,
+    /// Active dynamic memory pins maintained by the session.
+    pins: Vec<crate::protocol::PinSpec>,
+    /// Monotonic counter for pin ids.
+    next_pin_id: u64,
     /// Unified activity log (sourced as "UI: ..." or "MCP: ...").
     activity_log: Vec<String>,
     /// Decoupled event bus for publishing session mutations.
@@ -1390,6 +1394,46 @@ impl SessionState {
     #[allow(dead_code)] // used by future tools
     pub fn clear_scan(&mut self) {
         self.scan = None;
+    }
+
+    /// Add or register a dynamic value pin in the session.
+    pub fn add_pin(&mut self, label: impl Into<String>, ops: Vec<crate::protocol::PinOp>, provider: crate::protocol::PinProvider) -> u64 {
+        self.next_pin_id = self.next_pin_id.saturating_add(1);
+        let id = self.next_pin_id;
+        let pin = crate::protocol::PinSpec {
+            id,
+            label: label.into(),
+            enabled: true,
+            ops,
+            provider,
+        };
+        self.pins.push(pin);
+        id
+    }
+
+    /// List all active pins.
+    pub fn list_pins(&self) -> &[crate::protocol::PinSpec] {
+        &self.pins
+    }
+
+    /// Get a pin by ID.
+    pub fn get_pin(&self, id: u64) -> Option<&crate::protocol::PinSpec> {
+        self.pins.iter().find(|p| p.id == id)
+    }
+
+    /// Remove a pin by ID. Returns true if removed.
+    pub fn remove_pin(&mut self, id: u64) -> bool {
+        if let Some(pos) = self.pins.iter().position(|p| p.id == id) {
+            self.pins.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear all active pins.
+    pub fn clear_pins(&mut self) {
+        self.pins.clear();
     }
 }
 

@@ -1724,9 +1724,21 @@ fn main() -> eframe::Result<()> {
             let web_enabled = app_config.server.web_enabled;
             let mcp_host = app_config.server.mcp_host.clone();
             let mcp_port = app_config.server.mcp_port;
+            let pin_rate_hz = app_config.gui.pin_rate_hz.max(1);
             let mcp_session = session.clone();
             let event_ctx = cc.egui_ctx.clone();
             let event_session = session.clone();
+            let pin_session = session.clone();
+
+            // Spawn Tier 2 External Periodic Timer Pinning Cadence
+            std::thread::spawn(move || {
+                let interval = std::time::Duration::from_millis((1000 / pin_rate_hz).max(1) as u64);
+                loop {
+                    std::thread::sleep(interval);
+                    execute_external_pinning_cadence(&pin_session);
+                }
+            });
+
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -3003,6 +3015,138 @@ fn clean_startup_artifacts() {
         let log_file = base.join("trainlab_session.log");
         if log_file.is_file() {
             let _ = std::fs::remove_file(log_file);
+        }
+    }
+}
+
+/// Tier 2 fallback: Periodic external timer cadence for value pinning.
+/// Executes when a pin is assigned to ExternalTimer or when the DLL does not offer frame_pinning.
+fn execute_external_pinning_cadence(session: &SharedSession) {
+    let pins = {
+        let Ok(s) = session.lock() else { return };
+        s.list_pins().to_vec()
+    };
+
+    if pins.is_empty() { return };
+
+    let proc = match crate::mcp::game_process(session) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    use trainlab_core::memory::ProcessMemory;
+
+    for pin in &pins {
+        if !pin.enabled {
+            continue;
+        }
+        // Only process ExternalTimer pins in this fallback loop
+        if pin.provider != trainlab_core::protocol::PinProvider::ExternalTimer {
+            continue;
+        }
+
+        let mut abort_pin = false;
+        for op in &pin.ops {
+            if abort_pin {
+                break;
+            }
+            match op {
+                trainlab_core::protocol::PinOp::AssertNotNull { address } => {
+                    if *address == 0 {
+                        abort_pin = true;
+                        break;
+                    }
+                    if let Ok(buf) = proc.read(*address, 8) {
+                        if buf.iter().all(|&b| b == 0) {
+                            abort_pin = true;
+                            break;
+                        }
+                    } else {
+                        abort_pin = true;
+                        break;
+                    }
+                }
+                trainlab_core::protocol::PinOp::WriteConstant { address, data } => {
+                    if *address != 0 && !data.is_empty() {
+                        let _ = proc.write(*address, data);
+                    }
+                }
+                trainlab_core::protocol::PinOp::CopyValue { src_address, dst_address, value_type, addend, max_only } => {
+                    if *src_address == 0 || *dst_address == 0 {
+                        abort_pin = true;
+                        continue;
+                    }
+                    let size = value_type.size();
+                    if let Ok(src_bytes) = proc.read(*src_address, size) {
+                        let val_f64 = match value_type {
+                            trainlab_core::scan::ValueType::I32 => {
+                                if src_bytes.len() >= 4 {
+                                    i32::from_le_bytes(src_bytes[..4].try_into().unwrap_or_default()) as f64
+                                } else { 0.0 }
+                            }
+                            trainlab_core::scan::ValueType::U32 => {
+                                if src_bytes.len() >= 4 {
+                                    u32::from_le_bytes(src_bytes[..4].try_into().unwrap_or_default()) as f64
+                                } else { 0.0 }
+                            }
+                            trainlab_core::scan::ValueType::F32 => {
+                                if src_bytes.len() >= 4 {
+                                    f32::from_le_bytes(src_bytes[..4].try_into().unwrap_or_default()) as f64
+                                } else { 0.0 }
+                            }
+                            trainlab_core::scan::ValueType::I64 => {
+                                if src_bytes.len() >= 8 {
+                                    i64::from_le_bytes(src_bytes[..8].try_into().unwrap_or_default()) as f64
+                                } else { 0.0 }
+                            }
+                            trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => {
+                                if src_bytes.len() >= 8 {
+                                    u64::from_le_bytes(src_bytes[..8].try_into().unwrap_or_default()) as f64
+                                } else { 0.0 }
+                            }
+                            trainlab_core::scan::ValueType::F64 => {
+                                if src_bytes.len() >= 8 {
+                                    f64::from_le_bytes(src_bytes[..8].try_into().unwrap_or_default())
+                                } else { 0.0 }
+                            }
+                        };
+
+                        let final_val = if let Some(add) = addend {
+                            val_f64 + add
+                        } else {
+                            val_f64
+                        };
+
+                        if *max_only {
+                            if let Ok(dst_bytes) = proc.read(*dst_address, size) {
+                                let cur_dst = match value_type {
+                                    trainlab_core::scan::ValueType::I32 => i32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
+                                    trainlab_core::scan::ValueType::U32 => u32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
+                                    trainlab_core::scan::ValueType::F32 => f32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
+                                    trainlab_core::scan::ValueType::I64 => i64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()) as f64,
+                                    trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => u64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()) as f64,
+                                    trainlab_core::scan::ValueType::F64 => f64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()),
+                                };
+                                if cur_dst >= final_val {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let write_bytes = match value_type {
+                            trainlab_core::scan::ValueType::I32 => (final_val as i32).to_le_bytes().to_vec(),
+                            trainlab_core::scan::ValueType::U32 => (final_val as u32).to_le_bytes().to_vec(),
+                            trainlab_core::scan::ValueType::F32 => (final_val as f32).to_le_bytes().to_vec(),
+                            trainlab_core::scan::ValueType::I64 => (final_val as i64).to_le_bytes().to_vec(),
+                            trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => (final_val as u64).to_le_bytes().to_vec(),
+                            trainlab_core::scan::ValueType::F64 => final_val.to_le_bytes().to_vec(),
+                        };
+                        let _ = proc.write(*dst_address, &write_bytes);
+                    } else {
+                        abort_pin = true;
+                    }
+                }
+            }
         }
     }
 }

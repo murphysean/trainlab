@@ -64,6 +64,8 @@ pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -
         .route("/pending", get(list_pending_ops))
         .route("/confirm_op", post(confirm_op_handler))
         .route("/reject_op", post(reject_op_handler))
+        .route("/pins", get(get_pins).post(set_pin_handler))
+        .route("/pins/clear", post(clear_pins_handler))
         .with_state(state)
 }
 
@@ -758,6 +760,49 @@ async fn reject_op_handler(
 
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "id": req.id })))
+}
+
+/// `GET /api/pins` — list active value pins.
+async fn get_pins(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<trainlab_core::protocol::PinSpec>>, (StatusCode, Json<ApiError>)> {
+    let s = lock_session_or_500(&state)?;
+    Ok(Json(s.list_pins().to_vec()))
+}
+
+/// `POST /api/pins` — register or set a value pin.
+async fn set_pin_handler(
+    State(state): State<ApiState>,
+    Json(args): Json<mcp::PinValueArgs>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let res = mcp_srv.pin_value(rmcp::handler::server::wrapper::Parameters(args))
+        .map_err(|e| err(e.message))?;
+
+    let text = res.content.iter().filter_map(|c| match c {
+        rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
+        _ => None,
+    }).collect::<Vec<_>>().join("\n");
+
+    state.request_repaint();
+    Ok(Json(serde_json::json!({ "status": "ok", "message": text })))
+}
+
+/// `POST /api/pins/clear` — remove all active value pins.
+async fn clear_pins_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let res = mcp_srv.clear_pins(rmcp::handler::server::wrapper::Parameters(mcp::ListPinsArgs {}))
+        .map_err(|e| err(e.message))?;
+
+    let text = res.content.iter().filter_map(|c| match c {
+        rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
+        _ => None,
+    }).collect::<Vec<_>>().join("\n");
+
+    state.request_repaint();
+    Ok(Json(serde_json::json!({ "status": "ok", "message": text })))
 }
 
 use axum::response::sse::{Event, Sse};
