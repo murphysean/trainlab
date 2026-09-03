@@ -122,6 +122,7 @@ struct TrainlabApp {
     // Network Traffic state
     net_proto_filter: String,
     net_endpoint_filter: String,
+    net_capture_loopback: bool,
     selected_packet_id: Option<u64>,
     // Active Tab state
     active_tab: ActiveTab,
@@ -206,6 +207,7 @@ impl TrainlabApp {
             custom_app_args: "".into(),
             net_proto_filter: "All".into(),
             net_endpoint_filter: "".into(),
+            net_capture_loopback: false,
             selected_packet_id: None,
             active_tab: ActiveTab::Cheats,
             auto_init: true,
@@ -359,6 +361,21 @@ impl TrainlabApp {
                                 s.log_activity("UI", "DLL ready handshake completed (default)");
                             }
                         }
+                    }
+
+                    // Configure network hook filter: ignore our own IPC port (31337) and MCP port (8123), and ignore loopback by default
+                    let (dll_port, mcp_port) = {
+                        let cfg = config::AppConfig::load();
+                        (cfg.inject.dll_port, cfg.server.mcp_port)
+                    };
+                    let _ = controller::request(&session, &Request::ConfigureNetworkHook {
+                        enabled: true,
+                        ignore_ports: vec![dll_port, mcp_port],
+                        capture_loopback: false,
+                    });
+                    if let Ok(mut s) = session.lock() {
+                        s.set_network_hooks_enabled(true);
+                        s.log_activity("UI", format!("network hook configured: ignoring ports [{dll_port}, {mcp_port}], loopback filtered"));
                     }
                 }
                 Err(e) => {
@@ -2681,7 +2698,27 @@ impl TrainlabApp {
                 if let Ok(mut s) = self.session.lock() {
                     s.set_network_hooks_enabled(enabled);
                 }
-                let _ = self.request(&Request::ConfigureNetworkHook { enabled });
+                let (dll_port, mcp_port) = {
+                    let cfg = config::AppConfig::load();
+                    (cfg.inject.dll_port, cfg.server.mcp_port)
+                };
+                let _ = self.request(&Request::ConfigureNetworkHook {
+                    enabled,
+                    ignore_ports: vec![dll_port, mcp_port],
+                    capture_loopback: self.net_capture_loopback,
+                });
+            }
+
+            if ui.checkbox(&mut self.net_capture_loopback, "Capture Loopback (127.0.0.1)").changed() {
+                let (dll_port, mcp_port) = {
+                    let cfg = config::AppConfig::load();
+                    (cfg.inject.dll_port, cfg.server.mcp_port)
+                };
+                let _ = self.request(&Request::ConfigureNetworkHook {
+                    enabled: hooks_enabled,
+                    ignore_ports: vec![dll_port, mcp_port],
+                    capture_loopback: self.net_capture_loopback,
+                });
             }
 
             ui.separator();

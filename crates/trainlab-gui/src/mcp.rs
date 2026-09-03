@@ -273,6 +273,19 @@ pub struct WatchNetworkArgs {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ClearNetworkLogArgs {}
 
+/// Arguments for [`configure_network`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigureNetworkArgs {
+    /// Whether network traffic interception is enabled.
+    pub enabled: bool,
+    /// Whether to capture loopback (127.0.0.1 / localhost / ::1) traffic. Defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_loopback: Option<bool>,
+    /// Additional ports to ignore (beyond the trainer's internal IPC and MCP ports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_ports: Option<Vec<u16>>,
+}
+
 /// Arguments for [`undo_info`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct UndoInfoArgs {
@@ -3187,6 +3200,53 @@ impl TrainlabMcpServer {
         let cleared = s.clear_network_packets();
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(format!("Cleared {cleared} captured network packet(s) from session.")),
+        ]))
+    }
+
+    /// Configure network traffic capture: toggle capture, ignore ports, or allow loopback.
+    #[tool(description = "Configure in-game network traffic interception. By default loopback (127.0.0.1) and internal trainer ports are ignored so buffers only capture actual game traffic. Use this tool to toggle interception, change ignored ports, or opt into loopback traffic capture.")]
+    pub fn configure_network(
+        &self,
+        Parameters(args): Parameters<ConfigureNetworkArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (dll_port, mcp_port) = {
+            let cfg = crate::config::AppConfig::load();
+            (cfg.inject.dll_port, cfg.server.mcp_port)
+        };
+
+        let mut ports = vec![dll_port, mcp_port];
+        if let Some(extra) = args.ignore_ports {
+            for p in extra {
+                if !ports.contains(&p) {
+                    ports.push(p);
+                }
+            }
+        }
+        let capture_loopback = args.capture_loopback.unwrap_or(false);
+
+        let req = trainlab_core::protocol::Request::ConfigureNetworkHook {
+            enabled: args.enabled,
+            ignore_ports: ports.clone(),
+            capture_loopback,
+        };
+
+        let resp = crate::controller::request(&self.session, &req);
+        if let Ok(mut s) = self.session.lock() {
+            s.set_network_hooks_enabled(args.enabled);
+        }
+
+        self.request_repaint();
+
+        let status_desc = match resp {
+            Ok(trainlab_core::protocol::Response::NetworkHookConfigured { enabled }) => {
+                format!("Network interception set to {enabled}. Ignored ports: {ports:?}, capture_loopback: {capture_loopback}")
+            }
+            Ok(other) => format!("Unexpected DLL response: {other:?}"),
+            Err(e) => format!("Failed to configure network hook on DLL (DLL may be offline): {e}"),
+        };
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(status_desc),
         ]))
     }
 

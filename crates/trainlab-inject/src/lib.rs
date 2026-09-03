@@ -580,8 +580,8 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
         Request::ClearNetworkLog => {
             Response::NetworkLogCleared { cleared: 0 }
         }
-        Request::ConfigureNetworkHook { enabled } => {
-            network::set_enabled(enabled);
+        Request::ConfigureNetworkHook { enabled, ignore_ports, capture_loopback } => {
+            network::configure(enabled, &ignore_ports, capture_loopback);
             Response::NetworkHookConfigured { enabled }
         }
     }

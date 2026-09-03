@@ -213,6 +213,12 @@ pub enum Request {
     /// Configure or toggle network traffic interception.
     ConfigureNetworkHook {
         enabled: bool,
+        /// Ports to explicitly ignore (e.g. trainer IPC port, MCP port).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ignore_ports: Vec<u16>,
+        /// Whether to capture loopback (127.0.0.1 / ::1 / localhost) traffic. Defaults to false.
+        #[serde(default)]
+        capture_loopback: bool,
     },
 }
 

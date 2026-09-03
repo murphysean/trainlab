@@ -641,6 +641,10 @@ pub struct NetworkLogResponse {
 #[derive(Debug, Deserialize)]
 pub struct ToggleNetworkReq {
     pub enabled: bool,
+    #[serde(default)]
+    pub capture_loopback: bool,
+    #[serde(default)]
+    pub ignore_ports: Vec<u16>,
 }
 
 /// `GET /api/network` — retrieve captured packets with filtering and pagination.
@@ -662,8 +666,8 @@ async fn get_network_packets(
         proto,
         params.filter.as_deref(),
     );
-    let hooks_enabled = s.network_hooks_enabled();
 
+    let hooks_enabled = s.network_hooks_enabled();
     Ok(Json(NetworkLogResponse {
         packets,
         total,
@@ -692,9 +696,21 @@ async fn toggle_network_hooks_handler(
         let mut s = lock_session_or_500(&state)?;
         s.set_network_hooks_enabled(req.enabled);
     }
+    let (dll_port, mcp_port) = {
+        let cfg = crate::config::AppConfig::load();
+        (cfg.inject.dll_port, cfg.server.mcp_port)
+    };
+    let mut ports = vec![dll_port, mcp_port];
+    for p in req.ignore_ports {
+        if !ports.contains(&p) {
+            ports.push(p);
+        }
+    }
     // Forward command to DLL if connected
     let _ = crate::controller::request(&state.session, &trainlab_core::protocol::Request::ConfigureNetworkHook {
         enabled: req.enabled,
+        ignore_ports: ports,
+        capture_loopback: req.capture_loopback,
     });
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "enabled": req.enabled })))
