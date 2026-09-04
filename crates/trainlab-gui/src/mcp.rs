@@ -3069,7 +3069,7 @@ impl TrainlabMcpServer {
     }
 
     /// Arm a lightweight breakpoint on a code address and capture registers.
-    #[tool(description = "Break on a code instruction: patch it with int3, and when execution reaches it capture the registers and a stack trace without a full debugger stop.")]
+    #[tool(description = "Break on a code instruction: patch it with int3, and when execution reaches it capture registers and stack trace without a full debugger stop. NOTE: int3 code patching is intended for single-threaded or cold execution paths; for high-frequency or multi-threaded hot code sites, prefer 'capture_reg' (code cave / trampoline) or 'watch_writes' (page guard) to avoid thread concurrency contention.")]
     fn break_on_code(
         &self,
         Parameters(args): Parameters<BreakOnCodeArgs>,

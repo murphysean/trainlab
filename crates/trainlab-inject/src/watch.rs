@@ -32,9 +32,10 @@ use windows_sys::Win32::Foundation::{
     EXCEPTION_GUARD_PAGE, EXCEPTION_SINGLE_STEP, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, GetThreadContext,
+    AddVectoredExceptionHandler, FlushInstructionCache, GetThreadContext,
     SetThreadContext, CONTEXT, CONTEXT_CONTROL_AMD64, CONTEXT_DEBUG_REGISTERS_AMD64,
-    CONTEXT_INTEGER_AMD64, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_POINTERS,
+    CONTEXT_INTEGER_AMD64, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH,
+    EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -43,9 +44,9 @@ use windows_sys::Win32::System::Memory::{
     VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_GUARD,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId, OpenThread, ResumeThread,
-    SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
-    THREAD_SUSPEND_RESUME,
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId, OpenThread,
+    ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
+    THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME,
 };
 
 const TRAP_FLAG: u32 = 0x100;
@@ -370,6 +371,11 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                     }
                 }
                 return EXCEPTION_CONTINUE_EXECUTION;
+            } else if ((*ctx).EFlags & TRAP_FLAG) != 0 {
+                // Stranded single-step (e.g. watch/break was disarmed mid-step):
+                // Clear Trap Flag so the thread does not wedge in an infinite single-step loop!
+                (*ctx).EFlags &= !TRAP_FLAG;
+                return EXCEPTION_CONTINUE_EXECUTION;
             }
         }
 
@@ -600,7 +606,7 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
             }
         }
 
-        EXCEPTION_CONTINUE_EXECUTION
+        EXCEPTION_CONTINUE_SEARCH
     }
 }
 
@@ -620,6 +626,7 @@ fn write_byte(address: u64, byte: u8) -> Result<(), String> {
     unsafe { *(address as *mut u8) = byte; }
     unsafe {
         VirtualProtect(ptr, 1, old, &mut old);
+        FlushInstructionCache(GetCurrentProcess(), ptr, 1);
     }
     Ok(())
 }
