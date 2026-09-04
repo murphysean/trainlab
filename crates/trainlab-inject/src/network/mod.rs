@@ -331,6 +331,8 @@ pub fn detect_network_modules() -> Vec<String> {
             ("sspicli.dll", "sspicli.dll\0"),
             ("steam_api64.dll", "steam_api64.dll\0"),
             ("steamnetworkingsockets.dll", "steamnetworkingsockets.dll\0"),
+            ("lsteamclient.dll", "lsteamclient.dll\0"),
+            ("lsteamclient64.dll", "lsteamclient64.dll\0"),
         ];
         for (name, dll_null) in targets {
             unsafe {
@@ -600,6 +602,35 @@ mod tests {
             assert_eq!(p.remote_endpoint.as_deref(), Some("steam:76561198012345678"));
             assert_eq!(p.url.as_deref(), Some("P2P Send (ch:0, type:2)"));
             assert_eq!(&p.payload_preview, b"PLAYER_POSITION_UPDATE");
+        } else {
+            panic!("expected NetworkPacket event");
+        }
+    }
+
+    #[test]
+    fn test_steam_networking_sockets_packet_recording() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        configure(true, &[], false, &[]);
+        let _ = drain_network_events();
+
+        record_packet(
+            PacketKind::Steam,
+            PacketDirection::Inbound,
+            Some("steam:conn:1337".into()),
+            Some("steam:local".into()),
+            Some("SteamSockets Recv (conn:1337, ch:0, lane:0)".into()),
+            None,
+            b"PEER_SYNC_RPC",
+        );
+
+        let events = drain_network_events();
+        assert_eq!(events.len(), 1);
+        if let Event::NetworkPacket(p) = &events[0] {
+            assert_eq!(p.kind, PacketKind::Steam);
+            assert_eq!(p.direction, PacketDirection::Inbound);
+            assert_eq!(p.local_endpoint.as_deref(), Some("steam:conn:1337"));
+            assert_eq!(p.url.as_deref(), Some("SteamSockets Recv (conn:1337, ch:0, lane:0)"));
+            assert_eq!(&p.payload_preview, b"PEER_SYNC_RPC");
         } else {
             panic!("expected NetworkPacket event");
         }

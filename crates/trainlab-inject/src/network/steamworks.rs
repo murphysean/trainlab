@@ -85,10 +85,30 @@ type FnSteamNetworkingMessagesReceiveMessagesOnChannel = unsafe extern "system" 
     i32,
 ) -> i32;
 
+/// int SteamAPI_ISteamNetworkingSockets_SendMessageToConnection(intptr_t instancePtr, uint32 hConn, const void *pubData, uint32 cubData, int nSendFlags, int64 *pOutMessageNumber);
+type FnSteamNetworkingSocketsSendMessageToConnection = unsafe extern "system" fn(
+    *mut c_void,
+    u32,
+    *const u8,
+    u32,
+    i32,
+    *mut i64,
+) -> i32;
+
+/// int SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection(intptr_t instancePtr, uint32 hConn, SteamNetworkingMessage_t **ppOutMessages, int nMaxMessages);
+type FnSteamNetworkingSocketsReceiveMessagesOnConnection = unsafe extern "system" fn(
+    *mut c_void,
+    u32,
+    *mut *mut SteamNetworkingMessage,
+    i32,
+) -> i32;
+
 static ORIGINAL_SEND_P2P: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static ORIGINAL_READ_P2P: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static ORIGINAL_SEND_MESSAGE_TO_USER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static ORIGINAL_RECEIVE_MESSAGES: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static ORIGINAL_SOCKETS_SEND_MESSAGE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static ORIGINAL_SOCKETS_RECEIVE_MESSAGES: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 static STEAMWORKS_HOOKED: AtomicBool = AtomicBool::new(false);
 
@@ -258,6 +278,142 @@ pub unsafe extern "system" fn hooked_steam_networking_messages_receive_messages_
     ret
 }
 
+/// Hooked `SteamAPI_ISteamNetworkingSockets_SendMessageToConnection` (SteamNetworkingSockets connection outbound).
+pub unsafe extern "system" fn hooked_steam_networking_sockets_send_message_to_connection(
+    instance: *mut c_void,
+    h_conn: u32,
+    pub_data: *const u8,
+    cub_data: u32,
+    n_send_flags: i32,
+    p_out_message_number: *mut i64,
+) -> i32 {
+    let orig = ORIGINAL_SOCKETS_SEND_MESSAGE.load(Ordering::Relaxed);
+    let ret = if !orig.is_null() {
+        let orig_fn: FnSteamNetworkingSocketsSendMessageToConnection = unsafe { std::mem::transmute(orig) };
+        unsafe { orig_fn(instance, h_conn, pub_data, cub_data, n_send_flags, p_out_message_number) }
+    } else {
+        0
+    };
+
+    // k_EResultOK is 1 in Steamworks
+    if (ret == 1 || ret > 0) && !pub_data.is_null() && cub_data > 0 {
+        let slice = unsafe { std::slice::from_raw_parts(pub_data, cub_data as usize) };
+        let remote_ep = format!("steam:conn:{}", h_conn);
+        let url = format!("SteamSockets Send (conn:{}, flags:{:#x})", h_conn, n_send_flags);
+
+        super::record_packet(
+            PacketKind::Steam,
+            PacketDirection::Outbound,
+            Some("steam:local".into()),
+            Some(remote_ep),
+            Some(url),
+            None,
+            slice,
+        );
+    }
+
+    ret
+}
+
+/// Hooked `SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection` (SteamNetworkingSockets connection inbound).
+pub unsafe extern "system" fn hooked_steam_networking_sockets_receive_messages_on_connection(
+    instance: *mut c_void,
+    h_conn: u32,
+    pp_out_messages: *mut *mut SteamNetworkingMessage,
+    n_max_messages: i32,
+) -> i32 {
+    let orig = ORIGINAL_SOCKETS_RECEIVE_MESSAGES.load(Ordering::Relaxed);
+    let ret = if !orig.is_null() {
+        let orig_fn: FnSteamNetworkingSocketsReceiveMessagesOnConnection = unsafe { std::mem::transmute(orig) };
+        unsafe { orig_fn(instance, h_conn, pp_out_messages, n_max_messages) }
+    } else {
+        0
+    };
+
+    if ret > 0 && !pp_out_messages.is_null() {
+        let count = (ret as usize).min(n_max_messages as usize);
+        let msgs = unsafe { std::slice::from_raw_parts(pp_out_messages, count) };
+        for &msg_ptr in msgs {
+            if !msg_ptr.is_null() {
+                let msg = unsafe { &*msg_ptr };
+                if !msg.m_pData.is_null() && msg.m_cbSize > 0 {
+                    let slice = unsafe { std::slice::from_raw_parts(msg.m_pData, msg.m_cbSize as usize) };
+                    let steam_id = msg.m_identityPeer.m_steamID64;
+                    let remote_ep = if steam_id != 0 {
+                        format!("steam:{}", steam_id)
+                    } else {
+                        format!("steam:conn:{}", h_conn)
+                    };
+                    let url = format!("SteamSockets Recv (conn:{}, ch:{}, lane:{})", h_conn, msg.m_nChannel, msg.m_idxLane);
+
+                    super::record_packet(
+                        PacketKind::Steam,
+                        PacketDirection::Inbound,
+                        Some(remote_ep),
+                        Some("steam:local".into()),
+                        Some(url),
+                        None,
+                        slice,
+                    );
+                }
+            }
+        }
+    }
+
+    ret
+}
+
+/// Install detour hook at an absolute function address.
+unsafe fn install_hook_at(
+    target_u64: u64,
+    hook_name: &str,
+    callback_addr: u64,
+    target_orig: &AtomicPtr<c_void>,
+) -> bool {
+    let payload = trainlab_cave::emitter::jmp_abs(callback_addr);
+    let hook = trainlab_cave::cave::HookKind::Trampoline {
+        payload: payload.clone(),
+        jump: trainlab_cave::cave::JumpStyle::Absolute,
+    };
+
+    let mem = trainlab_core::memory::SelfProcess;
+    let read = |addr: u64, len: usize| -> Result<Vec<u8>, String> {
+        use trainlab_core::memory::ProcessMemory;
+        mem.read(addr, len).map_err(|e| e.to_string())
+    };
+    let write = |addr: u64, data: &[u8]| -> Result<usize, String> {
+        use trainlab_core::memory::ProcessMemory;
+        mem.write(addr, data).map_err(|e| e.to_string())
+    };
+    let allocate = |size: usize, exec: bool| -> Result<u64, String> {
+        crate::allocate(size, exec)
+    };
+
+    match trainlab_cave::cave::install(target_u64, hook, read, write, allocate) {
+        Ok(installed) => {
+            target_orig.store(
+                (installed.cave_addr + payload.len() as u64) as *mut c_void,
+                Ordering::SeqCst,
+            );
+            tracing::info!(
+                "Hooked Steamworks {} at 0x{:X} -> trampoline at 0x{:X}",
+                hook_name,
+                target_u64,
+                installed.cave_addr
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to hook Steamworks {}: {}",
+                hook_name,
+                e
+            );
+            false
+        }
+    }
+}
+
 /// Install detour hook for a specific Steamworks export.
 unsafe fn install_hook(
     module_handle: *mut c_void,
@@ -267,52 +423,93 @@ unsafe fn install_hook(
 ) -> bool {
     let fn_ptr = unsafe { GetProcAddress(module_handle, proc_name.as_ptr()) };
     if let Some(target_fn) = fn_ptr {
-        let target_u64 = target_fn as u64;
-        let payload = trainlab_cave::emitter::jmp_abs(callback_addr);
-        let hook = trainlab_cave::cave::HookKind::Trampoline {
-            payload: payload.clone(),
-            jump: trainlab_cave::cave::JumpStyle::Absolute,
-        };
-
-        let mem = trainlab_core::memory::SelfProcess;
-        let read = |addr: u64, len: usize| -> Result<Vec<u8>, String> {
-            use trainlab_core::memory::ProcessMemory;
-            mem.read(addr, len).map_err(|e| e.to_string())
-        };
-        let write = |addr: u64, data: &[u8]| -> Result<usize, String> {
-            use trainlab_core::memory::ProcessMemory;
-            mem.write(addr, data).map_err(|e| e.to_string())
-        };
-        let allocate = |size: usize, exec: bool| -> Result<u64, String> {
-            crate::allocate(size, exec)
-        };
-
-        match trainlab_cave::cave::install(target_u64, hook, read, write, allocate) {
-            Ok(installed) => {
-                target_orig.store(
-                    (installed.cave_addr + payload.len() as u64) as *mut c_void,
-                    Ordering::SeqCst,
-                );
-                tracing::info!(
-                    "Hooked Steamworks {} at 0x{:X} -> trampoline at 0x{:X}",
-                    String::from_utf8_lossy(proc_name),
-                    target_u64,
-                    installed.cave_addr
-                );
-                true
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to hook Steamworks {}: {}",
-                    String::from_utf8_lossy(proc_name),
-                    e
-                );
-                false
-            }
-        }
+        install_hook_at(
+            target_fn as u64,
+            &String::from_utf8_lossy(proc_name),
+            callback_addr,
+            target_orig,
+        )
     } else {
         false
     }
+}
+
+/// Scan a PE module in memory for a function referencing a string pattern.
+unsafe fn find_func_referencing_str(module_base: u64, target_str: &[u8]) -> Option<u64> {
+    use trainlab_core::memory::ProcessMemory;
+    let mem = trainlab_core::memory::SelfProcess;
+
+    // Read DOS header -> e_lfanew
+    let dos_hdr = mem.read(module_base, 0x40).ok()?;
+    if dos_hdr.len() < 0x40 || dos_hdr[0..2] != [0x4D, 0x5A] {
+        return None;
+    }
+    let e_lfanew = u32::from_le_bytes(dos_hdr[0x3c..0x40].try_into().ok()?) as u64;
+
+    // Read NT header
+    let nt_hdr = mem.read(module_base + e_lfanew, 0x18).ok()?;
+    if nt_hdr.len() < 0x18 || nt_hdr[0..4] != [0x50, 0x45, 0x00, 0x00] {
+        return None;
+    }
+    let num_sections = u16::from_le_bytes(nt_hdr[6..8].try_into().ok()?) as usize;
+    let opt_hdr_size = u16::from_le_bytes(nt_hdr[20..22].try_into().ok()?) as u64;
+
+    let sec_table_base = module_base + e_lfanew + 24 + opt_hdr_size;
+    let mut text_rva = 0u64;
+    let mut text_size = 0usize;
+    let mut rdata_rva = 0u64;
+    let mut rdata_size = 0usize;
+
+    for i in 0..num_sections {
+        let sec_hdr = mem.read(sec_table_base + (i * 40) as u64, 40).ok()?;
+        let sec_name = &sec_hdr[0..8];
+        let va = u32::from_le_bytes(sec_hdr[12..16].try_into().ok()?) as u64;
+        let vsize = u32::from_le_bytes(sec_hdr[8..12].try_into().ok()?) as usize;
+
+        if sec_name.starts_with(b".text") {
+            text_rva = va;
+            text_size = vsize;
+        } else if sec_name.starts_with(b".rdata") || sec_name.starts_with(b".rodata") {
+            rdata_rva = va;
+            rdata_size = vsize;
+        }
+    }
+
+    if text_size == 0 || rdata_size == 0 {
+        return None;
+    }
+
+    let rdata_bytes = mem.read(module_base + rdata_rva, rdata_size).ok()?;
+    // Find string within rdata
+    let str_offset_in_rdata = rdata_bytes.windows(target_str.len()).position(|w| w == target_str)?;
+    let target_str_va = module_base + rdata_rva + str_offset_in_rdata as u64;
+
+    let text_bytes = mem.read(module_base + text_rva, text_size).ok()?;
+
+    // Search for instructions referencing target_str_va via RIP displacement:
+    // lea r8, [rip + disp32] (4c 8d 05 xx xx xx xx)
+    // or lea rdx, [rip + disp32] (48 8d 15 xx xx xx xx)
+    for i in 0..text_bytes.len().saturating_sub(7) {
+        if (text_bytes[i] == 0x4C && text_bytes[i + 1] == 0x8D && text_bytes[i + 2] == 0x05)
+            || (text_bytes[i] == 0x48 && text_bytes[i + 1] == 0x8D && text_bytes[i + 2] == 0x15)
+        {
+            let disp = i32::from_le_bytes(text_bytes[i + 3..i + 7].try_into().ok()?) as i64;
+            let next_rip = (module_base + text_rva + (i as u64) + 7) as i64;
+            if (next_rip + disp) as u64 == target_str_va {
+                // Scan backwards for function prologue (0x55 0x48 or 0x55 0x41)
+                let start_idx = i.saturating_sub(128);
+                let mut p = i;
+                while p > start_idx {
+                    if text_bytes[p] == 0x55 && (text_bytes[p + 1] == 0x48 || text_bytes[p + 1] == 0x41) {
+                        return Some(module_base + text_rva + p as u64);
+                    }
+                    p -= 1;
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Initialize Steamworks P2P networking hooks.
@@ -320,49 +517,114 @@ pub fn init_steamworks_hooks() {
     std::thread::sleep(Duration::from_millis(1000));
 
     unsafe {
-        // Find steam_api64.dll or steam_api.dll if loaded in game process
+        let mut hooked_any = false;
+
+        // 1. Probe steam_api64.dll / steam_api.dll (Standard Steamworks API)
         let mut steam_mod = GetModuleHandleA(b"steam_api64.dll\0".as_ptr());
         if steam_mod.is_null() {
             steam_mod = GetModuleHandleA(b"steam_api.dll\0".as_ptr());
         }
-        if steam_mod.is_null() {
-            tracing::info!("steam_api(64).dll not loaded in process; skipping Steamworks P2P hooks");
-            return;
+
+        if !steam_mod.is_null() {
+            // Legacy SteamNetworking
+            hooked_any |= install_hook(
+                steam_mod,
+                b"SteamAPI_ISteamNetworking_SendP2PPacket\0",
+                hooked_steam_networking_send_p2p_packet as *const () as u64,
+                &ORIGINAL_SEND_P2P,
+            );
+            hooked_any |= install_hook(
+                steam_mod,
+                b"SteamAPI_ISteamNetworking_ReadP2PPacket\0",
+                hooked_steam_networking_read_p2p_packet as *const () as u64,
+                &ORIGINAL_READ_P2P,
+            );
+
+            // Modern SteamNetworkingMessages
+            hooked_any |= install_hook(
+                steam_mod,
+                b"SteamAPI_ISteamNetworkingMessages_SendMessageToUser\0",
+                hooked_steam_networking_messages_send_message_to_user as *const () as u64,
+                &ORIGINAL_SEND_MESSAGE_TO_USER,
+            );
+            hooked_any |= install_hook(
+                steam_mod,
+                b"SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel\0",
+                hooked_steam_networking_messages_receive_messages_on_channel as *const () as u64,
+                &ORIGINAL_RECEIVE_MESSAGES,
+            );
+
+            // Modern SteamNetworkingSockets flat C exports (if present in steam_api64)
+            hooked_any |= install_hook(
+                steam_mod,
+                b"SteamAPI_ISteamNetworkingSockets_SendMessageToConnection\0",
+                hooked_steam_networking_sockets_send_message_to_connection as *const () as u64,
+                &ORIGINAL_SOCKETS_SEND_MESSAGE,
+            );
+            hooked_any |= install_hook(
+                steam_mod,
+                b"SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection\0",
+                hooked_steam_networking_sockets_receive_messages_on_connection as *const () as u64,
+                &ORIGINAL_SOCKETS_RECEIVE_MESSAGES,
+            );
         }
 
-        let mut hooked_any = false;
+        // 2. Probe lsteamclient.dll / lsteamclient64.dll (Wine / Proton Steam Bridge)
+        // This is where games like Helldivers dispatch ISteamNetworkingSockets under Proton.
+        let mut lsteam_mod = GetModuleHandleA(b"lsteamclient.dll\0".as_ptr());
+        if lsteam_mod.is_null() {
+            lsteam_mod = GetModuleHandleA(b"lsteamclient64.dll\0".as_ptr());
+        }
 
-        // Legacy SteamNetworking
-        hooked_any |= install_hook(
-            steam_mod,
-            b"SteamAPI_ISteamNetworking_SendP2PPacket\0",
-            hooked_steam_networking_send_p2p_packet as *const () as u64,
-            &ORIGINAL_SEND_P2P,
-        );
-        hooked_any |= install_hook(
-            steam_mod,
-            b"SteamAPI_ISteamNetworking_ReadP2PPacket\0",
-            hooked_steam_networking_read_p2p_packet as *const () as u64,
-            &ORIGINAL_READ_P2P,
-        );
+        if !lsteam_mod.is_null() {
+            let base = lsteam_mod as u64;
+            tracing::info!("Found lsteamclient.dll loaded at 0x{:X}; scanning for SteamNetworkingSockets", base);
 
-        // Modern SteamNetworkingMessages
-        hooked_any |= install_hook(
-            steam_mod,
-            b"SteamAPI_ISteamNetworkingMessages_SendMessageToUser\0",
-            hooked_steam_networking_messages_send_message_to_user as *const () as u64,
-            &ORIGINAL_SEND_MESSAGE_TO_USER,
-        );
-        hooked_any |= install_hook(
-            steam_mod,
-            b"SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel\0",
-            hooked_steam_networking_messages_receive_messages_on_channel as *const () as u64,
-            &ORIGINAL_RECEIVE_MESSAGES,
-        );
+            // Probe supported versions in descending priority (013 down to 002)
+            let versions = ["013", "012", "009", "008", "006", "004", "002"];
+            let mut hooked_lsteam_send = false;
+            let mut hooked_lsteam_recv = false;
+
+            for v in versions {
+                if !hooked_lsteam_send {
+                    let send_str = format!("ISteamNetworkingSockets_SteamNetworkingSockets{}_SendMessageToConnection\0", v);
+                    if let Some(send_fn) = find_func_referencing_str(base, send_str.as_bytes()) {
+                        if install_hook_at(
+                            send_fn,
+                            &format!("lsteamclient:SendMessageToConnection ({})", v),
+                            hooked_steam_networking_sockets_send_message_to_connection as *const () as u64,
+                            &ORIGINAL_SOCKETS_SEND_MESSAGE,
+                        ) {
+                            hooked_lsteam_send = true;
+                            hooked_any = true;
+                        }
+                    }
+                }
+
+                if !hooked_lsteam_recv {
+                    let recv_str = format!("ISteamNetworkingSockets_SteamNetworkingSockets{}_ReceiveMessagesOnConnection\0", v);
+                    if let Some(recv_fn) = find_func_referencing_str(base, recv_str.as_bytes()) {
+                        if install_hook_at(
+                            recv_fn,
+                            &format!("lsteamclient:ReceiveMessagesOnConnection ({})", v),
+                            hooked_steam_networking_sockets_receive_messages_on_connection as *const () as u64,
+                            &ORIGINAL_SOCKETS_RECEIVE_MESSAGES,
+                        ) {
+                            hooked_lsteam_recv = true;
+                            hooked_any = true;
+                        }
+                    }
+                }
+
+                if hooked_lsteam_send && hooked_lsteam_recv {
+                    break;
+                }
+            }
+        }
 
         if hooked_any {
             STEAMWORKS_HOOKED.store(true, Ordering::SeqCst);
-            tracing::info!("Steamworks P2P traffic interception hooks installed successfully");
+            tracing::info!("Steamworks / SteamNetworkingSockets P2P interception hooks installed successfully");
         }
     }
 }
