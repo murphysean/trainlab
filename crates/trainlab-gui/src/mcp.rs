@@ -1356,17 +1356,20 @@ impl TrainlabMcpServer {
                             let check = proc.read(target, 1).unwrap_or_default();
                             let verified = matches!(check.first(), Some(0xe9 | 0xff | 0xeb));
 
+                            if !verified {
+                                return Err(err(format!(
+                                    "cave installed @ {cave:#x} but target verification failed: live memory @ {target:#x} does not contain an active jump hook (got {:02x?})",
+                                    check.first()
+                                )));
+                            }
+
                             let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
                             s.set_toggle_cave_info(args.id, original.clone(), cave);
                             s.record_undo(target, original.clone(), format!("toggle cheat #{} ('{}')", args.id, label));
                             s.set_cheat_toggle(args.id, true);
                             s.log_activity("MCP", format!("toggle cheat #{} ('{}') enabled @ {target:#x} -> cave @ {cave:#x}", args.id, label));
 
-                            let msg = if verified {
-                                format!("toggle cheat #{} ('{}') enabled: cave installed @ {cave:#x} (target {target:#x} verified)", args.id, label)
-                            } else {
-                                format!("toggle cheat #{} ('{}') enabled: cave installed @ {cave:#x} (warning: live jump byte not detected at target {target:#x})", args.id, label)
-                            };
+                            let msg = format!("toggle cheat #{} ('{}') enabled: cave installed @ {cave:#x} (target {target:#x} verified)", args.id, label);
 
                             Ok(CallToolResult::success(vec![
                                 rmcp::model::ContentBlock::text(msg),
@@ -1813,9 +1816,21 @@ impl TrainlabMcpServer {
                         "override" => trainlab_core::cave_hook::CaveHook::Override { payload, jump: jump_style },
                         other => return Err(err(format!("unknown hook '{other}'"))),
                     };
-                    let preloaded_orig = pc.original_bytes.as_deref()
-                        .and_then(|h| parse_hex_bytes(h).ok())
-                        .unwrap_or_default();
+                    let host = s.dll_host().to_string();
+                    let port = s.dll_port();
+                    let preloaded_orig = if let Some(orig_hex) = &pc.original_bytes {
+                        parse_hex_bytes(orig_hex).unwrap_or_default()
+                    } else {
+                        // Capture baseline bytes from target memory (min 14 bytes for absolute jump hook)
+                        let sample_len = match jump_style {
+                            trainlab_core::cave_hook::JumpStyle::Relative => 5,
+                            trainlab_core::cave_hook::JumpStyle::Absolute => 14,
+                        };
+                        match crate::controller::request_at(&host, port, &Request::Read { address: target, len: sample_len }, Some(&self.session)) {
+                            Ok(Response::Read { data }) => data,
+                            _ => Vec::new(),
+                        }
+                    };
                     crate::session::CheatKind::Toggle {
                         hook,
                         target,
@@ -1919,26 +1934,31 @@ impl TrainlabMcpServer {
                     };
 
                     let sample_len = orig.as_ref().map(|b| b.len().max(5)).unwrap_or(5);
-                    let live = proc.read(*target, sample_len).unwrap_or_default();
-                    let live_hex = live.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-
-                    if let Some(expected) = orig {
-                        let is_original = live.starts_with(&expected);
-                        let status = if is_original {
-                            "CLEAN (original bytes present)"
-                        } else if live.starts_with(&[0xff, 0x25]) || live.starts_with(&[0xe9]) || live.starts_with(&[0xeb]) {
-                            "PATCHED (live jump hook present)"
-                        } else {
-                            "DIRTY / MODIFIED"
-                        };
-                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
-                    } else {
-                        let status = if live.starts_with(&[0xff, 0x25]) || live.starts_with(&[0xe9]) || live.starts_with(&[0xeb]) {
-                            "PATCHED (live jump hook present, baseline unrecorded)"
-                        } else {
-                            "UNKNOWN (no original bytes recorded)"
-                        };
-                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
+                    match proc.read(*target, sample_len) {
+                        Ok(live) => {
+                            let live_hex = live.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                            if let Some(expected) = orig {
+                                let is_original = live.starts_with(&expected);
+                                let status = if is_original {
+                                    "CLEAN (original bytes present)"
+                                } else if live.starts_with(&[0xff, 0x25]) || live.starts_with(&[0xe9]) || live.starts_with(&[0xeb]) {
+                                    "PATCHED (live jump hook present)"
+                                } else {
+                                    "DIRTY / MODIFIED"
+                                };
+                                lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
+                            } else {
+                                let status = if live.starts_with(&[0xff, 0x25]) || live.starts_with(&[0xe9]) || live.starts_with(&[0xeb]) {
+                                    "PATCHED (live jump hook present, baseline unrecorded)"
+                                } else {
+                                    "UNKNOWN (no original bytes recorded)"
+                                };
+                                lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
+                            }
+                        }
+                        Err(e) => {
+                            lines.push(format!("  • #{} '{}' @ {target:#x}: ERROR (failed to read target memory: {e}) (session enabled: {enabled})", c.id, c.label));
+                        }
                     }
                 }
                 CheatKind::Patch { target, original_bytes, patch_bytes, enabled, .. } => {
@@ -1949,25 +1969,30 @@ impl TrainlabMcpServer {
                     };
 
                     let sample_len = orig.as_ref().map(|b| b.len()).unwrap_or_else(|| patch_bytes.len().max(5));
-                    let live = proc.read(*target, sample_len).unwrap_or_default();
-                    let live_hex = live.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-
-                    if let Some(expected) = orig {
-                        let status = if live.starts_with(&expected) {
-                            "CLEAN (original bytes present)"
-                        } else if !patch_bytes.is_empty() && live.starts_with(patch_bytes) {
-                            "PATCHED (patch bytes present)"
-                        } else {
-                            "DIRTY / MODIFIED"
-                        };
-                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
-                    } else {
-                        let status = if !patch_bytes.is_empty() && live.starts_with(patch_bytes) {
-                            "PATCHED (patch bytes present)"
-                        } else {
-                            "UNKNOWN (no original bytes recorded)"
-                        };
-                        lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
+                    match proc.read(*target, sample_len) {
+                        Ok(live) => {
+                            let live_hex = live.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                            if let Some(expected) = orig {
+                                let status = if live.starts_with(&expected) {
+                                    "CLEAN (original bytes present)"
+                                } else if !patch_bytes.is_empty() && live.starts_with(patch_bytes) {
+                                    "PATCHED (patch bytes present)"
+                                } else {
+                                    "DIRTY / MODIFIED"
+                                };
+                                lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
+                            } else {
+                                let status = if !patch_bytes.is_empty() && live.starts_with(patch_bytes) {
+                                    "PATCHED (patch bytes present)"
+                                } else {
+                                    "UNKNOWN (no original bytes recorded)"
+                                };
+                                lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
+                            }
+                        }
+                        Err(e) => {
+                            lines.push(format!("  • #{} '{}' @ {target:#x}: ERROR (failed to read target memory: {e}) (session enabled: {enabled})", c.id, c.label));
+                        }
                     }
                 }
                 _ => {}
@@ -6396,6 +6421,44 @@ cheats: []
         {
             let lock = s.lock().unwrap();
             assert_eq!(lock.list_pins().len(), 0);
+        }
+    }
+
+    #[test]
+    fn test_set_cheat_toggle_verification_failure() {
+        let s = SharedSession::default();
+        let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
+
+        // Add a toggle cheat with dummy target
+        let cheat_id = {
+            let mut session = s.lock().unwrap();
+            session.add_cheat("Fast Building", crate::session::CheatKind::Toggle {
+                hook: trainlab_core::cave_hook::CaveHook::Trampoline {
+                    payload: vec![0x90],
+                    jump: trainlab_core::cave_hook::JumpStyle::Absolute,
+                },
+                target: 0x140002000,
+                enabled: false,
+                original_bytes: vec![0x90; 14],
+                cave_addr: 0,
+            }, None, None)
+        };
+
+        // Attempting to toggle enable without DLL / game process fails and does NOT set enabled: true
+        let res = server.set_cheat_toggle(Parameters(SetCheatToggleArgs {
+            id: cheat_id,
+            enabled: true,
+        }));
+        assert!(res.is_err());
+
+        // Verify cheat is NOT enabled in session
+        {
+            let session = s.lock().unwrap();
+            let c = session.get_cheat(cheat_id).expect("cheat exists");
+            match &c.kind {
+                crate::session::CheatKind::Toggle { enabled, .. } => assert!(!*enabled, "cheat should not be enabled after failure"),
+                _ => panic!("expected toggle cheat"),
+            }
         }
     }
 }

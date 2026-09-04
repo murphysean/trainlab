@@ -902,34 +902,42 @@ impl TrainlabApp {
                                                     Some(Response::Read { data }) => {
                                                         matches!(data.first(), Some(0xe9 | 0xff | 0xeb))
                                                     }
-                                                    _ => true,
+                                                    _ => false,
                                                 };
 
-                                                if let Ok(mut s) = self_ptr.session.lock() {
-                                                    s.set_toggle_cave_info(cheat.id, original.clone(), cave);
-                                                    s.record_undo(*target, original.clone(), format!("toggle cheat '{}'", cheat.label));
-                                                    s.set_cheat_toggle(cheat.id, true);
-                                                }
-
                                                 if verified {
+                                                    if let Ok(mut s) = self_ptr.session.lock() {
+                                                        s.set_toggle_cave_info(cheat.id, original.clone(), cave);
+                                                        s.record_undo(*target, original.clone(), format!("toggle cheat '{}'", cheat.label));
+                                                        s.set_cheat_toggle(cheat.id, true);
+                                                    }
                                                     self_ptr.log(format!(
                                                         "toggle '{}' ENABLED (@ {target:#x} -> cave @ {cave:#x})",
                                                         cheat.label
                                                     ));
                                                 } else {
+                                                    if let Ok(mut s) = self_ptr.session.lock() {
+                                                        s.set_cheat_toggle(cheat.id, false);
+                                                    }
                                                     self_ptr.log(format!(
-                                                        "toggle '{}' ENABLED (@ {target:#x} -> cave @ {cave:#x}) [WARNING: target byte did not show expected jump]",
+                                                        "toggle '{}' enable FAILED (@ {target:#x}): target memory did not show active jump hook after cave install",
                                                         cheat.label
                                                     ));
                                                 }
                                             }
                                             Some(Response::Error { message }) => {
+                                                if let Ok(mut s) = self_ptr.session.lock() {
+                                                    s.set_cheat_toggle(cheat.id, false);
+                                                }
                                                 self_ptr.log(format!(
                                                     "toggle '{}' enable FAILED (@ {target:#x}): {message}",
                                                     cheat.label
                                                 ));
                                             }
                                             _ => {
+                                                if let Ok(mut s) = self_ptr.session.lock() {
+                                                    s.set_cheat_toggle(cheat.id, false);
+                                                }
                                                 self_ptr.log(format!(
                                                     "toggle '{}' enable FAILED (@ {target:#x}): no response from injected DLL",
                                                     cheat.label
@@ -1190,19 +1198,42 @@ impl TrainlabApp {
                     });
                     match r {
                         Some(Response::CaveInstalled { cave, original, .. }) => {
+                            let check_req = Request::Read { address: target, len: 1 };
+                            let verified = match self.request(&check_req) {
+                                Some(Response::Read { data }) => {
+                                    matches!(data.first(), Some(0xe9 | 0xff | 0xeb))
+                                }
+                                _ => false,
+                            };
+
+                            if verified {
+                                if let Ok(mut s) = self.session.lock() {
+                                    s.set_toggle_cave_info(cheat_id, original.clone(), cave);
+                                    s.set_cheat_toggle(cheat_id, true);
+                                }
+                                self.log_with_source(source, format!(
+                                    "toggled '{}' -> ENABLED (cave @ {cave:#x}, target {target:#x})",
+                                    label
+                                ));
+                            } else {
+                                if let Ok(mut s) = self.session.lock() {
+                                    s.set_cheat_toggle(cheat_id, false);
+                                }
+                                self.log_with_source(source, format!(
+                                    "toggle '{}' enable FAILED (@ {target:#x}): target memory did not show active jump hook after cave install",
+                                    label
+                                ));
+                            }
+                        }
+                        _ => {
                             if let Ok(mut s) = self.session.lock() {
-                                s.set_toggle_cave_info(cheat_id, original.clone(), cave);
-                                s.set_cheat_toggle(cheat_id, true);
+                                s.set_cheat_toggle(cheat_id, false);
                             }
                             self.log_with_source(source, format!(
-                                "toggled '{}' -> ENABLED (cave @ {cave:#x}, target {target:#x})",
+                                "toggle '{}' enable FAILED (cave @ {target:#x})",
                                 label
                             ));
                         }
-                        _ => self.log_with_source(source, format!(
-                            "toggle '{}' enable FAILED (cave @ {target:#x})",
-                            label
-                        )),
                     }
                 } else {
                     // Disable: restore original bytes.
