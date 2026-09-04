@@ -140,6 +140,65 @@ pub fn verify_instruction_boundary(base: u64, bytes: &[u8], target: u64) -> Resu
     Ok(())
 }
 
+/// Verify that no branches in the surrounding code window target into the interior of a steal window.
+///
+/// If any instruction in `context_bytes` branches directly to an address strictly inside
+/// `(steal_target + 1 .. steal_target + steal_len)`, returns an `Err` identifying the
+/// source branching instruction, its address, and the inward target address.
+/// Branching to `steal_target` itself (the head of the hook) is permitted.
+pub fn verify_steal_window_branch_targets(
+    context_base: u64,
+    context_bytes: &[u8],
+    steal_target: u64,
+    steal_len: usize,
+) -> Result<(), String> {
+    if steal_len <= 1 {
+        return Ok(());
+    }
+    let steal_end = steal_target + steal_len as u64;
+
+    let mut decoder = Decoder::with_ip(64, context_bytes, context_base, DecoderOptions::NONE);
+    decoder.set_ip(context_base);
+    let mut formatter = NasmFormatter::new();
+    formatter.options_mut().set_uppercase_hex(false);
+    formatter.options_mut().set_hex_prefix("0x");
+
+    while decoder.can_decode() {
+        let ip = decoder.ip();
+        let insn = decoder.decode();
+        if insn.is_invalid() {
+            continue;
+        }
+
+        // Check if instruction has a near branch target (jcc, jmp, loop, call, etc.)
+        let flow = insn.flow_control();
+        let is_branch = matches!(
+            flow,
+            FlowControl::ConditionalBranch
+                | FlowControl::UnconditionalBranch
+                | FlowControl::Call
+                | FlowControl::Interrupt
+        );
+
+        if is_branch {
+            let target_addr = insn.near_branch_target();
+            if target_addr != 0 {
+                // If the target lands inside the steal window (past head, before end)
+                if target_addr > steal_target && target_addr < steal_end {
+                    let mut text = String::new();
+                    formatter.format(&insn, &mut text);
+                    return Err(format!(
+                        "steal window [{steal_target:#x}..{steal_end:#x}] unsafe: branch at {ip:#x} ('{text}') targets {target_addr:#x} (+{} bytes inside steal window)",
+                        target_addr - steal_target
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Relocate a block of stolen instructions to a new address.
 ///
 /// This is the heart of a *transparent* code-cave hook: when we overwrite the
@@ -377,4 +436,53 @@ mod tests {
         assert!(err.contains("refusing to patch mid-instruction"));
     }
 
+    #[test]
+    fn test_verify_steal_window_branch_targets_catches_inward_jumps() {
+        // Construct a snippet:
+        // 0x1000: jne 0x1008  (75 06) -> 2 bytes
+        // 0x1002: nop         (90) -> 1 byte
+        // 0x1003: nop         (90) -> 1 byte
+        // 0x1004: nop         (90) -> 1 byte
+        // 0x1005: nop         (90) -> 1 byte
+        // 0x1006: mov eax, 1  (b8 01 00 00 00) -> 5 bytes
+        // 0x100b: ret         (c3) -> 1 byte
+        // If steal window is at 0x1006 of length 5:
+        // branch at 0x1000 jumps to 0x1008 (offset +2 within steal window 0x1006..0x100b) -> must fail!
+        let code = [
+            0x75, 0x06,                         // 0x1000: jne 0x1008
+            0x90, 0x90, 0x90, 0x90,             // 0x1002..0x1006: nops
+            0xB8, 0x01, 0x00, 0x00, 0x00,       // 0x1006: mov eax, 1 (ends at 0x100b)
+            0xC3,                               // 0x100b: ret
+        ];
+        let base = 0x1000u64;
+        let steal_target = 0x1006u64;
+        let steal_len = 5;
+
+        let res = verify_steal_window_branch_targets(base, &code, steal_target, steal_len);
+        assert!(res.is_err(), "inward jump to 0x1008 must be rejected");
+        let err = res.unwrap_err();
+        assert!(err.contains("unsafe"), "err: {err}");
+        assert!(err.contains("targets 0x1008"), "err: {err}");
+        assert!(err.contains("+2 bytes inside steal window"), "err: {err}");
+
+        // Now test branch targeting exact head (0x1006): should be ALLOWED
+        // 0x1000: jne 0x1006 (75 04)
+        let code_head = [
+            0x75, 0x04,                         // 0x1000: jne 0x1006
+            0x90, 0x90, 0x90, 0x90,             // 0x1002..0x1006: nops
+            0xB8, 0x01, 0x00, 0x00, 0x00,       // 0x1006: mov eax, 1
+            0xC3,                               // 0x100b: ret
+        ];
+        assert!(verify_steal_window_branch_targets(base, &code_head, steal_target, steal_len).is_ok());
+
+        // Test branch targeting after steal window (0x100b): should be ALLOWED
+        // 0x1000: jne 0x100b (75 09)
+        let code_past = [
+            0x75, 0x09,                         // 0x1000: jne 0x100b
+            0x90, 0x90, 0x90, 0x90,
+            0xB8, 0x01, 0x00, 0x00, 0x00,
+            0xC3,
+        ];
+        assert!(verify_steal_window_branch_targets(base, &code_past, steal_target, steal_len).is_ok());
+    }
 }

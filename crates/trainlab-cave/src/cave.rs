@@ -125,6 +125,15 @@ where
     let patch_len = disasm::instruction_aligned_len(&buf, min_patch_len)
         .ok_or_else(|| "could not find an instruction-aligned patch length".to_string())?;
 
+    // Verify surrounding code window: check that no branches target into the interior of the steal window.
+    // Read up to 256 bytes before target (if base allows) and 256 bytes after target.
+    let pre_window = 256u64.min(target);
+    let check_base = target - pre_window;
+    let check_len = (pre_window as usize) + patch_len + 256;
+    if let Ok(context_bytes) = read(check_base, check_len) {
+        disasm::verify_steal_window_branch_targets(check_base, &context_bytes, target, patch_len)?;
+    }
+
     // 2. Original bytes for undo.
     let original = read(target, patch_len).map_err(|e| format!("read originals: {e}"))?;
     let return_to = target + patch_len as u64;
@@ -463,5 +472,40 @@ mod tests {
         let original = vec![0x8B, 0x45, 0x08, 0x00, 0x00]; // original 5 bytes
         restore(0x4000, &original, fake_write).unwrap();
         FAKE.with(|m| assert_eq!(m.bytes_at(0x4000, 5), original));
+    }
+
+    #[test]
+    fn install_rejects_inward_branch_targets() {
+        let base = 0x9000u64;
+        let target = base + 10;
+        // Build code snippet:
+        // base: jne target + 2 (75 0a)
+        // base + 2..10: nops
+        // target: mov eax, 1 (5 bytes) ; nop (1 byte) ; ret (1 byte)
+        let mut code = vec![0x90; 64];
+        // JNE to target + 2: from base (0x9000), instruction len 2, next ip = 0x9002.
+        // target is 0x900a. target + 2 = 0x900c.
+        // disp = 0x900c - 0x9002 = 10 (0x0a)
+        code[0] = 0x75;
+        code[1] = 0x0a;
+        // Seed at target (0x900a) with 17-byte instruction sequence
+        code[10] = 0xB8; code[11] = 0x01; code[12] = 0x00; code[13] = 0x00; code[14] = 0x00; // mov eax, 1 (5)
+        code[15] = 0xB9; code[16] = 0x02; code[17] = 0x00; code[18] = 0x00; code[19] = 0x00; // mov ecx, 2 (5)
+        code[20] = 0xBA; code[21] = 0x03; code[22] = 0x00; code[23] = 0x00; code[24] = 0x00; // mov edx, 3 (5)
+        code[25] = 0x90; code[26] = 0xC3; // nop; ret
+        fake_write(base, &code).unwrap();
+
+        let kind = HookKind::Trampoline {
+            payload: vec![0x90],
+            jump: JumpStyle::Relative,
+        };
+
+        // Relative hook has min patch len 5 (so steal window is 0x900a..0x900f).
+        // JNE jumps to 0x900c (+2 inside steal window).
+        let res = install(target, kind, fake_read, fake_write, fake_alloc);
+        assert!(res.is_err(), "inward jump to target+2 must be rejected");
+        let err = res.unwrap_err();
+        assert!(err.contains("unsafe"), "err: {err}");
+        assert!(err.contains("targets 0x900c"), "err: {err}");
     }
 }
