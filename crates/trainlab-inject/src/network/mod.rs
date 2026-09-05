@@ -635,5 +635,57 @@ mod tests {
             panic!("expected NetworkPacket event");
         }
     }
+
+    #[test]
+    fn test_udp_winsock_packet_recording() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        configure(true, &[443], false, &[]);
+        let _ = drain_network_events();
+
+        // Simulate WSASendTo outbound UDP datagram to game peer
+        record_packet(
+            PacketKind::Udp,
+            PacketDirection::Outbound,
+            Some("192.168.1.100:41968".into()),
+            Some("198.51.100.42:27015".into()),
+            None,
+            None,
+            b"HELLDIVERS_PEER_DATAGRAM_OUT",
+        );
+
+        // Simulate WSARecvFrom inbound UDP datagram from game peer
+        record_packet(
+            PacketKind::Udp,
+            PacketDirection::Inbound,
+            Some("192.168.1.100:41968".into()),
+            Some("198.51.100.42:27015".into()),
+            None,
+            None,
+            b"HELLDIVERS_PEER_DATAGRAM_IN",
+        );
+
+        let events = drain_network_events();
+        assert_eq!(events.len(), 2);
+
+        if let Event::NetworkPacket(p_out) = &events[0] {
+            assert_eq!(p_out.kind, PacketKind::Udp);
+            assert_eq!(p_out.direction, PacketDirection::Outbound);
+            assert_eq!(p_out.local_endpoint.as_deref(), Some("192.168.1.100:41968"));
+            assert_eq!(p_out.remote_endpoint.as_deref(), Some("198.51.100.42:27015"));
+            assert_eq!(&p_out.payload_preview, b"HELLDIVERS_PEER_DATAGRAM_OUT");
+        } else {
+            panic!("expected NetworkPacket event");
+        }
+
+        if let Event::NetworkPacket(p_in) = &events[1] {
+            assert_eq!(p_in.kind, PacketKind::Udp);
+            assert_eq!(p_in.direction, PacketDirection::Inbound);
+            assert_eq!(p_in.local_endpoint.as_deref(), Some("192.168.1.100:41968"));
+            assert_eq!(p_in.remote_endpoint.as_deref(), Some("198.51.100.42:27015"));
+            assert_eq!(&p_in.payload_preview, b"HELLDIVERS_PEER_DATAGRAM_IN");
+        } else {
+            panic!("expected NetworkPacket event");
+        }
+    }
 }
 

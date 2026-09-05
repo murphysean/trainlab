@@ -22,12 +22,90 @@ type FnRecv = unsafe extern "system" fn(SOCKET, *mut u8, i32, i32) -> i32;
 type FnSendTo = unsafe extern "system" fn(SOCKET, *const u8, i32, i32, *const SOCKADDR, i32) -> i32;
 type FnRecvFrom = unsafe extern "system" fn(SOCKET, *mut u8, i32, i32, *mut SOCKADDR, *mut i32) -> i32;
 
+/// WSABUF structure used by Winsock WSA* functions.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WSABUF {
+    pub len: u32,
+    pub buf: *mut u8,
+}
+
+type FnWSASendTo = unsafe extern "system" fn(
+    SOCKET,
+    *const WSABUF,
+    u32,
+    *mut u32,
+    u32,
+    *const SOCKADDR,
+    i32,
+    *mut c_void, // LPWSAOVERLAPPED
+    *mut c_void, // LPWSAOVERLAPPED_COMPLETION_ROUTINE
+) -> i32;
+
+type FnWSARecvFrom = unsafe extern "system" fn(
+    SOCKET,
+    *const WSABUF,
+    u32,
+    *mut u32,
+    *mut u32,
+    *mut SOCKADDR,
+    *mut i32,
+    *mut c_void, // LPWSAOVERLAPPED
+    *mut c_void, // LPWSAOVERLAPPED_COMPLETION_ROUTINE
+) -> i32;
+
+type FnWSASend = unsafe extern "system" fn(
+    SOCKET,
+    *const WSABUF,
+    u32,
+    *mut u32,
+    u32,
+    *mut c_void, // LPWSAOVERLAPPED
+    *mut c_void, // LPWSAOVERLAPPED_COMPLETION_ROUTINE
+) -> i32;
+
+type FnWSARecv = unsafe extern "system" fn(
+    SOCKET,
+    *const WSABUF,
+    u32,
+    *mut u32,
+    *mut u32,
+    *mut c_void, // LPWSAOVERLAPPED
+    *mut c_void, // LPWSAOVERLAPPED_COMPLETION_ROUTINE
+) -> i32;
+
 static ORIGINAL_SEND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static ORIGINAL_RECV: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static ORIGINAL_SENDTO: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static ORIGINAL_RECVFROM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static ORIGINAL_WSASENDTO: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static ORIGINAL_WSARECVFROM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static ORIGINAL_WSASEND: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static ORIGINAL_WSARECV: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 static WINSOCK_HOOKED: AtomicBool = AtomicBool::new(false);
+
+/// Helper to copy payload bytes from WSABUF array up to max_len.
+unsafe fn extract_wsabuf_data(buffers: *const WSABUF, count: u32, max_len: usize) -> Vec<u8> {
+    if buffers.is_null() || count == 0 || max_len == 0 {
+        return Vec::new();
+    }
+    let mut data = Vec::with_capacity(max_len.min(4096));
+    let slice = unsafe { std::slice::from_raw_parts(buffers, count as usize) };
+    for buf in slice {
+        if buf.buf.is_null() || buf.len == 0 {
+            continue;
+        }
+        let remaining = max_len - data.len();
+        if remaining == 0 {
+            break;
+        }
+        let take = (buf.len as usize).min(remaining);
+        let part = unsafe { std::slice::from_raw_parts(buf.buf, take) };
+        data.extend_from_slice(part);
+    }
+    data
+}
 
 /// Helper to format a sockaddr into an "IP:Port" string.
 unsafe fn format_sockaddr(addr: *const SOCKADDR) -> Option<String> {
@@ -225,6 +303,199 @@ pub unsafe extern "system" fn hooked_recvfrom(
     ret
 }
 
+/// Hooked `WSASendTo` callback (Modern UDP outbound).
+pub unsafe extern "system" fn hooked_wsasendto(
+    s: SOCKET,
+    buffers: *const WSABUF,
+    buffer_count: u32,
+    number_of_bytes_sent: *mut u32,
+    flags: u32,
+    to: *const SOCKADDR,
+    tolen: i32,
+    overlapped: *mut c_void,
+    completion_routine: *mut c_void,
+) -> i32 {
+    let orig = ORIGINAL_WSASENDTO.load(Ordering::Relaxed);
+    let ret = if !orig.is_null() {
+        let orig_fn: FnWSASendTo = unsafe { std::mem::transmute(orig) };
+        unsafe { orig_fn(s, buffers, buffer_count, number_of_bytes_sent, flags, to, tolen, overlapped, completion_routine) }
+    } else {
+        -1
+    };
+
+    if ret == 0 || ret > 0 {
+        let bytes_sent = if !number_of_bytes_sent.is_null() {
+            (unsafe { *number_of_bytes_sent }) as usize
+        } else {
+            // Overlapped or unspecified byte count; sample up to first 2048 bytes from buffers
+            2048
+        };
+
+        if bytes_sent > 0 {
+            let data = unsafe { extract_wsabuf_data(buffers, buffer_count, bytes_sent) };
+            if !data.is_empty() {
+                let local = unsafe { query_local_endpoint(s) };
+                let remote = unsafe { format_sockaddr(to) }.or_else(|| unsafe { query_peer_endpoint(s) });
+
+                super::record_packet(
+                    PacketKind::Udp,
+                    PacketDirection::Outbound,
+                    local,
+                    remote,
+                    None,
+                    None,
+                    &data,
+                );
+            }
+        }
+    }
+
+    ret
+}
+
+/// Hooked `WSARecvFrom` callback (Modern UDP inbound).
+pub unsafe extern "system" fn hooked_wsarecvfrom(
+    s: SOCKET,
+    buffers: *const WSABUF,
+    buffer_count: u32,
+    number_of_bytes_recvd: *mut u32,
+    flags: *mut u32,
+    from: *mut SOCKADDR,
+    fromlen: *mut i32,
+    overlapped: *mut c_void,
+    completion_routine: *mut c_void,
+) -> i32 {
+    let orig = ORIGINAL_WSARECVFROM.load(Ordering::Relaxed);
+    let ret = if !orig.is_null() {
+        let orig_fn: FnWSARecvFrom = unsafe { std::mem::transmute(orig) };
+        unsafe { orig_fn(s, buffers, buffer_count, number_of_bytes_recvd, flags, from, fromlen, overlapped, completion_routine) }
+    } else {
+        -1
+    };
+
+    if ret == 0 {
+        let bytes_recvd = if !number_of_bytes_recvd.is_null() {
+            (unsafe { *number_of_bytes_recvd }) as usize
+        } else {
+            0
+        };
+
+        if bytes_recvd > 0 {
+            let data = unsafe { extract_wsabuf_data(buffers, buffer_count, bytes_recvd) };
+            if !data.is_empty() {
+                let local = unsafe { query_local_endpoint(s) };
+                let remote = unsafe { format_sockaddr(from) }.or_else(|| unsafe { query_peer_endpoint(s) });
+
+                super::record_packet(
+                    PacketKind::Udp,
+                    PacketDirection::Inbound,
+                    local,
+                    remote,
+                    None,
+                    None,
+                    &data,
+                );
+            }
+        }
+    }
+
+    ret
+}
+
+/// Hooked `WSASend` callback (WSA stream/connected datagram outbound).
+pub unsafe extern "system" fn hooked_wsasend(
+    s: SOCKET,
+    buffers: *const WSABUF,
+    buffer_count: u32,
+    number_of_bytes_sent: *mut u32,
+    flags: u32,
+    overlapped: *mut c_void,
+    completion_routine: *mut c_void,
+) -> i32 {
+    let orig = ORIGINAL_WSASEND.load(Ordering::Relaxed);
+    let ret = if !orig.is_null() {
+        let orig_fn: FnWSASend = unsafe { std::mem::transmute(orig) };
+        unsafe { orig_fn(s, buffers, buffer_count, number_of_bytes_sent, flags, overlapped, completion_routine) }
+    } else {
+        -1
+    };
+
+    if ret == 0 || ret > 0 {
+        let bytes_sent = if !number_of_bytes_sent.is_null() {
+            (unsafe { *number_of_bytes_sent }) as usize
+        } else {
+            2048
+        };
+
+        if bytes_sent > 0 {
+            let data = unsafe { extract_wsabuf_data(buffers, buffer_count, bytes_sent) };
+            if !data.is_empty() {
+                let local = unsafe { query_local_endpoint(s) };
+                let remote = unsafe { query_peer_endpoint(s) };
+
+                super::record_packet(
+                    PacketKind::Tcp,
+                    PacketDirection::Outbound,
+                    local,
+                    remote,
+                    None,
+                    None,
+                    &data,
+                );
+            }
+        }
+    }
+
+    ret
+}
+
+/// Hooked `WSARecv` callback (WSA stream/connected datagram inbound).
+pub unsafe extern "system" fn hooked_wsarecv(
+    s: SOCKET,
+    buffers: *const WSABUF,
+    buffer_count: u32,
+    number_of_bytes_recvd: *mut u32,
+    flags: *mut u32,
+    overlapped: *mut c_void,
+    completion_routine: *mut c_void,
+) -> i32 {
+    let orig = ORIGINAL_WSARECV.load(Ordering::Relaxed);
+    let ret = if !orig.is_null() {
+        let orig_fn: FnWSARecv = unsafe { std::mem::transmute(orig) };
+        unsafe { orig_fn(s, buffers, buffer_count, number_of_bytes_recvd, flags, overlapped, completion_routine) }
+    } else {
+        -1
+    };
+
+    if ret == 0 {
+        let bytes_recvd = if !number_of_bytes_recvd.is_null() {
+            (unsafe { *number_of_bytes_recvd }) as usize
+        } else {
+            0
+        };
+
+        if bytes_recvd > 0 {
+            let data = unsafe { extract_wsabuf_data(buffers, buffer_count, bytes_recvd) };
+            if !data.is_empty() {
+                let local = unsafe { query_local_endpoint(s) };
+                let remote = unsafe { query_peer_endpoint(s) };
+
+                super::record_packet(
+                    PacketKind::Tcp,
+                    PacketDirection::Inbound,
+                    local,
+                    remote,
+                    None,
+                    None,
+                    &data,
+                );
+            }
+        }
+    }
+
+    ret
+}
+
 /// Install detour hook for a specific Winsock function.
 unsafe fn install_hook(
     proc_name: &[u8],
@@ -303,14 +574,22 @@ pub fn init_winsock_hooks() {
 
         let mut hooked_any = false;
 
+        // Legacy sockets API
         hooked_any |= install_hook(b"send\0", hooked_send as *const () as u64, &ORIGINAL_SEND);
         hooked_any |= install_hook(b"recv\0", hooked_recv as *const () as u64, &ORIGINAL_RECV);
         hooked_any |= install_hook(b"sendto\0", hooked_sendto as *const () as u64, &ORIGINAL_SENDTO);
         hooked_any |= install_hook(b"recvfrom\0", hooked_recvfrom as *const () as u64, &ORIGINAL_RECVFROM);
 
+        // Modern WSA sockets API
+        hooked_any |= install_hook(b"WSASendTo\0", hooked_wsasendto as *const () as u64, &ORIGINAL_WSASENDTO);
+        hooked_any |= install_hook(b"WSARecvFrom\0", hooked_wsarecvfrom as *const () as u64, &ORIGINAL_WSARECVFROM);
+        hooked_any |= install_hook(b"WSASend\0", hooked_wsasend as *const () as u64, &ORIGINAL_WSASEND);
+        hooked_any |= install_hook(b"WSARecv\0", hooked_wsarecv as *const () as u64, &ORIGINAL_WSARECV);
+
         if hooked_any {
             WINSOCK_HOOKED.store(true, Ordering::SeqCst);
-            tracing::info!("Winsock TCP/UDP traffic interception hooks installed successfully");
+            tracing::info!("Winsock TCP/UDP (send, recv, sendto, recvfrom, WSASendTo, WSARecvFrom, WSASend, WSARecv) traffic interception hooks installed successfully");
         }
     }
 }
+
