@@ -1893,6 +1893,38 @@ impl TrainlabMcpServer {
             let _ = crate::controller::request(&self.session, &Request::SyncCheats { cheats: overlay_cheats });
         }
 
+        // If the profile defines network configuration, configure DLL network interception accordingly
+        if let Some(net_cfg) = &profile.network {
+            let (dll_port, mcp_port) = {
+                let cfg = crate::config::AppConfig::load();
+                (cfg.inject.dll_port, cfg.server.mcp_port)
+            };
+            let mut ignore_ports = vec![dll_port, mcp_port];
+            for p in &net_cfg.ignore_ports {
+                if !ignore_ports.contains(p) {
+                    ignore_ports.push(*p);
+                }
+            }
+            let is_enabled = net_cfg.enabled.unwrap_or(true);
+            let capture_loopback = net_cfg.capture_loopback.unwrap_or(false);
+            let ignore_hosts = net_cfg.ignore_hosts.clone();
+
+            let req = Request::ConfigureNetworkHook {
+                enabled: is_enabled,
+                ignore_ports: ignore_ports.clone(),
+                capture_loopback,
+                ignore_hosts: ignore_hosts.clone(),
+            };
+            let _ = crate::controller::request(&self.session, &req);
+            if let Ok(mut s) = self.session.lock() {
+                s.set_network_hooks_enabled(is_enabled);
+                s.log_activity("NETWORK", format!(
+                    "applied profile network config: enabled={}, ignore_ports={:?}, ignore_hosts={:?}, capture_loopback={}",
+                    is_enabled, ignore_ports, ignore_hosts, capture_loopback
+                ));
+            }
+        }
+
         let mut text = format!(
             "loaded profile '{}' ({}): {} setup step(s) resolved, {} cheat(s) materialized\n",
             file,

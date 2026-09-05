@@ -525,48 +525,65 @@ pub fn init_steamworks_hooks() {
             steam_mod = GetModuleHandleA(b"steam_api.dll\0".as_ptr());
         }
 
+        let mut results = Vec::new();
+
         if !steam_mod.is_null() {
             // Legacy SteamNetworking
-            hooked_any |= install_hook(
+            let h_p2p_send = install_hook(
                 steam_mod,
                 b"SteamAPI_ISteamNetworking_SendP2PPacket\0",
                 hooked_steam_networking_send_p2p_packet as *const () as u64,
                 &ORIGINAL_SEND_P2P,
             );
-            hooked_any |= install_hook(
+            results.push(format!("SendP2PPacket={}", if h_p2p_send { "Y" } else { "N" }));
+            hooked_any |= h_p2p_send;
+
+            let h_p2p_read = install_hook(
                 steam_mod,
                 b"SteamAPI_ISteamNetworking_ReadP2PPacket\0",
                 hooked_steam_networking_read_p2p_packet as *const () as u64,
                 &ORIGINAL_READ_P2P,
             );
+            results.push(format!("ReadP2PPacket={}", if h_p2p_read { "Y" } else { "N" }));
+            hooked_any |= h_p2p_read;
 
             // Modern SteamNetworkingMessages
-            hooked_any |= install_hook(
+            let h_msg_send = install_hook(
                 steam_mod,
                 b"SteamAPI_ISteamNetworkingMessages_SendMessageToUser\0",
                 hooked_steam_networking_messages_send_message_to_user as *const () as u64,
                 &ORIGINAL_SEND_MESSAGE_TO_USER,
             );
-            hooked_any |= install_hook(
+            results.push(format!("SendMessageToUser={}", if h_msg_send { "Y" } else { "N" }));
+            hooked_any |= h_msg_send;
+
+            let h_msg_recv = install_hook(
                 steam_mod,
                 b"SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel\0",
                 hooked_steam_networking_messages_receive_messages_on_channel as *const () as u64,
                 &ORIGINAL_RECEIVE_MESSAGES,
             );
+            results.push(format!("ReceiveMessagesOnChannel={}", if h_msg_recv { "Y" } else { "N" }));
+            hooked_any |= h_msg_recv;
 
             // Modern SteamNetworkingSockets flat C exports (if present in steam_api64)
-            hooked_any |= install_hook(
+            let h_sock_send = install_hook(
                 steam_mod,
                 b"SteamAPI_ISteamNetworkingSockets_SendMessageToConnection\0",
                 hooked_steam_networking_sockets_send_message_to_connection as *const () as u64,
                 &ORIGINAL_SOCKETS_SEND_MESSAGE,
             );
-            hooked_any |= install_hook(
+            results.push(format!("steam_api64:SendMessageToConnection={}", if h_sock_send { "Y" } else { "N" }));
+            hooked_any |= h_sock_send;
+
+            let h_sock_recv = install_hook(
                 steam_mod,
                 b"SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection\0",
                 hooked_steam_networking_sockets_receive_messages_on_connection as *const () as u64,
                 &ORIGINAL_SOCKETS_RECEIVE_MESSAGES,
             );
+            results.push(format!("steam_api64:ReceiveMessagesOnConnection={}", if h_sock_recv { "Y" } else { "N" }));
+            hooked_any |= h_sock_recv;
         }
 
         // 2. Probe lsteamclient.dll / lsteamclient64.dll (Wine / Proton Steam Bridge)
@@ -597,6 +614,7 @@ pub fn init_steamworks_hooks() {
                         ) {
                             hooked_lsteam_send = true;
                             hooked_any = true;
+                            results.push(format!("lsteamclient:SendMessageToConnection({}) = Y", v));
                         }
                     }
                 }
@@ -612,6 +630,7 @@ pub fn init_steamworks_hooks() {
                         ) {
                             hooked_lsteam_recv = true;
                             hooked_any = true;
+                            results.push(format!("lsteamclient:ReceiveMessagesOnConnection({}) = Y", v));
                         }
                     }
                 }
@@ -620,11 +639,26 @@ pub fn init_steamworks_hooks() {
                     break;
                 }
             }
+
+            if !hooked_lsteam_send {
+                results.push("lsteamclient:SendMessageToConnection = N".into());
+            }
+            if !hooked_lsteam_recv {
+                results.push("lsteamclient:ReceiveMessagesOnConnection = N".into());
+            }
         }
 
         if hooked_any {
             STEAMWORKS_HOOKED.store(true, Ordering::SeqCst);
-            tracing::info!("Steamworks / SteamNetworkingSockets P2P interception hooks installed successfully");
+            tracing::info!(
+                "[NETWORK] Steamworks / SteamNetworkingSockets hooks installed: [{}]",
+                results.join(", ")
+            );
+        } else {
+            tracing::warn!(
+                "[NETWORK] Failed to install any Steamworks hooks: [{}]",
+                results.join(", ")
+            );
         }
     }
 }

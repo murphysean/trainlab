@@ -235,21 +235,35 @@ pub fn init_schannel_hooks() {
         }
 
         let mut hooked_any = false;
+        let mut results = Vec::new();
 
-        hooked_any |= install_hook(
+        let h_enc = install_hook(
             b"EncryptMessage\0",
             hooked_encrypt_message as *const () as u64,
             &ORIGINAL_ENCRYPT_MESSAGE,
         );
-        hooked_any |= install_hook(
+        results.push(format!("EncryptMessage={}", if h_enc { "Y" } else { "N" }));
+        hooked_any |= h_enc;
+
+        let h_dec = install_hook(
             b"DecryptMessage\0",
             hooked_decrypt_message as *const () as u64,
             &ORIGINAL_DECRYPT_MESSAGE,
         );
+        results.push(format!("DecryptMessage={}", if h_dec { "Y" } else { "N" }));
+        hooked_any |= h_dec;
 
         if hooked_any {
             SCHANNEL_HOOKED.store(true, Ordering::SeqCst);
-            tracing::info!("SChannel TLS/HTTPS plaintext interception hooks installed successfully");
+            tracing::info!(
+                "[NETWORK] SChannel hooks installed: [{}]",
+                results.join(", ")
+            );
+        } else {
+            tracing::warn!(
+                "[NETWORK] Failed to install any SChannel hooks: [{}]",
+                results.join(", ")
+            );
         }
     }
 }

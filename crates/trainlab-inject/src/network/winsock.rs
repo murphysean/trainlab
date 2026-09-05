@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Duration;
 
 use windows_sys::Win32::Networking::WinSock::{
-    getpeername, getsockname, AF_INET, AF_INET6, SOCKADDR, SOCKADDR_IN, SOCKADDR_IN6, SOCKET,
+    getpeername, getsockname, WSAGetLastError, AF_INET, AF_INET6, SOCKADDR, SOCKADDR_IN,
+    SOCKADDR_IN6, SOCKET, WSA_IO_PENDING,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
 
@@ -323,12 +324,24 @@ pub unsafe extern "system" fn hooked_wsasendto(
         -1
     };
 
-    if ret == 0 || ret > 0 {
-        let bytes_sent = if !number_of_bytes_sent.is_null() {
+    // On Windows/Proton, asynchronous/overlapped I/O returns SOCKET_ERROR (-1) with WSA_IO_PENDING (997).
+    // The outbound data buffer is already valid and queued for send, so we can extract it.
+    let is_success = ret == 0 || ret > 0;
+    let is_pending = ret == -1 && unsafe { WSAGetLastError() } == WSA_IO_PENDING;
+
+    if is_success || is_pending {
+        let bytes_sent = if !number_of_bytes_sent.is_null() && unsafe { *number_of_bytes_sent } > 0 {
             (unsafe { *number_of_bytes_sent }) as usize
         } else {
-            // Overlapped or unspecified byte count; sample up to first 2048 bytes from buffers
-            2048
+            // Overlapped or pending byte count; calculate total requested bytes from buffers (up to 4096)
+            let mut total_req = 0usize;
+            if !buffers.is_null() && buffer_count > 0 {
+                let slice = unsafe { std::slice::from_raw_parts(buffers, buffer_count as usize) };
+                for b in slice {
+                    total_req = total_req.saturating_add(b.len as usize);
+                }
+            }
+            if total_req > 0 { total_req.min(4096) } else { 2048 }
         };
 
         if bytes_sent > 0 {
@@ -420,11 +433,21 @@ pub unsafe extern "system" fn hooked_wsasend(
         -1
     };
 
-    if ret == 0 || ret > 0 {
-        let bytes_sent = if !number_of_bytes_sent.is_null() {
+    let is_success = ret == 0 || ret > 0;
+    let is_pending = ret == -1 && unsafe { WSAGetLastError() } == WSA_IO_PENDING;
+
+    if is_success || is_pending {
+        let bytes_sent = if !number_of_bytes_sent.is_null() && unsafe { *number_of_bytes_sent } > 0 {
             (unsafe { *number_of_bytes_sent }) as usize
         } else {
-            2048
+            let mut total_req = 0usize;
+            if !buffers.is_null() && buffer_count > 0 {
+                let slice = unsafe { std::slice::from_raw_parts(buffers, buffer_count as usize) };
+                for b in slice {
+                    total_req = total_req.saturating_add(b.len as usize);
+                }
+            }
+            if total_req > 0 { total_req.min(4096) } else { 2048 }
         };
 
         if bytes_sent > 0 {
@@ -536,7 +559,7 @@ unsafe fn install_hook(
                     Ordering::SeqCst,
                 );
                 tracing::info!(
-                    "Hooked {} at 0x{:X} -> trampoline at 0x{:X}",
+                    "Hooked Winsock {} at 0x{:X} -> trampoline at 0x{:X}",
                     String::from_utf8_lossy(proc_name),
                     target_u64,
                     installed.cave_addr
@@ -545,7 +568,7 @@ unsafe fn install_hook(
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to hook {}: {}",
+                    "Failed to hook Winsock {}: {}",
                     String::from_utf8_lossy(proc_name),
                     e
                 );
@@ -553,6 +576,10 @@ unsafe fn install_hook(
             }
         }
     } else {
+        tracing::warn!(
+            "GetProcAddress failed for Winsock {}",
+            String::from_utf8_lossy(proc_name)
+        );
         false
     }
 }
@@ -573,22 +600,53 @@ pub fn init_winsock_hooks() {
         }
 
         let mut hooked_any = false;
+        let mut results = Vec::new();
 
         // Legacy sockets API
-        hooked_any |= install_hook(b"send\0", hooked_send as *const () as u64, &ORIGINAL_SEND);
-        hooked_any |= install_hook(b"recv\0", hooked_recv as *const () as u64, &ORIGINAL_RECV);
-        hooked_any |= install_hook(b"sendto\0", hooked_sendto as *const () as u64, &ORIGINAL_SENDTO);
-        hooked_any |= install_hook(b"recvfrom\0", hooked_recvfrom as *const () as u64, &ORIGINAL_RECVFROM);
+        let h_send = install_hook(b"send\0", hooked_send as *const () as u64, &ORIGINAL_SEND);
+        results.push(format!("send={}", if h_send { "Y" } else { "N" }));
+        hooked_any |= h_send;
+
+        let h_recv = install_hook(b"recv\0", hooked_recv as *const () as u64, &ORIGINAL_RECV);
+        results.push(format!("recv={}", if h_recv { "Y" } else { "N" }));
+        hooked_any |= h_recv;
+
+        let h_sendto = install_hook(b"sendto\0", hooked_sendto as *const () as u64, &ORIGINAL_SENDTO);
+        results.push(format!("sendto={}", if h_sendto { "Y" } else { "N" }));
+        hooked_any |= h_sendto;
+
+        let h_recvfrom = install_hook(b"recvfrom\0", hooked_recvfrom as *const () as u64, &ORIGINAL_RECVFROM);
+        results.push(format!("recvfrom={}", if h_recvfrom { "Y" } else { "N" }));
+        hooked_any |= h_recvfrom;
 
         // Modern WSA sockets API
-        hooked_any |= install_hook(b"WSASendTo\0", hooked_wsasendto as *const () as u64, &ORIGINAL_WSASENDTO);
-        hooked_any |= install_hook(b"WSARecvFrom\0", hooked_wsarecvfrom as *const () as u64, &ORIGINAL_WSARECVFROM);
-        hooked_any |= install_hook(b"WSASend\0", hooked_wsasend as *const () as u64, &ORIGINAL_WSASEND);
-        hooked_any |= install_hook(b"WSARecv\0", hooked_wsarecv as *const () as u64, &ORIGINAL_WSARECV);
+        let h_wsasendto = install_hook(b"WSASendTo\0", hooked_wsasendto as *const () as u64, &ORIGINAL_WSASENDTO);
+        results.push(format!("WSASendTo={}", if h_wsasendto { "Y" } else { "N" }));
+        hooked_any |= h_wsasendto;
+
+        let h_wsarecvfrom = install_hook(b"WSARecvFrom\0", hooked_wsarecvfrom as *const () as u64, &ORIGINAL_WSARECVFROM);
+        results.push(format!("WSARecvFrom={}", if h_wsarecvfrom { "Y" } else { "N" }));
+        hooked_any |= h_wsarecvfrom;
+
+        let h_wsasend = install_hook(b"WSASend\0", hooked_wsasend as *const () as u64, &ORIGINAL_WSASEND);
+        results.push(format!("WSASend={}", if h_wsasend { "Y" } else { "N" }));
+        hooked_any |= h_wsasend;
+
+        let h_wsarecv = install_hook(b"WSARecv\0", hooked_wsarecv as *const () as u64, &ORIGINAL_WSARECV);
+        results.push(format!("WSARecv={}", if h_wsarecv { "Y" } else { "N" }));
+        hooked_any |= h_wsarecv;
 
         if hooked_any {
             WINSOCK_HOOKED.store(true, Ordering::SeqCst);
-            tracing::info!("Winsock TCP/UDP (send, recv, sendto, recvfrom, WSASendTo, WSARecvFrom, WSASend, WSARecv) traffic interception hooks installed successfully");
+            tracing::info!(
+                "[NETWORK] Winsock hooks installed: [{}]",
+                results.join(", ")
+            );
+        } else {
+            tracing::warn!(
+                "[NETWORK] Failed to install any Winsock hooks: [{}]",
+                results.join(", ")
+            );
         }
     }
 }

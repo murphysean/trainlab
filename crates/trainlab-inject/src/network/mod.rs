@@ -18,6 +18,10 @@ pub mod steamworks;
 
 /// Global network hook configuration and captured packet ring buffer.
 static NETWORK_ENABLED: AtomicBool = AtomicBool::new(true);
+static WINSOCK_ENABLED: AtomicBool = AtomicBool::new(true);
+static WINHTTP_ENABLED: AtomicBool = AtomicBool::new(true);
+static SCHANNEL_ENABLED: AtomicBool = AtomicBool::new(true);
+static STEAMWORKS_ENABLED: AtomicBool = AtomicBool::new(true);
 static CAPTURE_LOOPBACK: AtomicBool = AtomicBool::new(false);
 static IGNORE_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static IGNORE_HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -54,6 +58,14 @@ pub fn is_enabled() -> bool {
 /// Enable or disable network traffic capture.
 pub fn set_enabled(enabled: bool) {
     NETWORK_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// Configure active hook flags (which protocols/subsystems are allowed to capture).
+pub fn configure_hooks(winsock: bool, winhttp: bool, schannel: bool, steamworks: bool) {
+    WINSOCK_ENABLED.store(winsock, Ordering::SeqCst);
+    WINHTTP_ENABLED.store(winhttp, Ordering::SeqCst);
+    SCHANNEL_ENABLED.store(schannel, Ordering::SeqCst);
+    STEAMWORKS_ENABLED.store(steamworks, Ordering::SeqCst);
 }
 
 /// Configure network capture filter: enable flag, ignored ports, loopback toggle, and ignored hostnames/domains.
@@ -94,6 +106,30 @@ pub fn record_packet(
 ) {
     if !is_enabled() {
         return;
+    }
+
+    // Filter by subsystem toggle
+    match kind {
+        PacketKind::Tcp | PacketKind::Udp => {
+            if !WINSOCK_ENABLED.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+        PacketKind::Http => {
+            let is_schannel = url.as_deref().map(|u| u.contains("SChannel")).unwrap_or(false);
+            if is_schannel {
+                if !SCHANNEL_ENABLED.load(Ordering::Relaxed) {
+                    return;
+                }
+            } else if !WINHTTP_ENABLED.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+        PacketKind::Steam => {
+            if !STEAMWORKS_ENABLED.load(Ordering::Relaxed) {
+                return;
+            }
+        }
     }
 
     // Check if either endpoint touches an ignored port (e.g. trainer IPC 31337 or MCP 8123)
@@ -285,6 +321,7 @@ pub fn drain_network_events() -> Vec<Event> {
 
 /// Initialize network traffic hooks if supported on the platform with granular flags.
 pub fn init_with_config(winsock: bool, winhttp: bool, schannel: bool, steamworks: bool) {
+    configure_hooks(winsock, winhttp, schannel, steamworks);
     #[cfg(windows)]
     {
         std::thread::Builder::new()

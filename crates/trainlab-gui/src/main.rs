@@ -306,14 +306,14 @@ impl TrainlabApp {
                         s.log_activity("UI", format!("connected, inject v{version} — initializing DLL via IPC..."));
                     }
 
+                    let mut matched_profile = None;
                     if auto_init {
                         let all_discovered = profile::discover_all_profiles();
-                        let mut matched = None;
                         for dp in &all_discovered {
                             match dp {
                                 profile::DiscoveredProfile::Valid { file, profile } => {
                                     if profile.game.eq_ignore_ascii_case(&game_name) {
-                                        matched = Some((file.clone(), profile.clone()));
+                                        matched_profile = Some((file.clone(), profile.clone()));
                                         break;
                                     }
                                 }
@@ -322,31 +322,6 @@ impl TrainlabApp {
                                         if let Ok(mut s) = session.lock() {
                                             s.log_activity("PROFILE", format!("WARNING: candidate profile '{file}' for '{game_name}' FAILED to parse: {error}"));
                                         }
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some((file, prof)) = matched {
-                            let render_cfg = prof.render.clone().unwrap_or_default();
-                            let _ = controller::request(&session, &Request::ConfigureRender {
-                                overlay: render_cfg.overlay,
-                                hook_wndproc: render_cfg.hook_wndproc,
-                                xinput_hooks: render_cfg.xinput_hooks,
-                            });
-
-                            if let Ok(mut s) = session.lock() {
-                                s.log_activity("UI", format!("starting sequential profile initialization for '{file}'..."));
-                            }
-                            match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(&file, true) {
-                                Ok(detail) => {
-                                    if let Ok(mut s) = session.lock() {
-                                        s.log_activity("UI", format!("profile '{file}' loaded: {detail}"));
-                                    }
-                                }
-                                Err(e) => {
-                                    if let Ok(mut s) = session.lock() {
-                                        s.log_activity("UI", format!("profile '{file}' load FAILED: {e}"));
                                     }
                                 }
                             }
@@ -363,6 +338,58 @@ impl TrainlabApp {
                     }
                     if !features.network.ignore_ports.contains(&mcp_port) {
                         features.network.ignore_ports.push(mcp_port);
+                    }
+
+                    // If a matching profile exists, overlay its render and network configuration into initial handshake
+                    if let Some((_, prof)) = &matched_profile {
+                        if let Some(render_cfg) = &prof.render {
+                            features.display.overlay = render_cfg.overlay;
+                            features.input.wndproc = render_cfg.hook_wndproc;
+                            features.input.xinput = render_cfg.xinput_hooks;
+                        }
+                        if let Some(net_cfg) = &prof.network {
+                            if let Some(en) = net_cfg.enabled {
+                                if !en {
+                                    features.network.winsock = false;
+                                    features.network.winhttp = false;
+                                    features.network.schannel = false;
+                                    features.network.steamworks = false;
+                                }
+                            }
+                            if let Some(ws) = net_cfg.winsock {
+                                features.network.winsock = ws;
+                            }
+                            if let Some(wh) = net_cfg.winhttp {
+                                features.network.winhttp = wh;
+                            }
+                            if let Some(sc) = net_cfg.schannel {
+                                features.network.schannel = sc;
+                            }
+                            if let Some(sw) = net_cfg.steamworks {
+                                features.network.steamworks = sw;
+                            }
+                            for p in &net_cfg.ignore_ports {
+                                if !features.network.ignore_ports.contains(p) {
+                                    features.network.ignore_ports.push(*p);
+                                }
+                            }
+                            for h in &net_cfg.ignore_hosts {
+                                if !features.network.ignore_hosts.contains(h) {
+                                    features.network.ignore_hosts.push(h.clone());
+                                }
+                            }
+                            if let Some(loopback) = net_cfg.capture_loopback {
+                                features.network.capture_loopback = loopback;
+                            }
+                        }
+                    }
+
+                    if let Ok(mut s) = session.lock() {
+                        s.log_activity("NETWORK", format!(
+                            "Handshake features: winsock={}, winhttp={}, schannel={}, steamworks={}, ignore_ports={:?}, ignore_hosts={:?}",
+                            features.network.winsock, features.network.winhttp, features.network.schannel,
+                            features.network.steamworks, features.network.ignore_ports, features.network.ignore_hosts
+                        ));
                     }
 
                     match controller::request(&session, &Request::InitializeSession { features }) {
@@ -382,6 +409,25 @@ impl TrainlabApp {
                                 }
                                 if !diagnostics.loaded_network_modules.is_empty() {
                                     s.log_activity("UI", format!("Loaded game network modules: {:?}", diagnostics.loaded_network_modules));
+                                }
+                            }
+
+                            // Now load the matched profile so setup steps and cheats materialize into session
+                            if let Some((file, _)) = matched_profile {
+                                if let Ok(mut s) = session.lock() {
+                                    s.log_activity("UI", format!("starting sequential profile initialization for '{file}'..."));
+                                }
+                                match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(&file, true) {
+                                    Ok(detail) => {
+                                        if let Ok(mut s) = session.lock() {
+                                            s.log_activity("UI", format!("profile '{file}' loaded: {detail}"));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Ok(mut s) = session.lock() {
+                                            s.log_activity("UI", format!("profile '{file}' load FAILED: {e}"));
+                                        }
+                                    }
                                 }
                             }
                         }
