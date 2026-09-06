@@ -183,6 +183,7 @@ pub unsafe extern "system" fn hooked_winhttp_send_request(
         };
 
         let url_str = format!("{verb} {path}");
+        super::count_raw_packet(PacketKind::Http, PacketDirection::Outbound, payload_slice.len());
         super::record_packet(
             PacketKind::Http,
             PacketDirection::Outbound,
@@ -236,6 +237,7 @@ pub unsafe extern "system" fn hooked_winhttp_read_data(
     if ret != 0 && !lpdw_number_of_bytes_read.is_null() {
         let read_bytes = unsafe { *lpdw_number_of_bytes_read } as usize;
         if read_bytes > 0 && !lp_buffer.is_null() {
+            super::count_raw_packet(PacketKind::Http, PacketDirection::Inbound, read_bytes);
             let slice = unsafe { std::slice::from_raw_parts(lp_buffer as *const u8, read_bytes) };
 
             let mut path = "".to_string();
@@ -287,10 +289,11 @@ unsafe fn install_hook(
     proc_name: &[u8],
     callback_addr: u64,
     target_orig: &AtomicPtr<c_void>,
-) -> bool {
+) -> (bool, String) {
+    let proc_name_str = String::from_utf8_lossy(proc_name).trim_end_matches('\0').to_string();
     let winhttp_mod = unsafe { GetModuleHandleA(b"winhttp.dll\0".as_ptr()) };
     if winhttp_mod.is_null() {
-        return false;
+        return (false, format!("{}=FAIL(winhttp.dll not loaded)", proc_name_str));
     }
 
     let fn_ptr = unsafe { GetProcAddress(winhttp_mod, proc_name.as_ptr()) };
@@ -327,7 +330,7 @@ unsafe fn install_hook(
                     target_u64,
                     installed.cave_addr
                 );
-                true
+                (true, format!("{}=Y", String::from_utf8_lossy(proc_name).trim_end_matches('\0')))
             }
             Err(e) => {
                 tracing::warn!(
@@ -335,11 +338,11 @@ unsafe fn install_hook(
                     String::from_utf8_lossy(proc_name),
                     e
                 );
-                false
+                (false, format!("{}=FAIL({})", String::from_utf8_lossy(proc_name).trim_end_matches('\0'), e))
             }
         }
     } else {
-        false
+        (false, format!("{}=FAIL(GetProcAddress failed)", String::from_utf8_lossy(proc_name).trim_end_matches('\0')))
     }
 }
 
@@ -354,40 +357,70 @@ pub fn init_winhttp_hooks() {
         }
         if winhttp_mod.is_null() {
             tracing::info!("winhttp.dll not loaded in process; skipping WinHTTP hooks");
+            if let Ok(mut out) = crate::render::overlay::OUTBOUND_EVENTS.lock() {
+                out.push(trainlab_core::protocol::Event::NetworkHooksInstalled {
+                    subsystem: "winhttp".to_string(),
+                    results: vec!["winhttp.dll not loaded".to_string()],
+                });
+            }
             return;
         }
 
         let mut hooked_any = false;
+        let mut results = Vec::new();
 
-        hooked_any |= install_hook(
+        let (h_open, r_open) = install_hook(
             b"WinHttpOpenRequest\0",
             hooked_winhttp_open_request as *const () as u64,
             &ORIGINAL_WINHTTP_OPEN_REQUEST,
         );
-        hooked_any |= install_hook(
+        results.push(r_open);
+        hooked_any |= h_open;
+
+        let (h_send, r_send) = install_hook(
             b"WinHttpSendRequest\0",
             hooked_winhttp_send_request as *const () as u64,
             &ORIGINAL_WINHTTP_SEND_REQUEST,
         );
-        hooked_any |= install_hook(
+        results.push(r_send);
+        hooked_any |= h_send;
+
+        let (h_recv, r_recv) = install_hook(
             b"WinHttpReceiveResponse\0",
             hooked_winhttp_receive_response as *const () as u64,
             &ORIGINAL_WINHTTP_RECEIVE_RESPONSE,
         );
-        hooked_any |= install_hook(
+        results.push(r_recv);
+        hooked_any |= h_recv;
+
+        let (h_read, r_read) = install_hook(
             b"WinHttpReadData\0",
             hooked_winhttp_read_data as *const () as u64,
             &ORIGINAL_WINHTTP_READ_DATA,
         );
-        hooked_any |= install_hook(
+        results.push(r_read);
+        hooked_any |= h_read;
+
+        let (h_close, r_close) = install_hook(
             b"WinHttpCloseHandle\0",
             hooked_winhttp_close_handle as *const () as u64,
             &ORIGINAL_WINHTTP_CLOSE_HANDLE,
         );
+        results.push(r_close);
+        hooked_any |= h_close;
 
         if hooked_any {
             WINHTTP_HOOKED.store(true, Ordering::SeqCst);
-            tracing::info!("WinHTTP REST/API traffic interception hooks installed successfully");
+            tracing::info!("WinHTTP REST/API traffic interception hooks installed successfully: [{}]", results.join(", "));
+        } else {
+            tracing::warn!("Failed to install any WinHTTP hooks: [{}]", results.join(", "));
+        }
+
+        if let Ok(mut out) = crate::render::overlay::OUTBOUND_EVENTS.lock() {
+            out.push(trainlab_core::protocol::Event::NetworkHooksInstalled {
+                subsystem: "winhttp".to_string(),
+                results,
+            });
         }
     }
 }

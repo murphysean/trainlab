@@ -5,7 +5,10 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use trainlab_core::protocol::{Event, NetworkPacketDto, PacketDirection, PacketKind};
+use trainlab_core::protocol::{
+    Event, NetworkPacketDto, NetworkStatsDto, PacketDirection, PacketKind,
+    ProtocolDirectionStatsDto,
+};
 
 #[cfg(windows)]
 pub mod winsock;
@@ -26,6 +29,31 @@ static CAPTURE_LOOPBACK: AtomicBool = AtomicBool::new(false);
 static IGNORE_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static IGNORE_HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+// Raw packet and byte counters tracked directly at hook invocation sites
+static STATS_TCP_IN_PACKETS: AtomicU64 = AtomicU64::new(0);
+static STATS_TCP_IN_BYTES: AtomicU64 = AtomicU64::new(0);
+static STATS_TCP_OUT_PACKETS: AtomicU64 = AtomicU64::new(0);
+static STATS_TCP_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+static STATS_UDP_IN_PACKETS: AtomicU64 = AtomicU64::new(0);
+static STATS_UDP_IN_BYTES: AtomicU64 = AtomicU64::new(0);
+static STATS_UDP_OUT_PACKETS: AtomicU64 = AtomicU64::new(0);
+static STATS_UDP_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+static STATS_HTTP_IN_PACKETS: AtomicU64 = AtomicU64::new(0);
+static STATS_HTTP_IN_BYTES: AtomicU64 = AtomicU64::new(0);
+static STATS_HTTP_OUT_PACKETS: AtomicU64 = AtomicU64::new(0);
+static STATS_HTTP_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+static STATS_STEAM_IN_PACKETS: AtomicU64 = AtomicU64::new(0);
+static STATS_STEAM_IN_BYTES: AtomicU64 = AtomicU64::new(0);
+static STATS_STEAM_OUT_PACKETS: AtomicU64 = AtomicU64::new(0);
+static STATS_STEAM_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+static STATS_TOTAL_LOGGED: AtomicU64 = AtomicU64::new(0);
+static STATS_TOTAL_DROPPED: AtomicU64 = AtomicU64::new(0);
+
 
 /// Maximum packets retained in the in-memory push queue.
 const MAX_QUEUED_PACKETS: usize = 2000;
@@ -50,6 +78,105 @@ static STAGED_PACKETS: Mutex<std::collections::BTreeMap<u64, StagedBuffer>> = Mu
 /// Outbound queue of captured network packet events awaiting transmission over IPC.
 static CAPTURED_PACKETS: Mutex<Vec<NetworkPacketDto>> = Mutex::new(Vec::new());
 
+/// Increment raw packet and byte counters at hook invocation sites.
+pub fn count_raw_packet(kind: PacketKind, direction: PacketDirection, bytes: usize) {
+    let b = bytes as u64;
+    match (kind, direction) {
+        (PacketKind::Tcp, PacketDirection::Inbound) => {
+            STATS_TCP_IN_PACKETS.fetch_add(1, Ordering::Relaxed);
+            STATS_TCP_IN_BYTES.fetch_add(b, Ordering::Relaxed);
+        }
+        (PacketKind::Tcp, PacketDirection::Outbound) => {
+            STATS_TCP_OUT_PACKETS.fetch_add(1, Ordering::Relaxed);
+            STATS_TCP_OUT_BYTES.fetch_add(b, Ordering::Relaxed);
+        }
+        (PacketKind::Udp, PacketDirection::Inbound) => {
+            STATS_UDP_IN_PACKETS.fetch_add(1, Ordering::Relaxed);
+            STATS_UDP_IN_BYTES.fetch_add(b, Ordering::Relaxed);
+        }
+        (PacketKind::Udp, PacketDirection::Outbound) => {
+            STATS_UDP_OUT_PACKETS.fetch_add(1, Ordering::Relaxed);
+            STATS_UDP_OUT_BYTES.fetch_add(b, Ordering::Relaxed);
+        }
+        (PacketKind::Http, PacketDirection::Inbound) => {
+            STATS_HTTP_IN_PACKETS.fetch_add(1, Ordering::Relaxed);
+            STATS_HTTP_IN_BYTES.fetch_add(b, Ordering::Relaxed);
+        }
+        (PacketKind::Http, PacketDirection::Outbound) => {
+            STATS_HTTP_OUT_PACKETS.fetch_add(1, Ordering::Relaxed);
+            STATS_HTTP_OUT_BYTES.fetch_add(b, Ordering::Relaxed);
+        }
+        (PacketKind::Steam, PacketDirection::Inbound) => {
+            STATS_STEAM_IN_PACKETS.fetch_add(1, Ordering::Relaxed);
+            STATS_STEAM_IN_BYTES.fetch_add(b, Ordering::Relaxed);
+        }
+        (PacketKind::Steam, PacketDirection::Outbound) => {
+            STATS_STEAM_OUT_PACKETS.fetch_add(1, Ordering::Relaxed);
+            STATS_STEAM_OUT_BYTES.fetch_add(b, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Retrieve real-time packet capture counts and byte metrics.
+pub fn get_stats() -> NetworkStatsDto {
+    NetworkStatsDto {
+        enabled: is_enabled(),
+        capture_loopback: CAPTURE_LOOPBACK.load(Ordering::Relaxed),
+        tcp: ProtocolDirectionStatsDto {
+            inbound_packets: STATS_TCP_IN_PACKETS.load(Ordering::Relaxed),
+            inbound_bytes: STATS_TCP_IN_BYTES.load(Ordering::Relaxed),
+            outbound_packets: STATS_TCP_OUT_PACKETS.load(Ordering::Relaxed),
+            outbound_bytes: STATS_TCP_OUT_BYTES.load(Ordering::Relaxed),
+        },
+        udp: ProtocolDirectionStatsDto {
+            inbound_packets: STATS_UDP_IN_PACKETS.load(Ordering::Relaxed),
+            inbound_bytes: STATS_UDP_IN_BYTES.load(Ordering::Relaxed),
+            outbound_packets: STATS_UDP_OUT_PACKETS.load(Ordering::Relaxed),
+            outbound_bytes: STATS_UDP_OUT_BYTES.load(Ordering::Relaxed),
+        },
+        http: ProtocolDirectionStatsDto {
+            inbound_packets: STATS_HTTP_IN_PACKETS.load(Ordering::Relaxed),
+            inbound_bytes: STATS_HTTP_IN_BYTES.load(Ordering::Relaxed),
+            outbound_packets: STATS_HTTP_OUT_PACKETS.load(Ordering::Relaxed),
+            outbound_bytes: STATS_HTTP_OUT_BYTES.load(Ordering::Relaxed),
+        },
+        steam: ProtocolDirectionStatsDto {
+            inbound_packets: STATS_STEAM_IN_PACKETS.load(Ordering::Relaxed),
+            inbound_bytes: STATS_STEAM_IN_BYTES.load(Ordering::Relaxed),
+            outbound_packets: STATS_STEAM_OUT_PACKETS.load(Ordering::Relaxed),
+            outbound_bytes: STATS_STEAM_OUT_BYTES.load(Ordering::Relaxed),
+        },
+        total_logged: STATS_TOTAL_LOGGED.load(Ordering::Relaxed),
+        total_dropped: STATS_TOTAL_DROPPED.load(Ordering::Relaxed),
+    }
+}
+
+/// Reset traffic counters (useful for tests or session reset).
+pub fn reset_stats() {
+    STATS_TCP_IN_PACKETS.store(0, Ordering::Relaxed);
+    STATS_TCP_IN_BYTES.store(0, Ordering::Relaxed);
+    STATS_TCP_OUT_PACKETS.store(0, Ordering::Relaxed);
+    STATS_TCP_OUT_BYTES.store(0, Ordering::Relaxed);
+
+    STATS_UDP_IN_PACKETS.store(0, Ordering::Relaxed);
+    STATS_UDP_IN_BYTES.store(0, Ordering::Relaxed);
+    STATS_UDP_OUT_PACKETS.store(0, Ordering::Relaxed);
+    STATS_UDP_OUT_BYTES.store(0, Ordering::Relaxed);
+
+    STATS_HTTP_IN_PACKETS.store(0, Ordering::Relaxed);
+    STATS_HTTP_IN_BYTES.store(0, Ordering::Relaxed);
+    STATS_HTTP_OUT_PACKETS.store(0, Ordering::Relaxed);
+    STATS_HTTP_OUT_BYTES.store(0, Ordering::Relaxed);
+
+    STATS_STEAM_IN_PACKETS.store(0, Ordering::Relaxed);
+    STATS_STEAM_IN_BYTES.store(0, Ordering::Relaxed);
+    STATS_STEAM_OUT_PACKETS.store(0, Ordering::Relaxed);
+    STATS_STEAM_OUT_BYTES.store(0, Ordering::Relaxed);
+
+    STATS_TOTAL_LOGGED.store(0, Ordering::Relaxed);
+    STATS_TOTAL_DROPPED.store(0, Ordering::Relaxed);
+}
+
 /// Whether network capture is globally active.
 pub fn is_enabled() -> bool {
     NETWORK_ENABLED.load(Ordering::Relaxed)
@@ -72,6 +199,10 @@ pub fn configure_hooks(winsock: bool, winhttp: bool, schannel: bool, steamworks:
 pub fn configure(enabled: bool, ignore_ports: &[u16], capture_loopback: bool, ignore_hosts: &[String]) {
     NETWORK_ENABLED.store(enabled, Ordering::SeqCst);
     CAPTURE_LOOPBACK.store(capture_loopback, Ordering::SeqCst);
+    WINSOCK_ENABLED.store(true, Ordering::SeqCst);
+    WINHTTP_ENABLED.store(true, Ordering::SeqCst);
+    SCHANNEL_ENABLED.store(true, Ordering::SeqCst);
+    STEAMWORKS_ENABLED.store(true, Ordering::SeqCst);
     if let Ok(mut ports) = IGNORE_PORTS.lock() {
         *ports = ignore_ports.to_vec();
     }
@@ -112,6 +243,7 @@ pub fn record_packet(
     match kind {
         PacketKind::Tcp | PacketKind::Udp => {
             if !WINSOCK_ENABLED.load(Ordering::Relaxed) {
+                STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
@@ -119,14 +251,17 @@ pub fn record_packet(
             let is_schannel = url.as_deref().map(|u| u.contains("SChannel")).unwrap_or(false);
             if is_schannel {
                 if !SCHANNEL_ENABLED.load(Ordering::Relaxed) {
+                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             } else if !WINHTTP_ENABLED.load(Ordering::Relaxed) {
+                STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
         PacketKind::Steam => {
             if !STEAMWORKS_ENABLED.load(Ordering::Relaxed) {
+                STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
@@ -139,11 +274,13 @@ pub fn record_packet(
     if let Ok(ignored) = IGNORE_PORTS.lock() {
         if let Some(lp) = local_port {
             if ignored.contains(&lp) {
+                STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
         if let Some(rp) = remote_port {
             if ignored.contains(&rp) {
+                STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         }
@@ -159,21 +296,25 @@ pub fn record_packet(
 
             if let Some(u) = url.as_deref() {
                 if matches_host(u) {
+                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             }
             if let Some(re) = remote_endpoint.as_deref() {
                 if matches_host(re) {
+                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             }
             if let Some(le) = local_endpoint.as_deref() {
                 if matches_host(le) {
+                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             }
             if let Some(hdr) = headers.as_deref() {
                 if matches_host(hdr) {
+                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             }
@@ -182,6 +323,7 @@ pub fn record_packet(
                 let check_len = payload.len().min(1024);
                 if let Ok(text) = std::str::from_utf8(&payload[..check_len]) {
                     if matches_host(text) {
+                        STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
                         return;
                     }
                 }
@@ -203,6 +345,7 @@ pub fn record_packet(
             || (local_endpoint.is_none() && remote_is_loopback)
             || url_is_loopback
         {
+            STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         }
     }
@@ -267,6 +410,7 @@ pub fn record_packet(
             lock.remove(0);
         }
         lock.push(dto);
+        STATS_TOTAL_LOGGED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -723,6 +867,50 @@ mod tests {
         } else {
             panic!("expected NetworkPacket event");
         }
+    }
+
+    #[test]
+    fn test_traffic_counters() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_stats();
+        configure(true, &[443], false, &[]);
+
+        // 1. Simulate counting raw hook traffic
+        count_raw_packet(PacketKind::Udp, PacketDirection::Outbound, 128);
+        count_raw_packet(PacketKind::Udp, PacketDirection::Inbound, 256);
+        count_raw_packet(PacketKind::Tcp, PacketDirection::Outbound, 512);
+
+        // 2. Record one packet that gets logged and one that gets dropped (port 443)
+        record_packet(
+            PacketKind::Udp,
+            PacketDirection::Outbound,
+            Some("192.168.1.100:50000".into()),
+            Some("198.51.100.20:27015".into()),
+            None,
+            None,
+            &vec![0xAA; 64],
+        );
+        record_packet(
+            PacketKind::Tcp,
+            PacketDirection::Outbound,
+            Some("192.168.1.100:50001".into()),
+            Some("1.1.1.1:443".into()), // ignored port
+            None,
+            None,
+            &vec![0xBB; 64],
+        );
+
+        let stats = get_stats();
+        assert_eq!(stats.udp.outbound_packets, 1);
+        assert_eq!(stats.udp.outbound_bytes, 128);
+        assert_eq!(stats.udp.inbound_packets, 1);
+        assert_eq!(stats.udp.inbound_bytes, 256);
+        assert_eq!(stats.tcp.outbound_packets, 1);
+        assert_eq!(stats.tcp.outbound_bytes, 512);
+        assert_eq!(stats.total_logged, 1);
+        assert_eq!(stats.total_dropped, 1);
+        assert_eq!(stats.total_packets(), 3);
+        assert_eq!(stats.total_bytes(), 128 + 256 + 512);
     }
 }
 

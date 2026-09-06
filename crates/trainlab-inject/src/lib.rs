@@ -574,6 +574,9 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 total_captured: 0,
             }
         }
+        Request::GetNetworkStatus => {
+            Response::NetworkStatus(network::get_stats())
+        }
         Request::ClearNetworkLog => {
             Response::NetworkLogCleared { cleared: 0 }
         }

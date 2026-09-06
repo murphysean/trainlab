@@ -110,6 +110,7 @@ pub unsafe extern "system" fn hooked_encrypt_message(
     if ret == SEC_E_OK
         && let Some(payload) = plaintext.as_deref()
     {
+        super::count_raw_packet(PacketKind::Http, PacketDirection::Outbound, payload.len());
         super::record_packet(
             PacketKind::Http,
             PacketDirection::Outbound,
@@ -141,6 +142,7 @@ pub unsafe extern "system" fn hooked_decrypt_message(
 
     if ret == SEC_E_OK {
         if let Some((ptr, len)) = unsafe { data_buffer_payload(p_message) } {
+            super::count_raw_packet(PacketKind::Http, PacketDirection::Inbound, len);
             let payload = unsafe { std::slice::from_raw_parts(ptr, len) };
             super::record_packet(
                 PacketKind::Http,
@@ -162,11 +164,12 @@ unsafe fn install_hook(
     proc_name: &[u8],
     callback_addr: u64,
     target_orig: &AtomicPtr<c_void>,
-) -> bool {
+) -> (bool, String) {
+    let proc_name_str = String::from_utf8_lossy(proc_name).trim_end_matches('\0').to_string();
     // SChannel exports live in secur32.dll (and are forwarded from sspicli.dll).
     let secur32_mod = unsafe { GetModuleHandleA(b"secur32.dll\0".as_ptr()) };
     if secur32_mod.is_null() {
-        return false;
+        return (false, format!("{}=FAIL(secur32.dll not loaded)", proc_name_str));
     }
 
     let fn_ptr = unsafe { GetProcAddress(secur32_mod, proc_name.as_ptr()) };
@@ -203,7 +206,7 @@ unsafe fn install_hook(
                     target_u64,
                     installed.cave_addr
                 );
-                true
+                (true, format!("{}=Y", String::from_utf8_lossy(proc_name).trim_end_matches('\0')))
             }
             Err(e) => {
                 tracing::warn!(
@@ -211,11 +214,11 @@ unsafe fn install_hook(
                     String::from_utf8_lossy(proc_name),
                     e
                 );
-                false
+                (false, format!("{}=FAIL({})", String::from_utf8_lossy(proc_name).trim_end_matches('\0'), e))
             }
         }
     } else {
-        false
+        (false, format!("{}=FAIL(GetProcAddress failed)", String::from_utf8_lossy(proc_name).trim_end_matches('\0')))
     }
 }
 
@@ -231,26 +234,32 @@ pub fn init_schannel_hooks() {
         }
         if secur32_mod.is_null() {
             tracing::info!("secur32.dll not loaded in process; skipping SChannel hooks");
+            if let Ok(mut out) = crate::render::overlay::OUTBOUND_EVENTS.lock() {
+                out.push(trainlab_core::protocol::Event::NetworkHooksInstalled {
+                    subsystem: "schannel".to_string(),
+                    results: vec!["secur32.dll not loaded".to_string()],
+                });
+            }
             return;
         }
 
         let mut hooked_any = false;
         let mut results = Vec::new();
 
-        let h_enc = install_hook(
+        let (h_enc, r_enc) = install_hook(
             b"EncryptMessage\0",
             hooked_encrypt_message as *const () as u64,
             &ORIGINAL_ENCRYPT_MESSAGE,
         );
-        results.push(format!("EncryptMessage={}", if h_enc { "Y" } else { "N" }));
+        results.push(r_enc);
         hooked_any |= h_enc;
 
-        let h_dec = install_hook(
+        let (h_dec, r_dec) = install_hook(
             b"DecryptMessage\0",
             hooked_decrypt_message as *const () as u64,
             &ORIGINAL_DECRYPT_MESSAGE,
         );
-        results.push(format!("DecryptMessage={}", if h_dec { "Y" } else { "N" }));
+        results.push(r_dec);
         hooked_any |= h_dec;
 
         if hooked_any {
@@ -264,6 +273,13 @@ pub fn init_schannel_hooks() {
                 "[NETWORK] Failed to install any SChannel hooks: [{}]",
                 results.join(", ")
             );
+        }
+
+        if let Ok(mut out) = crate::render::overlay::OUTBOUND_EVENTS.lock() {
+            out.push(trainlab_core::protocol::Event::NetworkHooksInstalled {
+                subsystem: "schannel".to_string(),
+                results,
+            });
         }
     }
 }

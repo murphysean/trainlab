@@ -177,6 +177,7 @@ pub unsafe extern "system" fn hooked_send(
 
     if ret > 0 && !buf.is_null() {
         let data_len = (ret as usize).min(len as usize);
+        super::count_raw_packet(PacketKind::Tcp, PacketDirection::Outbound, data_len);
         let slice = unsafe { std::slice::from_raw_parts(buf, data_len) };
         let local = unsafe { query_local_endpoint(s) };
         let remote = unsafe { query_peer_endpoint(s) };
@@ -212,6 +213,7 @@ pub unsafe extern "system" fn hooked_recv(
 
     if ret > 0 && !buf.is_null() {
         let data_len = (ret as usize).min(len as usize);
+        super::count_raw_packet(PacketKind::Tcp, PacketDirection::Inbound, data_len);
         let slice = unsafe { std::slice::from_raw_parts(buf, data_len) };
         let local = unsafe { query_local_endpoint(s) };
         let remote = unsafe { query_peer_endpoint(s) };
@@ -249,6 +251,7 @@ pub unsafe extern "system" fn hooked_sendto(
 
     if ret > 0 && !buf.is_null() {
         let data_len = (ret as usize).min(len as usize);
+        super::count_raw_packet(PacketKind::Udp, PacketDirection::Outbound, data_len);
         let slice = unsafe { std::slice::from_raw_parts(buf, data_len) };
         let local = unsafe { query_local_endpoint(s) };
         let remote = unsafe { format_sockaddr(to) }.or_else(|| unsafe { query_peer_endpoint(s) });
@@ -286,6 +289,7 @@ pub unsafe extern "system" fn hooked_recvfrom(
 
     if ret > 0 && !buf.is_null() {
         let data_len = (ret as usize).min(len as usize);
+        super::count_raw_packet(PacketKind::Udp, PacketDirection::Inbound, data_len);
         let slice = unsafe { std::slice::from_raw_parts(buf, data_len) };
         let local = unsafe { query_local_endpoint(s) };
         let remote = unsafe { format_sockaddr(from) }.or_else(|| unsafe { query_peer_endpoint(s) });
@@ -345,6 +349,7 @@ pub unsafe extern "system" fn hooked_wsasendto(
         };
 
         if bytes_sent > 0 {
+            super::count_raw_packet(PacketKind::Udp, PacketDirection::Outbound, bytes_sent);
             let data = unsafe { extract_wsabuf_data(buffers, buffer_count, bytes_sent) };
             if !data.is_empty() {
                 let local = unsafe { query_local_endpoint(s) };
@@ -394,6 +399,7 @@ pub unsafe extern "system" fn hooked_wsarecvfrom(
         };
 
         if bytes_recvd > 0 {
+            super::count_raw_packet(PacketKind::Udp, PacketDirection::Inbound, bytes_recvd);
             let data = unsafe { extract_wsabuf_data(buffers, buffer_count, bytes_recvd) };
             if !data.is_empty() {
                 let local = unsafe { query_local_endpoint(s) };
@@ -451,6 +457,7 @@ pub unsafe extern "system" fn hooked_wsasend(
         };
 
         if bytes_sent > 0 {
+            super::count_raw_packet(PacketKind::Tcp, PacketDirection::Outbound, bytes_sent);
             let data = unsafe { extract_wsabuf_data(buffers, buffer_count, bytes_sent) };
             if !data.is_empty() {
                 let local = unsafe { query_local_endpoint(s) };
@@ -498,6 +505,7 @@ pub unsafe extern "system" fn hooked_wsarecv(
         };
 
         if bytes_recvd > 0 {
+            super::count_raw_packet(PacketKind::Tcp, PacketDirection::Inbound, bytes_recvd);
             let data = unsafe { extract_wsabuf_data(buffers, buffer_count, bytes_recvd) };
             if !data.is_empty() {
                 let local = unsafe { query_local_endpoint(s) };
@@ -524,10 +532,11 @@ unsafe fn install_hook(
     proc_name: &[u8],
     callback_addr: u64,
     target_orig: &AtomicPtr<c_void>,
-) -> bool {
+) -> (bool, String) {
+    let proc_name_str = String::from_utf8_lossy(proc_name).trim_end_matches('\0').to_string();
     let ws2_mod = unsafe { GetModuleHandleA(b"ws2_32.dll\0".as_ptr()) };
     if ws2_mod.is_null() {
-        return false;
+        return (false, format!("{}=FAIL(ws2_32.dll not loaded)", proc_name_str));
     }
 
     let fn_ptr = unsafe { GetProcAddress(ws2_mod, proc_name.as_ptr()) };
@@ -560,27 +569,27 @@ unsafe fn install_hook(
                 );
                 tracing::info!(
                     "Hooked Winsock {} at 0x{:X} -> trampoline at 0x{:X}",
-                    String::from_utf8_lossy(proc_name),
+                    proc_name_str,
                     target_u64,
                     installed.cave_addr
                 );
-                true
+                (true, format!("{}=Y", proc_name_str))
             }
             Err(e) => {
                 tracing::warn!(
                     "Failed to hook Winsock {}: {}",
-                    String::from_utf8_lossy(proc_name),
+                    proc_name_str,
                     e
                 );
-                false
+                (false, format!("{}=FAIL({})", proc_name_str, e))
             }
         }
     } else {
         tracing::warn!(
             "GetProcAddress failed for Winsock {}",
-            String::from_utf8_lossy(proc_name)
+            proc_name_str
         );
-        false
+        (false, format!("{}=FAIL(GetProcAddress failed)", proc_name_str))
     }
 }
 
@@ -596,6 +605,12 @@ pub fn init_winsock_hooks() {
         }
         if ws2_mod.is_null() {
             tracing::warn!("ws2_32.dll not loaded in process; skipping Winsock hooks");
+            if let Ok(mut out) = crate::render::overlay::OUTBOUND_EVENTS.lock() {
+                out.push(trainlab_core::protocol::Event::NetworkHooksInstalled {
+                    subsystem: "winsock".to_string(),
+                    results: vec!["ws2_32.dll not loaded".to_string()],
+                });
+            }
             return;
         }
 
@@ -603,37 +618,37 @@ pub fn init_winsock_hooks() {
         let mut results = Vec::new();
 
         // Legacy sockets API
-        let h_send = install_hook(b"send\0", hooked_send as *const () as u64, &ORIGINAL_SEND);
-        results.push(format!("send={}", if h_send { "Y" } else { "N" }));
+        let (h_send, r_send) = install_hook(b"send\0", hooked_send as *const () as u64, &ORIGINAL_SEND);
+        results.push(r_send);
         hooked_any |= h_send;
 
-        let h_recv = install_hook(b"recv\0", hooked_recv as *const () as u64, &ORIGINAL_RECV);
-        results.push(format!("recv={}", if h_recv { "Y" } else { "N" }));
+        let (h_recv, r_recv) = install_hook(b"recv\0", hooked_recv as *const () as u64, &ORIGINAL_RECV);
+        results.push(r_recv);
         hooked_any |= h_recv;
 
-        let h_sendto = install_hook(b"sendto\0", hooked_sendto as *const () as u64, &ORIGINAL_SENDTO);
-        results.push(format!("sendto={}", if h_sendto { "Y" } else { "N" }));
+        let (h_sendto, r_sendto) = install_hook(b"sendto\0", hooked_sendto as *const () as u64, &ORIGINAL_SENDTO);
+        results.push(r_sendto);
         hooked_any |= h_sendto;
 
-        let h_recvfrom = install_hook(b"recvfrom\0", hooked_recvfrom as *const () as u64, &ORIGINAL_RECVFROM);
-        results.push(format!("recvfrom={}", if h_recvfrom { "Y" } else { "N" }));
+        let (h_recvfrom, r_recvfrom) = install_hook(b"recvfrom\0", hooked_recvfrom as *const () as u64, &ORIGINAL_RECVFROM);
+        results.push(r_recvfrom);
         hooked_any |= h_recvfrom;
 
         // Modern WSA sockets API
-        let h_wsasendto = install_hook(b"WSASendTo\0", hooked_wsasendto as *const () as u64, &ORIGINAL_WSASENDTO);
-        results.push(format!("WSASendTo={}", if h_wsasendto { "Y" } else { "N" }));
+        let (h_wsasendto, r_wsasendto) = install_hook(b"WSASendTo\0", hooked_wsasendto as *const () as u64, &ORIGINAL_WSASENDTO);
+        results.push(r_wsasendto);
         hooked_any |= h_wsasendto;
 
-        let h_wsarecvfrom = install_hook(b"WSARecvFrom\0", hooked_wsarecvfrom as *const () as u64, &ORIGINAL_WSARECVFROM);
-        results.push(format!("WSARecvFrom={}", if h_wsarecvfrom { "Y" } else { "N" }));
+        let (h_wsarecvfrom, r_wsarecvfrom) = install_hook(b"WSARecvFrom\0", hooked_wsarecvfrom as *const () as u64, &ORIGINAL_WSARECVFROM);
+        results.push(r_wsarecvfrom);
         hooked_any |= h_wsarecvfrom;
 
-        let h_wsasend = install_hook(b"WSASend\0", hooked_wsasend as *const () as u64, &ORIGINAL_WSASEND);
-        results.push(format!("WSASend={}", if h_wsasend { "Y" } else { "N" }));
+        let (h_wsasend, r_wsasend) = install_hook(b"WSASend\0", hooked_wsasend as *const () as u64, &ORIGINAL_WSASEND);
+        results.push(r_wsasend);
         hooked_any |= h_wsasend;
 
-        let h_wsarecv = install_hook(b"WSARecv\0", hooked_wsarecv as *const () as u64, &ORIGINAL_WSARECV);
-        results.push(format!("WSARecv={}", if h_wsarecv { "Y" } else { "N" }));
+        let (h_wsarecv, r_wsarecv) = install_hook(b"WSARecv\0", hooked_wsarecv as *const () as u64, &ORIGINAL_WSARECV);
+        results.push(r_wsarecv);
         hooked_any |= h_wsarecv;
 
         if hooked_any {
@@ -647,6 +662,13 @@ pub fn init_winsock_hooks() {
                 "[NETWORK] Failed to install any Winsock hooks: [{}]",
                 results.join(", ")
             );
+        }
+
+        if let Ok(mut out) = crate::render::overlay::OUTBOUND_EVENTS.lock() {
+            out.push(trainlab_core::protocol::Event::NetworkHooksInstalled {
+                subsystem: "winsock".to_string(),
+                results,
+            });
         }
     }
 }

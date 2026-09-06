@@ -273,6 +273,11 @@ pub struct WatchNetworkArgs {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ClearNetworkLogArgs {}
 
+/// Arguments for [`get_network_status`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GetNetworkStatusArgs {}
+
+
 /// Arguments for [`configure_network`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ConfigureNetworkArgs {
@@ -3397,6 +3402,79 @@ impl TrainlabMcpServer {
         ]))
     }
 
+    /// Retrieve live network hook traffic statistics and capture counts.
+    #[tool(description = "Retrieve real-time network traffic packet counts and byte volumes across all hooked sites (Winsock TCP/UDP, WinHTTP, SChannel, Steamworks). Shows inbound vs outbound traffic, active filters, and dropped counts.")]
+    pub fn get_network_status(
+        &self,
+        Parameters(_args): Parameters<GetNetworkStatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (has_cap, _caps, session_logged) = {
+            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            (s.has_capability("network_capture"), s.dll_capabilities().join(", "), s.list_network_packets(None, None, None, None).1)
+        };
+
+        let req = trainlab_core::protocol::Request::GetNetworkStatus;
+        let resp = crate::controller::request(&self.session, &req);
+
+        let mut lines = Vec::new();
+        lines.push("🌐 Network Interception Traffic Counters:".to_string());
+
+        match resp {
+            Ok(trainlab_core::protocol::Response::NetworkStatus(stats)) => {
+                lines.push(format!("  Capture Active: {}", stats.enabled));
+                lines.push(format!("  Capture Loopback (127.0.0.1): {}", stats.capture_loopback));
+                lines.push("".to_string());
+                lines.push(format!("  {:<12} | {:>14} | {:>14} | {:>12}", "Protocol", "Inbound", "Outbound", "Total Bytes"));
+                lines.push(format!("  {:-<12}-+-{:-<14}-+-{:-<14}-+-{:-<12}", "", "", "", ""));
+
+                let fmt_proto = |name: &str, p: &trainlab_core::protocol::ProtocolDirectionStatsDto| {
+                    format!(
+                        "  {:<12} | {:>5} pkts ({:>5}B) | {:>5} pkts ({:>5}B) | {:>10}B",
+                        name,
+                        p.inbound_packets,
+                        p.inbound_bytes,
+                        p.outbound_packets,
+                        p.outbound_bytes,
+                        p.inbound_bytes + p.outbound_bytes
+                    )
+                };
+
+                lines.push(fmt_proto("UDP (Winsock)", &stats.udp));
+                lines.push(fmt_proto("TCP (Winsock)", &stats.tcp));
+                lines.push(fmt_proto("HTTP/TLS", &stats.http));
+                lines.push(fmt_proto("Steamworks", &stats.steam));
+                lines.push(format!("  {:-<12}-+-{:-<14}-+-{:-<14}-+-{:-<12}", "", "", "", ""));
+                lines.push(format!(
+                    "  {:<12} | {:>5} pkts ({:>5}B) | {:>5} pkts ({:>5}B) | {:>10}B",
+                    "TOTAL",
+                    stats.total_inbound_packets(),
+                    stats.total_inbound_bytes(),
+                    stats.total_outbound_packets(),
+                    stats.total_outbound_bytes(),
+                    stats.total_bytes()
+                ));
+                lines.push("".to_string());
+                lines.push(format!("  Total Logged Packets: {} (session buffer: {})", stats.total_logged, session_logged));
+                lines.push(format!("  Total Dropped (by filters): {}", stats.total_dropped));
+            }
+            Ok(other) => {
+                lines.push(format!("  Unexpected response from injected DLL: {other:?}"));
+                lines.push(format!("  Session Logged Packets: {session_logged}"));
+            }
+            Err(e) => {
+                lines.push(format!("  Injected DLL status unavailable ({e})"));
+                lines.push(format!("  Session Logged Packets: {session_logged}"));
+                if !has_cap {
+                    lines.push("  Notice: Connected session does not advertise 'network_capture' capability.".to_string());
+                }
+            }
+        }
+
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(lines.join("\n")),
+        ]))
+    }
+
     /// Configure network traffic capture: toggle capture, ignore ports, or allow loopback.
     #[tool(description = "Configure in-game network traffic interception. By default loopback (127.0.0.1) and internal trainer ports are ignored so buffers only capture actual game traffic. Use this tool to toggle interception, change ignored ports, or opt into loopback traffic capture.")]
     pub fn configure_network(
@@ -5890,7 +5968,17 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert!(text_empty.contains("No captured network packets"));
+
+        // 6. Test get_network_status
+        let res_status = server.get_network_status(Parameters(GetNetworkStatusArgs {})).unwrap();
+        let text_status = match &res_status.content[0] {
+            rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text_status.contains("Network Interception Traffic Counters"));
+        assert!(text_status.contains("Session Logged Packets"));
     }
+
 
     #[test]
     fn allocate_string_kind_validation() {

@@ -45,6 +45,8 @@ pub enum Event {
     OverlayReady,
     /// Real-time captured network packet event from Winsock/WinHTTP hooks.
     NetworkPacket(NetworkPacketDto),
+    /// Notification of network hooks installation results from injected DLL.
+    NetworkHooksInstalled { subsystem: String, results: Vec<String> },
     /// Acknowledge packet receipt and notify DLL to free any staged buffer in game memory.
     AcknowledgePacket { id: u64, discard: bool },
 }
@@ -210,6 +212,8 @@ pub enum Request {
         filter_proto: Option<PacketKind>,
         filter_endpoint: Option<String>,
     },
+    /// Retrieve real-time raw packet capture counters from the injected DLL hooks.
+    GetNetworkStatus,
     /// Clear the captured network packets buffer.
     ClearNetworkLog,
     /// Configure or toggle network traffic interception.
@@ -367,6 +371,8 @@ pub enum Response {
         packets: Vec<NetworkPacketDto>,
         total_captured: usize,
     },
+    /// Reply to [`Request::GetNetworkStatus`].
+    NetworkStatus(NetworkStatsDto),
     /// Reply to [`Request::ClearNetworkLog`].
     NetworkLogCleared { cleared: usize },
     /// Reply to [`Request::ConfigureNetworkHook`].
@@ -713,6 +719,63 @@ pub struct NetworkPacketDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_ptr: Option<u64>,
 }
+
+/// Statistics for a specific protocol (packets and bytes broken down by direction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProtocolDirectionStatsDto {
+    pub inbound_packets: u64,
+    pub inbound_bytes: u64,
+    pub outbound_packets: u64,
+    pub outbound_bytes: u64,
+}
+
+/// Real-time traffic counters recorded at hook invocation sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NetworkStatsDto {
+    /// Interception enabled status in the DLL.
+    pub enabled: bool,
+    /// Loopback capture enabled status.
+    pub capture_loopback: bool,
+    /// TCP traffic counts (`send`, `recv`, `WSASend`, `WSARecv`).
+    pub tcp: ProtocolDirectionStatsDto,
+    /// UDP traffic counts (`sendto`, `recvfrom`, `WSASendTo`, `WSARecvFrom`).
+    pub udp: ProtocolDirectionStatsDto,
+    /// HTTP / SChannel plaintext counts (`WinHttp`, `EncryptMessage`, `DecryptMessage`).
+    pub http: ProtocolDirectionStatsDto,
+    /// Steamworks P2P & networking counts (`SendP2PPacket`, `ReadP2PPacket`, `SendMessageToUser`, `ReceiveMessagesOnChannel`, etc.).
+    pub steam: ProtocolDirectionStatsDto,
+    /// Total packets pushed to the session/IPC ring buffer.
+    pub total_logged: u64,
+    /// Packets dropped by filters (loopback checks, ignored ports, or ignored hosts).
+    pub total_dropped: u64,
+}
+
+impl NetworkStatsDto {
+    pub fn total_inbound_packets(&self) -> u64 {
+        self.tcp.inbound_packets + self.udp.inbound_packets + self.http.inbound_packets + self.steam.inbound_packets
+    }
+
+    pub fn total_outbound_packets(&self) -> u64 {
+        self.tcp.outbound_packets + self.udp.outbound_packets + self.http.outbound_packets + self.steam.outbound_packets
+    }
+
+    pub fn total_packets(&self) -> u64 {
+        self.total_inbound_packets() + self.total_outbound_packets()
+    }
+
+    pub fn total_inbound_bytes(&self) -> u64 {
+        self.tcp.inbound_bytes + self.udp.inbound_bytes + self.http.inbound_bytes + self.steam.inbound_bytes
+    }
+
+    pub fn total_outbound_bytes(&self) -> u64 {
+        self.tcp.outbound_bytes + self.udp.outbound_bytes + self.http.outbound_bytes + self.steam.outbound_bytes
+    }
+
+    pub fn total_bytes(&self) -> u64 {
+        self.total_inbound_bytes() + self.total_outbound_bytes()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

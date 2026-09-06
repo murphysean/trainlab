@@ -138,6 +138,9 @@ struct TrainlabApp {
     is_scanning: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // Event bus receiver to subscribe to all unified session/wire/log events
     bus_rx: tokio::sync::broadcast::Receiver<trainlab_core::event::BusEvent>,
+    // Cached real-time traffic statistics from DLL hooks
+    net_stats: Option<trainlab_core::protocol::NetworkStatsDto>,
+    net_stats_last_query: Option<std::time::Instant>,
     // Whether to periodically sync live marker memory values (1 Hz) or keep cached
     markers_live_sync: bool,
     // Whether to auto-scroll/stick to bottom in activity log views
@@ -231,6 +234,8 @@ impl TrainlabApp {
             is_attaching: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             is_scanning: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus_rx,
+            net_stats: None,
+            net_stats_last_query: None,
             markers_live_sync: true,
             log_stick_to_bottom: true,
         };
@@ -2144,6 +2149,12 @@ impl eframe::App for TrainlabApp {
                     }
                     ctx.request_repaint();
                 }
+                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::NetworkHooksInstalled { subsystem, results }) => {
+                    if let Ok(mut s) = self.session.lock() {
+                        s.log_activity("NETWORK", format!("Hooks installed ({}): [{}]", subsystem, results.join(", ")));
+                    }
+                    ctx.request_repaint();
+                }
                 trainlab_core::event::BusEvent::Log(_) => {
                     ctx.request_repaint();
                 }
@@ -2999,9 +3010,62 @@ impl TrainlabApp {
 
             ui.label("Filter:");
             ui.text_edit_singleline(&mut self.net_endpoint_filter);
+
+            ui.separator();
+
+            if ui.button("🔄 Refresh Stats").clicked() {
+                if let Some(Response::NetworkStatus(st)) = self.request(&Request::GetNetworkStatus) {
+                    self.net_stats = Some(st);
+                    self.net_stats_last_query = Some(std::time::Instant::now());
+                }
+            }
         });
 
-        ui.add_space(10.0);
+        // 1 Hz automatic background poll for traffic stats when NetworkTraffic tab is active
+        let should_poll = match self.net_stats_last_query {
+            None => true,
+            Some(last) => last.elapsed() >= std::time::Duration::from_millis(1000),
+        };
+        if should_poll && self.connected {
+            if let Some(Response::NetworkStatus(st)) = self.request(&Request::GetNetworkStatus) {
+                self.net_stats = Some(st);
+                self.net_stats_last_query = Some(std::time::Instant::now());
+            }
+        }
+
+        // Display real-time traffic statistics header
+        if let Some(stats) = &self.net_stats {
+            ui.add_space(3.0);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("📊 Hook Traffic Counters (1Hz):");
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 200, 255),
+                        format!("UDP: {} IN ({} B) / {} OUT ({} B)", stats.udp.inbound_packets, stats.udp.inbound_bytes, stats.udp.outbound_packets, stats.udp.outbound_bytes)
+                    );
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(140, 220, 140),
+                        format!("TCP: {} IN ({} B) / {} OUT ({} B)", stats.tcp.inbound_packets, stats.tcp.inbound_bytes, stats.tcp.outbound_packets, stats.tcp.outbound_bytes)
+                    );
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(240, 180, 80),
+                        format!("HTTP/TLS: {} IN / {} OUT", stats.http.inbound_packets, stats.http.outbound_packets)
+                    );
+                    ui.separator();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(200, 150, 255),
+                        format!("Steam: {} IN / {} OUT", stats.steam.inbound_packets, stats.steam.outbound_packets)
+                    );
+                    ui.separator();
+                    ui.label(format!("Dropped by Filter: {}", stats.total_dropped));
+                });
+            });
+        }
+
+        ui.add_space(5.0);
 
         let proto = match self.net_proto_filter.as_str() {
             "TCP" => Some(trainlab_core::protocol::PacketKind::Tcp),
