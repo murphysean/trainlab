@@ -4419,7 +4419,7 @@ dependencies = [
 
 [[package]]
 name = "trainlab-cave"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "trainlab-core",
@@ -4427,7 +4427,7 @@ dependencies = [
 
 [[package]]
 name = "trainlab-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bincode",
  "chrono",
@@ -4444,7 +4444,7 @@ dependencies = [
 
 [[package]]
 name = "trainlab-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4472,7 +4472,7 @@ dependencies = [
 
 [[package]]
 name = "trainlab-inject"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "egui",
  "libc",
@@ -4485,7 +4485,7 @@ dependencies = [
 
 [[package]]
 name = "trainlab-scanner"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
