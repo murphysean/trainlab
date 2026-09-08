@@ -4546,7 +4546,8 @@ pub(crate) fn execute_profile_commands(
                 }
 
                 let vt_str = value_type.as_deref().unwrap_or_else(|| {
-                    if value.trim().starts_with("0x") || value.trim().starts_with("0X") || value.trim().starts_with('$') {
+                    let vt_trim = value.trim();
+                    if vt_trim.starts_with("0x") || vt_trim.starts_with("0X") || vt_trim.starts_with('$') || vt_trim.contains('+') || vt_trim.contains('-') {
                         "ptr"
                     } else {
                         "i32"
@@ -4555,7 +4556,8 @@ pub(crate) fn execute_profile_commands(
                 let vt = parse_value_type(vt_str)
                     .map_err(|e| format!("cmd {idx}: invalid value type '{vt_str}': {e:?}"))?;
 
-                // If vt is ptr or value explicitly starts with $ / 0x / brackets / marker, resolve address expression.
+                // If vt is ptr or value explicitly looks like an address expression (marker, offset math,
+                // bracket deref, or 0x hex), resolve via parse_addr_expr and fail early with a clear error.
                 // Otherwise (e.g. integer or float literal like "1000", "5.0"), parse value directly as literal.
                 let val_trimmed = value.trim();
                 let eval_val_str = if vt == trainlab_core::scan::ValueType::Ptr
@@ -4563,10 +4565,17 @@ pub(crate) fn execute_profile_commands(
                     || val_trimmed.starts_with('[')
                     || val_trimmed.starts_with("0x")
                     || val_trimmed.starts_with("0X")
+                    || val_trimmed.contains('+')
+                    || val_trimmed.contains('-')
                 {
                     match parse_addr_expr(session, value) {
                         Ok(val_addr) => format!("{val_addr:#x}"),
-                        Err(_) => value.clone(),
+                        Err(e) => {
+                            if vt == trainlab_core::scan::ValueType::Ptr || val_trimmed.starts_with('$') || val_trimmed.starts_with('[') || val_trimmed.contains('+') {
+                                return Err(format!("cmd {idx}: failed to resolve value address expression '{value}': {e:?}"));
+                            }
+                            value.clone()
+                        }
                     }
                 } else {
                     value.clone()
@@ -4934,7 +4943,23 @@ pub(crate) fn execute_profile_commands(
                             }
                         } else {
                             // T-130: Parse the expected value per the value_type and compare.
-                            let expected_bytes = parse_value_bytes(exp_clean, vt)
+                            // If vt is ptr or expected is an address expression (starts with '$', contains '+', etc.),
+                            // resolve via parse_addr_expr first.
+                            let exp_eval_str = if vt == trainlab_core::scan::ValueType::Ptr
+                                || exp_clean.starts_with('$')
+                                || exp_clean.starts_with('[')
+                                || exp_clean.contains('+')
+                                || exp_clean.contains('-')
+                            {
+                                match parse_addr_expr(session, exp_clean) {
+                                    Ok(exp_addr) => format!("{exp_addr:#x}"),
+                                    Err(_) => exp_clean.to_string(),
+                                }
+                            } else {
+                                exp_clean.to_string()
+                            };
+
+                            let expected_bytes = parse_value_bytes(&exp_eval_str, vt)
                                 .map_err(|e| format!("cmd {idx}: assert failed to parse expected value '{exp_clean}': {e:?}"))?;
                             if data != expected_bytes {
                                 let exp_val_str = crate::format_value(&expected_bytes, vt);
@@ -6377,6 +6402,46 @@ cheats: []
         let session = s.lock().unwrap();
         let marker = session.get_marker("gc_slot").expect("gc_slot marker exists");
         assert_eq!(marker.address, 0x140000044);
+    }
+
+    #[test]
+    fn test_profile_command_write_and_assert_expression_resolution() {
+        let s = SharedSession::default();
+        {
+            let mut session = s.lock().unwrap();
+            // Seed a cave data slot marker 'tolstring_addr' and an address marker 'lua_tolstring'
+            let _ = session.set_marker("tolstring_addr", 0x13fff0040, Some("cave slot"));
+            let _ = session.set_marker("lua_tolstring", 0x1401a6ae0, Some("resolved lua_tolstring"));
+        }
+
+        // Test that Write command with address_ref: "tolstring_addr", value: "$lua_tolstring", value_type: "ptr"
+        // fails with bad target / no game process rather than failing expression resolution!
+        // But if value is an unresolvable marker expression, it must return a clear resolution error immediately.
+        let bad_val_cmd = vec![
+            crate::profile::ProfileCommand::Write {
+                address_ref: Some("tolstring_addr".into()),
+                address: None,
+                value: "$nonexistent_marker".into(),
+                value_type: Some("ptr".into()),
+                note: None,
+            },
+        ];
+        let err_bad = execute_profile_commands(&s, &bad_val_cmd).unwrap_err();
+        assert!(err_bad.contains("failed to resolve value address expression '$nonexistent_marker'"), "got {err_bad}");
+
+        // Test that unresolvable module expression fails cleanly
+        let bad_mod_cmd = vec![
+            crate::profile::ProfileCommand::Write {
+                address_ref: Some("tolstring_addr".into()),
+                address: None,
+                value: "helldivers.exe+0x1a6ae0".into(),
+                value_type: Some("ptr".into()),
+                note: None,
+            },
+        ];
+        let err_mod = execute_profile_commands(&s, &bad_mod_cmd).unwrap_err();
+        // Since no process is attached, resolving helldivers.exe will fail to resolve address expression
+        assert!(err_mod.contains("failed to resolve value address expression 'helldivers.exe+0x1a6ae0'"), "got {err_mod}");
     }
 
     #[test]
