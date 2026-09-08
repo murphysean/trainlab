@@ -192,9 +192,10 @@ pub fn check_trampoline_data_fallthrough(asm_code: &str) -> Result<(), String> {
     }
 
     let lines: Vec<&str> = asm_code.lines().collect();
-    let mut items: Vec<ItemKind> = Vec::new();
+    let mut items: Vec<(usize, String, ItemKind)> = Vec::new();
 
-    for raw_line in lines {
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        let line_num = line_idx + 1;
         let line = strip_comments(raw_line).trim();
         if line.is_empty() || line.ends_with(':') {
             continue;
@@ -202,26 +203,26 @@ pub fn check_trampoline_data_fallthrough(asm_code: &str) -> Result<(), String> {
         let lower = line.to_lowercase();
         if lower.starts_with("db ") || lower.starts_with("dd ") || lower.starts_with("dq ")
             || lower == "db" || lower == "dd" || lower == "dq" {
-            items.push(ItemKind::DataDirective);
+            items.push((line_num, line.to_string(), ItemKind::DataDirective));
         } else {
             let mnemonic = lower.split_whitespace().next().unwrap_or("");
             if matches!(mnemonic, "jmp" | "ret") {
-                items.push(ItemKind::TerminatingInstr);
+                items.push((line_num, line.to_string(), ItemKind::TerminatingInstr));
             } else {
-                items.push(ItemKind::NonTerminatingInstr);
+                items.push((line_num, line.to_string(), ItemKind::NonTerminatingInstr));
             }
         }
     }
 
     // If there are no data directives, nothing can be executed as code accidentally
-    if !items.contains(&ItemKind::DataDirective) {
+    if !items.iter().any(|(_, _, k)| *k == ItemKind::DataDirective) {
         return Ok(());
     }
 
     // In a trampoline cave, control must never fall through from a non-terminating instruction
     // into a data directive.
     let mut last_instr_was_terminating = true;
-    for item in &items {
+    for (line_num, line_text, item) in &items {
         match item {
             ItemKind::NonTerminatingInstr => {
                 last_instr_was_terminating = false;
@@ -231,12 +232,12 @@ pub fn check_trampoline_data_fallthrough(asm_code: &str) -> Result<(), String> {
             }
             ItemKind::DataDirective => {
                 if !last_instr_was_terminating {
-                    return Err(
-                        "trampoline cave payload has instructions falling through directly into data directives (db/dd/dq). \
+                    return Err(format!(
+                        "trampoline cave payload has instructions falling through directly into data directive at line {line_num} ('{line_text}'). \
 Execution will decode data bytes as code and crash once slots hold non-zero values.\n\
 Fix by jumping over data slots to a tail label, e.g.:\n  jmp code\n  my_slot:\n  dq 0\n  code:\n\
-Or pass 'force: true' to bypass this safety check.".into()
-                    );
+Or pass 'force: true' to bypass this safety check."
+                    ));
                 }
             }
         }
@@ -335,6 +336,14 @@ fn parse_and_emit_instruction(
     match mnemonic.as_str() {
         "nop" => { a.nop().map_err(|e| e.to_string())?; }
         "ret" => { a.ret().map_err(|e| e.to_string())?; }
+        "pushfq" => {
+            if !args.is_empty() { return Err("pushfq takes no operands".into()); }
+            a.pushfq().map_err(|e| e.to_string())?;
+        }
+        "popfq" => {
+            if !args.is_empty() { return Err("popfq takes no operands".into()); }
+            a.popfq().map_err(|e| e.to_string())?;
+        }
         "push" => {
             if args.len() != 1 { return Err("push requires 1 operand".into()); }
             let reg = parse_gpr64(args[0])?;
@@ -1448,7 +1457,7 @@ fn parse_and_emit_instruction(
         other => return Err(format!(
             "unsupported mnemonic '{other}' in assemble_asm. Supported families:\n\
              - Control flow: jmp, call, ret, je/jz, jne/jnz, jg, jge, jl, jle, ja, jae, jb, jbe, js, jns\n\
-             - Integer arithmetic/logic: mov, movabs, add, sub, inc, dec, xor, cmp, test, lea, push, pop, sar, shl, sal, shr, rol, ror\n\
+             - Integer arithmetic/logic: mov, movabs, add, sub, inc, dec, xor, cmp, test, lea, push, pop, pushfq, popfq, sar, shl, sal, shr, rol, ror\n\
              - Legacy SSE scalar/packed: movss, movsd, mulss, divss, addss, subss, maxss, minss, comiss, ucomiss, xorps, pxor, por, pand, pandn, movd, movq, cvtsi2ss, cvtsi2sd, cvttss2si, cvtss2si\n\
              - VEX/AVX scalar/packed: vmovss, vmovsd, vmovaps, vmovups, vmovdqa, vmovdqu, vmovapd, vmovupd, vxorps, vandps, vandnps, vorps, vaddss, vsubss, vmulss, vdivss, vmaxss, vminss, vxorpd, vandpd, vandnpd, vorpd, vaddsd, vsubsd, vmulsd, vdivsd, vmaxsd, vminsd, vcomiss, vucomiss, vcomisd, vucomisd, vcvtsi2ss, vcvtsi2sd, vcvttss2si, vcvtss2si, vpxor, vpor, vpand, vpandn, vzeroupper\n\
              - Directives & strings: nop, cld, rep movsb, db, dd, dq"
@@ -2347,6 +2356,30 @@ mod ce_verbatim_porting {
         "#;
         let res_ymm = assemble_text(vex_ymm, 0x140000000, &symbols).expect("assemble ymm moves");
         assert_eq!(res_ymm.instruction_count, 3);
+    }
+
+    #[test]
+    fn test_pushfq_popfq_assembly_and_guard() {
+        let symbols = HashMap::new();
+        let code = r#"
+            pushfq
+            mov rax, rbx
+            popfq
+            ret
+        "#;
+        let res = assemble_text(code, 0x140000000, &symbols).expect("assemble pushfq/popfq");
+        assert_eq!(res.instruction_count, 4);
+        assert_eq!(res.bytes[0], 0x9c); // pushfq opcode
+        assert_eq!(res.bytes[res.bytes.len() - 2], 0x9d); // popfq opcode
+        assert_eq!(res.bytes[res.bytes.len() - 1], 0xc3); // ret opcode
+
+        // Ensure trampoline safety guard accepts pushfq/popfq without false positive
+        assert!(check_trampoline_data_fallthrough(code).is_ok());
+
+        // Ensure detailed error text includes line number and content when fallthrough actually happens
+        let bad_code = "push rax\nmov rax, rbx\ndb 0x90\nret";
+        let err = check_trampoline_data_fallthrough(bad_code).unwrap_err();
+        assert!(err.contains("at line 3 ('db 0x90')"));
     }
 }
 
