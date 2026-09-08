@@ -15,6 +15,8 @@ mod input;
 pub mod xinput;
 #[cfg(windows)]
 pub mod d3d11;
+#[cfg(windows)]
+pub mod d3d12;
 pub mod overlay;
 
 /// Global render and overlay state tracked in-process.

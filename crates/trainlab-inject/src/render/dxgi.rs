@@ -107,9 +107,11 @@ pub unsafe extern "system" fn hooked_present(
     // 3. Run frame-synchronous cheat value pinning cadence
     super::overlay::execute_pinning_cadence();
 
-    // 4. Run Direct3D 11 in-game overlay render pass if overlay is active
+    // 4. Run in-game overlay render pass if overlay is active
     if super::STATE.overlay_visible.load(Ordering::Relaxed) {
-        super::d3d11::render_overlay_frame(swapchain);
+        if !super::d3d12::try_render_d3d12_overlay(swapchain) {
+            super::d3d11::render_overlay_frame(swapchain);
+        }
     }
 
     // 5. Call original Present trampoline
