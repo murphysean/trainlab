@@ -4553,36 +4553,48 @@ pub(crate) fn execute_profile_commands(
                         "i32"
                     }
                 });
-                let vt = parse_value_type(vt_str)
-                    .map_err(|e| format!("cmd {idx}: invalid value type '{vt_str}': {e:?}"))?;
-
-                // If vt is ptr or value explicitly looks like an address expression (marker, offset math,
-                // bracket deref, or 0x hex), resolve via parse_addr_expr and fail early with a clear error.
-                // Otherwise (e.g. integer or float literal like "1000", "5.0"), parse value directly as literal.
-                let val_trimmed = value.trim();
-                let eval_val_str = if vt == trainlab_core::scan::ValueType::Ptr
-                    || val_trimmed.starts_with('$')
-                    || val_trimmed.starts_with('[')
-                    || val_trimmed.starts_with("0x")
-                    || val_trimmed.starts_with("0X")
-                    || val_trimmed.contains('+')
-                    || val_trimmed.contains('-')
-                {
-                    match parse_addr_expr(session, value) {
-                        Ok(val_addr) => format!("{val_addr:#x}"),
-                        Err(e) => {
-                            if vt == trainlab_core::scan::ValueType::Ptr || val_trimmed.starts_with('$') || val_trimmed.starts_with('[') || val_trimmed.contains('+') {
-                                return Err(format!("cmd {idx}: failed to resolve value address expression '{value}': {e:?}"));
-                            }
-                            value.clone()
-                        }
+                let vt_lower = vt_str.trim().to_lowercase();
+                let (bytes, eval_val_str) = if vt_lower == "bytes" || vt_lower == "hex" {
+                    let parsed = parse_hex_bytes(&value)
+                        .map_err(|e| format!("cmd {idx}: failed to parse hex bytes '{value}': {e:?}"))?;
+                    if parsed.is_empty() {
+                        return Err(format!("cmd {idx}: empty hex bytes specified for write"));
                     }
+                    let val_copy = value.clone();
+                    (parsed, val_copy)
                 } else {
-                    value.clone()
-                };
+                    let vt = parse_value_type(vt_str)
+                        .map_err(|e| format!("cmd {idx}: invalid value type '{vt_str}': {e:?}"))?;
 
-                let bytes = parse_value_bytes(&eval_val_str, vt)
-                    .map_err(|e| format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}': {e:?}"))?;
+                    // If vt is ptr or value explicitly looks like an address expression (marker, offset math,
+                    // bracket deref, or 0x hex), resolve via parse_addr_expr and fail early with a clear error.
+                    // Otherwise (e.g. integer or float literal like "1000", "5.0"), parse value directly as literal.
+                    let val_trimmed = value.trim();
+                    let eval_val_str = if vt == trainlab_core::scan::ValueType::Ptr
+                        || val_trimmed.starts_with('$')
+                        || val_trimmed.starts_with('[')
+                        || val_trimmed.starts_with("0x")
+                        || val_trimmed.starts_with("0X")
+                        || val_trimmed.contains('+')
+                        || val_trimmed.contains('-')
+                    {
+                        match parse_addr_expr(session, value) {
+                            Ok(val_addr) => format!("{val_addr:#x}"),
+                            Err(e) => {
+                                if vt == trainlab_core::scan::ValueType::Ptr || val_trimmed.starts_with('$') || val_trimmed.starts_with('[') || val_trimmed.contains('+') {
+                                    return Err(format!("cmd {idx}: failed to resolve value address expression '{value}': {e:?}"));
+                                }
+                                value.clone()
+                            }
+                        }
+                    } else {
+                        value.clone()
+                    };
+
+                    let parsed = parse_value_bytes(&eval_val_str, vt)
+                        .map_err(|e| format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}': {e:?}"))?;
+                    (parsed, eval_val_str)
+                };
 
                 // T-101: Read original bytes for undo before writing.
                 let original = game_process(session)
@@ -4913,66 +4925,100 @@ pub(crate) fn execute_profile_commands(
                 }
 
                 let vt_str = value_type.as_deref().unwrap_or("i32");
-                let vt = parse_value_type(vt_str)
-                    .map_err(|e| format!("cmd {idx}: assert bad value_type '{vt_str}': {e:?}"))?;
-                let read_len = vt.size();
+                let vt_lower = vt_str.trim().to_lowercase();
 
-                let read_res = crate::controller::request(
-                    session,
-                    &trainlab_core::protocol::Request::Read { address: target_addr, len: read_len },
-                ).map_err(|e| format!("cmd {idx}: assert read memory failed: {e}"))?;
+                if vt_lower == "bytes" || vt_lower == "hex" {
+                    let exp_clean = expected.trim();
+                    let expected_bytes = parse_hex_bytes(exp_clean)
+                        .map_err(|e| format!("cmd {idx}: assert failed to parse expected hex bytes '{exp_clean}': {e:?}"))?;
+                    if expected_bytes.is_empty() {
+                        return Err(format!("cmd {idx}: assert failed — expected hex bytes cannot be empty"));
+                    }
 
-                match read_res {
-                    trainlab_core::protocol::Response::Read { data } if data.len() == read_len => {
-                        let exp_clean = expected.trim();
-                        let got_val_str = crate::format_value(&data, vt);
+                    let read_len = expected_bytes.len();
+                    let read_res = crate::controller::request(
+                        session,
+                        &trainlab_core::protocol::Request::Read { address: target_addr, len: read_len },
+                    ).map_err(|e| format!("cmd {idx}: assert read memory failed: {e}"))?;
 
-                        if exp_clean == "!0" || exp_clean == "!0x0" || exp_clean == "!0X0" || exp_clean == "!null" {
-                            let val_u64 = match data.len() {
-                                1 => data[0] as u64,
-                                2 => u16::from_le_bytes(data[..2].try_into().unwrap()) as u64,
-                                4 => u32::from_le_bytes(data[..4].try_into().unwrap()) as u64,
-                                8 => u64::from_le_bytes(data[..8].try_into().unwrap()),
-                                _ => 0,
-                            };
-                            if val_u64 == 0 {
-                                return Err(format!("cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) is 0x0 (expected non-null)"));
-                            }
-                            if let Ok(mut s) = session.lock() {
-                                s.log_activity("PROFILE", format!("cmd {idx}: assert non-null @ {addr_str} ({target_addr:#x}) passed ({val_u64:#x})"));
-                            }
-                        } else {
-                            // T-130: Parse the expected value per the value_type and compare.
-                            // If vt is ptr or expected is an address expression (starts with '$', contains '+', etc.),
-                            // resolve via parse_addr_expr first.
-                            let exp_eval_str = if vt == trainlab_core::scan::ValueType::Ptr
-                                || exp_clean.starts_with('$')
-                                || exp_clean.starts_with('[')
-                                || exp_clean.contains('+')
-                                || exp_clean.contains('-')
-                            {
-                                match parse_addr_expr(session, exp_clean) {
-                                    Ok(exp_addr) => format!("{exp_addr:#x}"),
-                                    Err(_) => exp_clean.to_string(),
-                                }
-                            } else {
-                                exp_clean.to_string()
-                            };
-
-                            let expected_bytes = parse_value_bytes(&exp_eval_str, vt)
-                                .map_err(|e| format!("cmd {idx}: assert failed to parse expected value '{exp_clean}': {e:?}"))?;
+                    match read_res {
+                        trainlab_core::protocol::Response::Read { data } if data.len() == read_len => {
                             if data != expected_bytes {
-                                let exp_val_str = crate::format_value(&expected_bytes, vt);
+                                let got_hex = data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                                let exp_hex = expected_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
                                 return Err(format!(
-                                    "cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) == {got_val_str} (expected {exp_val_str})"
+                                    "cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) == {got_hex} (expected {exp_hex})"
                                 ));
                             }
                             if let Ok(mut s) = session.lock() {
-                                s.log_activity("PROFILE", format!("cmd {idx}: assert {got_val_str} == {exp_clean} @ {addr_str} ({target_addr:#x}) passed"));
+                                let exp_hex = expected_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                                s.log_activity("PROFILE", format!("cmd {idx}: assert {exp_hex} (bytes) @ {addr_str} ({target_addr:#x}) passed"));
                             }
                         }
+                        _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
                     }
-                    _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
+                } else {
+                    let vt = parse_value_type(vt_str)
+                        .map_err(|e| format!("cmd {idx}: assert bad value_type '{vt_str}': {e:?}"))?;
+                    let read_len = vt.size();
+
+                    let read_res = crate::controller::request(
+                        session,
+                        &trainlab_core::protocol::Request::Read { address: target_addr, len: read_len },
+                    ).map_err(|e| format!("cmd {idx}: assert read memory failed: {e}"))?;
+
+                    match read_res {
+                        trainlab_core::protocol::Response::Read { data } if data.len() == read_len => {
+                            let exp_clean = expected.trim();
+                            let got_val_str = crate::format_value(&data, vt);
+
+                            if exp_clean == "!0" || exp_clean == "!0x0" || exp_clean == "!0X0" || exp_clean == "!null" {
+                                let val_u64 = match data.len() {
+                                    1 => data[0] as u64,
+                                    2 => u16::from_le_bytes(data[..2].try_into().unwrap()) as u64,
+                                    4 => u32::from_le_bytes(data[..4].try_into().unwrap()) as u64,
+                                    8 => u64::from_le_bytes(data[..8].try_into().unwrap()),
+                                    _ => 0,
+                                };
+                                if val_u64 == 0 {
+                                    return Err(format!("cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) is 0x0 (expected non-null)"));
+                                }
+                                if let Ok(mut s) = session.lock() {
+                                    s.log_activity("PROFILE", format!("cmd {idx}: assert non-null @ {addr_str} ({target_addr:#x}) passed ({val_u64:#x})"));
+                                }
+                            } else {
+                                // T-130: Parse the expected value per the value_type and compare.
+                                // If vt is ptr or expected is an address expression (starts with '$', contains '+', etc.),
+                                // resolve via parse_addr_expr first.
+                                let exp_eval_str = if vt == trainlab_core::scan::ValueType::Ptr
+                                    || exp_clean.starts_with('$')
+                                    || exp_clean.starts_with('[')
+                                    || exp_clean.contains('+')
+                                    || exp_clean.contains('-')
+                                {
+                                    match parse_addr_expr(session, exp_clean) {
+                                        Ok(exp_addr) => format!("{exp_addr:#x}"),
+                                        Err(_) => exp_clean.to_string(),
+                                    }
+                                } else {
+                                    exp_clean.to_string()
+                                };
+
+                                let expected_bytes = parse_value_bytes(&exp_eval_str, vt)
+                                    .map_err(|e| format!("cmd {idx}: assert failed to parse expected value '{exp_clean}': {e:?}"))?;
+                                if data != expected_bytes {
+                                    let exp_val_str = crate::format_value(&expected_bytes, vt);
+                                    return Err(format!(
+                                        "cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) == {got_val_str} (expected {exp_val_str})"
+                                    ));
+                                }
+                                if let Ok(mut s) = session.lock() {
+                                    s.log_activity("PROFILE", format!("cmd {idx}: assert {got_val_str} == {exp_clean} @ {addr_str} ({target_addr:#x}) passed"));
+                                }
+                            }
+                        }
+                        _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
+                    }
                 }
             }
             crate::profile::ProfileCommand::SetMarker { marker, address, .. } => {
@@ -6442,6 +6488,67 @@ cheats: []
         let err_mod = execute_profile_commands(&s, &bad_mod_cmd).unwrap_err();
         // Since no process is attached, resolving helldivers.exe will fail to resolve address expression
         assert!(err_mod.contains("failed to resolve value address expression 'helldivers.exe+0x1a6ae0'"), "got {err_mod}");
+    }
+
+    #[test]
+    fn test_profile_command_write_and_assert_bytes_value_type() {
+        let s = SharedSession::default();
+        {
+            let mut session = s.lock().unwrap();
+            let _ = session.set_marker("glpc_hookspot", 0x140001000, Some("glpc hookspot"));
+        }
+
+        // 1. Assert with empty bytes fails validation
+        let empty_bytes_cmd = vec![
+            crate::profile::ProfileCommand::Assert {
+                address_ref: Some("glpc_hookspot".into()),
+                address: None,
+                expected: "  ".into(),
+                value_type: Some("bytes".into()),
+                note: None,
+            },
+        ];
+        let err_empty = execute_profile_commands(&s, &empty_bytes_cmd).unwrap_err();
+        assert!(err_empty.contains("expected hex bytes cannot be empty"), "got {err_empty}");
+
+        // 2. Assert with invalid hex string fails validation
+        let invalid_hex_cmd = vec![
+            crate::profile::ProfileCommand::Assert {
+                address_ref: Some("glpc_hookspot".into()),
+                address: None,
+                expected: "c5 f8 1".into(), // odd length
+                value_type: Some("bytes".into()),
+                note: None,
+            },
+        ];
+        let err_inv = execute_profile_commands(&s, &invalid_hex_cmd).unwrap_err();
+        assert!(err_inv.contains("assert failed to parse expected hex bytes"), "got {err_inv}");
+
+        // 3. Valid hex string parses cleanly and attempts memory read (fails with read memory failed because no process is attached)
+        let valid_hex_cmd = vec![
+            crate::profile::ProfileCommand::Assert {
+                address_ref: Some("glpc_hookspot".into()),
+                address: None,
+                expected: "c5 f8 10 40 18 c5 f8 11 02 48 8b c2".into(), // 11-byte sequence
+                value_type: Some("bytes".into()),
+                note: None,
+            },
+        ];
+        let err_read = execute_profile_commands(&s, &valid_hex_cmd).unwrap_err();
+        assert!(err_read.contains("assert read memory failed"), "got {err_read}");
+
+        // 4. Write command with bytes value_type
+        let write_bytes_cmd = vec![
+            crate::profile::ProfileCommand::Write {
+                address_ref: Some("glpc_hookspot".into()),
+                address: None,
+                value: "90 90 90 90".into(),
+                value_type: Some("bytes".into()),
+                note: None,
+            },
+        ];
+        let err_write = execute_profile_commands(&s, &write_bytes_cmd).unwrap_err();
+        assert!(err_write.contains("write to glpc_hookspot (0x140001000) failed"), "got {err_write}");
     }
 
     #[test]

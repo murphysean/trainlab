@@ -252,7 +252,7 @@ pub enum ProfileCommand {
         address: Option<String>,
         /// Value string (e.g. "99990" or "0xe890000").
         value: String,
-        /// Optional value_type (e.g. "i32", "f32", "ptr").
+        /// Optional value_type (e.g. "i32", "f32", "ptr", "u64", "bytes" / "hex").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_type: Option<String>,
         /// Optional note / comment.
@@ -379,9 +379,9 @@ pub enum ProfileCommand {
         address_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         address: Option<String>,
-        /// Expected value string (e.g. "0x01", "9999", or non-null check "!0x0").
+        /// Expected value string (e.g. "0x01", "9999", non-null check "!0x0", or hex string "c5 f8 10 40").
         expected: String,
-        /// Optional value type ("i32", "f32", "ptr", "u32").
+        /// Optional value type ("i32", "f32", "ptr", "u32", "u64", "bytes" / "hex").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_type: Option<String>,
         /// Optional note / comment.
