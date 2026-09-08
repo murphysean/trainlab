@@ -945,10 +945,528 @@ fn parse_and_emit_instruction(
                 a.dec(reg).map_err(|e| e.to_string())?;
             }
         }
-        other => return Err(format!("unsupported mnemonic '{other}' in assemble_asm")),
+        "vmovss" => {
+            if args.len() == 2 {
+                if let Ok(dst) = parse_xmm(args[0]) {
+                    if let Ok(src) = parse_xmm(args[1]) {
+                        a.vmovss_3(dst, dst, src).map_err(|e| e.to_string())?;
+                    } else {
+                        let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                        a.vmovss(dst, mem).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let src = parse_xmm(args[1])?;
+                    a.vmovss(dst_mem, src).map_err(|e| e.to_string())?;
+                }
+            } else if args.len() == 3 {
+                let dst = parse_xmm(args[0])?;
+                let src1 = parse_xmm(args[1])?;
+                if let Ok(src2) = parse_xmm(args[2]) {
+                    a.vmovss_3(dst, src1, src2).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.vmovss(dst, mem).map_err(|e| e.to_string())?;
+                }
+            } else {
+                return Err("vmovss requires 2 or 3 operands (e.g. vmovss xmm0, [rax+0x10] or vmovss xmm0, xmm1, xmm2)".into());
+            }
+        }
+        "vmovsd" => {
+            if args.len() == 2 {
+                if let Ok(dst) = parse_xmm(args[0]) {
+                    if let Ok(src) = parse_xmm(args[1]) {
+                        a.vmovsd_3(dst, dst, src).map_err(|e| e.to_string())?;
+                    } else {
+                        let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                        a.vmovsd(dst, mem).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let src = parse_xmm(args[1])?;
+                    a.vmovsd(dst_mem, src).map_err(|e| e.to_string())?;
+                }
+            } else if args.len() == 3 {
+                let dst = parse_xmm(args[0])?;
+                let src1 = parse_xmm(args[1])?;
+                if let Ok(src2) = parse_xmm(args[2]) {
+                    a.vmovsd_3(dst, src1, src2).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.vmovsd(dst, mem).map_err(|e| e.to_string())?;
+                }
+            } else {
+                return Err("vmovsd requires 2 or 3 operands".into());
+            }
+        }
+        "vmovaps" | "vmovups" | "vmovdqa" | "vmovdqu" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands")); }
+            if let Ok(dst) = parse_xmm(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vmovaps" => a.vmovaps(dst, src).map_err(|e| e.to_string())?,
+                        "vmovups" => a.vmovups(dst, src).map_err(|e| e.to_string())?,
+                        "vmovdqa" => a.vmovdqa(dst, src).map_err(|e| e.to_string())?,
+                        "vmovdqu" => a.vmovdqu(dst, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vmovaps" => a.vmovaps(dst, mem).map_err(|e| e.to_string())?,
+                        "vmovups" => a.vmovups(dst, mem).map_err(|e| e.to_string())?,
+                        "vmovdqa" => a.vmovdqa(dst, mem).map_err(|e| e.to_string())?,
+                        "vmovdqu" => a.vmovdqu(dst, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else if let Ok(dst) = parse_ymm(args[0]) {
+                if let Ok(src) = parse_ymm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vmovaps" => a.vmovaps(dst, src).map_err(|e| e.to_string())?,
+                        "vmovups" => a.vmovups(dst, src).map_err(|e| e.to_string())?,
+                        "vmovdqa" => a.vmovdqa(dst, src).map_err(|e| e.to_string())?,
+                        "vmovdqu" => a.vmovdqu(dst, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vmovaps" => a.vmovaps(dst, mem).map_err(|e| e.to_string())?,
+                        "vmovups" => a.vmovups(dst, mem).map_err(|e| e.to_string())?,
+                        "vmovdqa" => a.vmovdqa(dst, mem).map_err(|e| e.to_string())?,
+                        "vmovdqu" => a.vmovdqu(dst, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else {
+                let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                if let Ok(src) = parse_xmm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vmovaps" => a.vmovaps(dst_mem, src).map_err(|e| e.to_string())?,
+                        "vmovups" => a.vmovups(dst_mem, src).map_err(|e| e.to_string())?,
+                        "vmovdqa" => a.vmovdqa(dst_mem, src).map_err(|e| e.to_string())?,
+                        "vmovdqu" => a.vmovdqu(dst_mem, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else if let Ok(src) = parse_ymm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vmovaps" => a.vmovaps(dst_mem, src).map_err(|e| e.to_string())?,
+                        "vmovups" => a.vmovups(dst_mem, src).map_err(|e| e.to_string())?,
+                        "vmovdqa" => a.vmovdqa(dst_mem, src).map_err(|e| e.to_string())?,
+                        "vmovdqu" => a.vmovdqu(dst_mem, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    return Err(format!("unknown source register for {mnemonic}: '{}'", args[1]));
+                }
+            }
+        }
+        "vmovapd" | "vmovupd" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands")); }
+            if let Ok(dst) = parse_xmm(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vmovapd" => a.vmovapd(dst, src).map_err(|e| e.to_string())?,
+                        "vmovupd" => a.vmovupd(dst, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vmovapd" => a.vmovapd(dst, mem).map_err(|e| e.to_string())?,
+                        "vmovupd" => a.vmovupd(dst, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else if let Ok(dst) = parse_ymm(args[0]) {
+                if let Ok(src) = parse_ymm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vmovapd" => a.vmovapd(dst, src).map_err(|e| e.to_string())?,
+                        "vmovupd" => a.vmovupd(dst, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vmovapd" => a.vmovapd(dst, mem).map_err(|e| e.to_string())?,
+                        "vmovupd" => a.vmovupd(dst, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else {
+                let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                if let Ok(src) = parse_xmm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vmovapd" => a.vmovapd(dst_mem, src).map_err(|e| e.to_string())?,
+                        "vmovupd" => a.vmovupd(dst_mem, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else if let Ok(src) = parse_ymm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vmovapd" => a.vmovapd(dst_mem, src).map_err(|e| e.to_string())?,
+                        "vmovupd" => a.vmovupd(dst_mem, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    return Err(format!("unknown source register for {mnemonic}: '{}'", args[1]));
+                }
+            }
+        }
+        "vxorps" | "vandps" | "vandnps" | "vorps" | "vaddss" | "vsubss" | "vmulss" | "vdivss" | "vmaxss" | "vminss" => {
+            if args.len() == 2 {
+                let dst = parse_xmm(args[0])?;
+                if let Ok(src) = parse_xmm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vxorps" => a.vxorps(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vandps" => a.vandps(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vandnps" => a.vandnps(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vorps" => a.vorps(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vaddss" => a.vaddss(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vsubss" => a.vsubss(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vmulss" => a.vmulss(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vdivss" => a.vdivss(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vmaxss" => a.vmaxss(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vminss" => a.vminss(dst, dst, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vxorps" => a.vxorps(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vandps" => a.vandps(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vandnps" => a.vandnps(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vorps" => a.vorps(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vaddss" => a.vaddss(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vsubss" => a.vsubss(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vmulss" => a.vmulss(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vdivss" => a.vdivss(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vmaxss" => a.vmaxss(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vminss" => a.vminss(dst, dst, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else if args.len() == 3 {
+                let dst = parse_xmm(args[0])?;
+                let src1 = parse_xmm(args[1])?;
+                if let Ok(src2) = parse_xmm(args[2]) {
+                    match mnemonic.as_str() {
+                        "vxorps" => a.vxorps(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vandps" => a.vandps(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vandnps" => a.vandnps(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vorps" => a.vorps(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vaddss" => a.vaddss(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vsubss" => a.vsubss(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vmulss" => a.vmulss(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vdivss" => a.vdivss(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vmaxss" => a.vmaxss(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vminss" => a.vminss(dst, src1, src2).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vxorps" => a.vxorps(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vandps" => a.vandps(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vandnps" => a.vandnps(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vorps" => a.vorps(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vaddss" => a.vaddss(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vsubss" => a.vsubss(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vmulss" => a.vmulss(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vdivss" => a.vdivss(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vmaxss" => a.vmaxss(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vminss" => a.vminss(dst, src1, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else {
+                return Err(format!("{mnemonic} requires 2 or 3 operands (e.g. {mnemonic} xmm0, xmm1 or {mnemonic} xmm0, xmm1, xmm2)"));
+            }
+        }
+        "vxorpd" | "vandpd" | "vandnpd" | "vorpd" | "vaddsd" | "vsubsd" | "vmulsd" | "vdivsd" | "vmaxsd" | "vminsd" => {
+            if args.len() == 2 {
+                let dst = parse_xmm(args[0])?;
+                if let Ok(src) = parse_xmm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vxorpd" => a.vxorpd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vandpd" => a.vandpd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vandnpd" => a.vandnpd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vorpd" => a.vorpd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vaddsd" => a.vaddsd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vsubsd" => a.vsubsd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vmulsd" => a.vmulsd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vdivsd" => a.vdivsd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vmaxsd" => a.vmaxsd(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vminsd" => a.vminsd(dst, dst, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vxorpd" => a.vxorpd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vandpd" => a.vandpd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vandnpd" => a.vandnpd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vorpd" => a.vorpd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vaddsd" => a.vaddsd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vsubsd" => a.vsubsd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vmulsd" => a.vmulsd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vdivsd" => a.vdivsd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vmaxsd" => a.vmaxsd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vminsd" => a.vminsd(dst, dst, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else if args.len() == 3 {
+                let dst = parse_xmm(args[0])?;
+                let src1 = parse_xmm(args[1])?;
+                if let Ok(src2) = parse_xmm(args[2]) {
+                    match mnemonic.as_str() {
+                        "vxorpd" => a.vxorpd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vandpd" => a.vandpd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vandnpd" => a.vandnpd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vorpd" => a.vorpd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vaddsd" => a.vaddsd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vsubsd" => a.vsubsd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vmulsd" => a.vmulsd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vdivsd" => a.vdivsd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vmaxsd" => a.vmaxsd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vminsd" => a.vminsd(dst, src1, src2).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vxorpd" => a.vxorpd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vandpd" => a.vandpd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vandnpd" => a.vandnpd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vorpd" => a.vorpd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vaddsd" => a.vaddsd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vsubsd" => a.vsubsd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vmulsd" => a.vmulsd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vdivsd" => a.vdivsd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vmaxsd" => a.vmaxsd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vminsd" => a.vminsd(dst, src1, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else {
+                return Err(format!("{mnemonic} requires 2 or 3 operands"));
+            }
+        }
+        "vcomiss" | "vucomiss" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)")); }
+            let dst = parse_xmm(args[0])?;
+            if let Ok(src) = parse_xmm(args[1]) {
+                if mnemonic == "vcomiss" {
+                    a.vcomiss(dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    a.vucomiss(dst, src).map_err(|e| e.to_string())?;
+                }
+            } else {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                if mnemonic == "vcomiss" {
+                    a.vcomiss(dst, mem).map_err(|e| e.to_string())?;
+                } else {
+                    a.vucomiss(dst, mem).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "vcomisd" | "vucomisd" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)")); }
+            let dst = parse_xmm(args[0])?;
+            if let Ok(src) = parse_xmm(args[1]) {
+                if mnemonic == "vcomisd" {
+                    a.vcomisd(dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    a.vucomisd(dst, src).map_err(|e| e.to_string())?;
+                }
+            } else {
+                let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                if mnemonic == "vcomisd" {
+                    a.vcomisd(dst, mem).map_err(|e| e.to_string())?;
+                } else {
+                    a.vucomisd(dst, mem).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "vcvtsi2ss" => {
+            if args.len() == 2 {
+                let dst = parse_xmm(args[0])?;
+                if let Ok(src) = parse_gpr32(args[1]) {
+                    a.vcvtsi2ss(dst, dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr64(args[1]) {
+                    a.vcvtsi2ss(dst, dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.vcvtsi2ss(dst, dst, mem).map_err(|e| e.to_string())?;
+                }
+            } else if args.len() == 3 {
+                let dst = parse_xmm(args[0])?;
+                let src1 = parse_xmm(args[1])?;
+                if let Ok(src2) = parse_gpr32(args[2]) {
+                    a.vcvtsi2ss(dst, src1, src2).map_err(|e| e.to_string())?;
+                } else if let Ok(src2) = parse_gpr64(args[2]) {
+                    a.vcvtsi2ss(dst, src1, src2).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.vcvtsi2ss(dst, src1, mem).map_err(|e| e.to_string())?;
+                }
+            } else {
+                return Err("vcvtsi2ss requires 2 or 3 operands".into());
+            }
+        }
+        "vcvtsi2sd" => {
+            if args.len() == 2 {
+                let dst = parse_xmm(args[0])?;
+                if let Ok(src) = parse_gpr32(args[1]) {
+                    a.vcvtsi2sd(dst, dst, src).map_err(|e| e.to_string())?;
+                } else if let Ok(src) = parse_gpr64(args[1]) {
+                    a.vcvtsi2sd(dst, dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.vcvtsi2sd(dst, dst, mem).map_err(|e| e.to_string())?;
+                }
+            } else if args.len() == 3 {
+                let dst = parse_xmm(args[0])?;
+                let src1 = parse_xmm(args[1])?;
+                if let Ok(src2) = parse_gpr32(args[2]) {
+                    a.vcvtsi2sd(dst, src1, src2).map_err(|e| e.to_string())?;
+                } else if let Ok(src2) = parse_gpr64(args[2]) {
+                    a.vcvtsi2sd(dst, src1, src2).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.vcvtsi2sd(dst, src1, mem).map_err(|e| e.to_string())?;
+                }
+            } else {
+                return Err("vcvtsi2sd requires 2 or 3 operands".into());
+            }
+        }
+        "vcvttss2si" | "vcvtss2si" => {
+            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} eax, xmm0)")); }
+            if let Ok(dst) = parse_gpr32(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    if mnemonic == "vcvttss2si" {
+                        a.vcvttss2si(dst, src).map_err(|e| e.to_string())?;
+                    } else {
+                        a.vcvtss2si(dst, src).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    if mnemonic == "vcvttss2si" {
+                        a.vcvttss2si(dst, mem).map_err(|e| e.to_string())?;
+                    } else {
+                        a.vcvtss2si(dst, mem).map_err(|e| e.to_string())?;
+                    }
+                }
+            } else if let Ok(dst) = parse_gpr64(args[0]) {
+                if let Ok(src) = parse_xmm(args[1]) {
+                    if mnemonic == "vcvttss2si" {
+                        a.vcvttss2si(dst, src).map_err(|e| e.to_string())?;
+                    } else {
+                        a.vcvtss2si(dst, src).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    if mnemonic == "vcvttss2si" {
+                        a.vcvttss2si(dst, mem).map_err(|e| e.to_string())?;
+                    } else {
+                        a.vcvtss2si(dst, mem).map_err(|e| e.to_string())?;
+                    }
+                }
+            } else {
+                return Err(format!("unsupported destination for {mnemonic}: {}", args[0]));
+            }
+        }
+        "vpxor" => {
+            if args.len() == 2 {
+                let dst = parse_xmm(args[0])?;
+                if let Ok(src) = parse_xmm(args[1]) {
+                    a.vpxor(dst, dst, src).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.vpxor(dst, dst, mem).map_err(|e| e.to_string())?;
+                }
+            } else if args.len() == 3 {
+                let dst = parse_xmm(args[0])?;
+                let src1 = parse_xmm(args[1])?;
+                if let Ok(src2) = parse_xmm(args[2]) {
+                    a.vpxor(dst, src1, src2).map_err(|e| e.to_string())?;
+                } else {
+                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    a.vpxor(dst, src1, mem).map_err(|e| e.to_string())?;
+                }
+            } else {
+                return Err("vpxor requires 2 or 3 operands (e.g. vpxor xmm0, xmm0 or vpxor xmm0, xmm1, xmm2)".into());
+            }
+        }
+        "vpor" | "vpand" | "vpandn" => {
+            if args.len() == 2 {
+                let dst = parse_xmm(args[0])?;
+                if let Ok(src) = parse_xmm(args[1]) {
+                    match mnemonic.as_str() {
+                        "vpor" => a.vpor(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vpand" => a.vpand(dst, dst, src).map_err(|e| e.to_string())?,
+                        "vpandn" => a.vpandn(dst, dst, src).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vpor" => a.vpor(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vpand" => a.vpand(dst, dst, mem).map_err(|e| e.to_string())?,
+                        "vpandn" => a.vpandn(dst, dst, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else if args.len() == 3 {
+                let dst = parse_xmm(args[0])?;
+                let src1 = parse_xmm(args[1])?;
+                if let Ok(src2) = parse_xmm(args[2]) {
+                    match mnemonic.as_str() {
+                        "vpor" => a.vpor(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vpand" => a.vpand(dst, src1, src2).map_err(|e| e.to_string())?,
+                        "vpandn" => a.vpandn(dst, src1, src2).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                } else {
+                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    match mnemonic.as_str() {
+                        "vpor" => a.vpor(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vpand" => a.vpand(dst, src1, mem).map_err(|e| e.to_string())?,
+                        "vpandn" => a.vpandn(dst, src1, mem).map_err(|e| e.to_string())?,
+                        _ => {}
+                    }
+                }
+            } else {
+                return Err(format!("{mnemonic} requires 2 or 3 operands"));
+            }
+        }
+        "vzeroupper" => {
+            a.vzeroupper().map_err(|e| e.to_string())?;
+        }
+        "other" => {}
+        other => return Err(format!(
+            "unsupported mnemonic '{other}' in assemble_asm. Supported families:\n\
+             - Control flow: jmp, call, ret, je/jz, jne/jnz, jg, jge, jl, jle, ja, jae, jb, jbe, js, jns\n\
+             - Integer arithmetic/logic: mov, movabs, add, sub, inc, dec, xor, cmp, test, lea, push, pop, sar, shl, sal, shr, rol, ror\n\
+             - Legacy SSE scalar/packed: movss, movsd, mulss, divss, addss, subss, maxss, minss, comiss, ucomiss, xorps, pxor, por, pand, pandn, movd, movq, cvtsi2ss, cvtsi2sd, cvttss2si, cvtss2si\n\
+             - VEX/AVX scalar/packed: vmovss, vmovsd, vmovaps, vmovups, vmovdqa, vmovdqu, vmovapd, vmovupd, vxorps, vandps, vandnps, vorps, vaddss, vsubss, vmulss, vdivss, vmaxss, vminss, vxorpd, vandpd, vandnpd, vorpd, vaddsd, vsubsd, vmulsd, vdivsd, vmaxsd, vminsd, vcomiss, vucomiss, vcomisd, vucomisd, vcvtsi2ss, vcvtsi2sd, vcvttss2si, vcvtss2si, vpxor, vpor, vpand, vpandn, vzeroupper\n\
+             - Directives & strings: nop, cld, rep movsb, db, dd, dq"
+        )),
     }
 
     Ok(())
+}
+
+fn parse_ymm(s: &str) -> Result<iced_x86::code_asm::AsmRegisterYmm, String> {
+    use iced_x86::code_asm::*;
+    match s.trim().to_lowercase().as_str() {
+        "ymm0" => Ok(ymm0), "ymm1" => Ok(ymm1), "ymm2" => Ok(ymm2), "ymm3" => Ok(ymm3),
+        "ymm4" => Ok(ymm4), "ymm5" => Ok(ymm5), "ymm6" => Ok(ymm6), "ymm7" => Ok(ymm7),
+        "ymm8" => Ok(ymm8), "ymm9" => Ok(ymm9), "ymm10" => Ok(ymm10), "ymm11" => Ok(ymm11),
+        "ymm12" => Ok(ymm12), "ymm13" => Ok(ymm13), "ymm14" => Ok(ymm14), "ymm15" => Ok(ymm15),
+        other => Err(format!("not a ymm register: '{other}'")),
+    }
 }
 
 fn parse_xmm(s: &str) -> Result<iced_x86::code_asm::AsmRegisterXmm, String> {
@@ -1011,8 +1529,17 @@ fn parse_mem(
     let is_byte = s_lower.starts_with("byte ptr [") || s_lower.starts_with("byte [");
     let is_word = s_lower.starts_with("word ptr [") || s_lower.starts_with("word [");
     let is_qword = s_lower.starts_with("qword ptr [") || s_lower.starts_with("qword [");
+    let is_xmmword = s_lower.starts_with("xmmword ptr [") || s_lower.starts_with("xmmword [");
+    let is_ymmword = s_lower.starts_with("ymmword ptr [") || s_lower.starts_with("ymmword [");
 
-    let inner = if let Some(stripped) = s.strip_prefix("dword ptr [").or_else(|| s.strip_prefix("DWORD PTR [")).or_else(|| s.strip_prefix("dword [")).or_else(|| s.strip_prefix("DWORD [")).or_else(|| s.strip_prefix("qword ptr [")).or_else(|| s.strip_prefix("QWORD PTR [")).or_else(|| s.strip_prefix("qword [")).or_else(|| s.strip_prefix("QWORD [")).or_else(|| s.strip_prefix("word ptr [")).or_else(|| s.strip_prefix("WORD PTR [")).or_else(|| s.strip_prefix("word [")).or_else(|| s.strip_prefix("WORD [")).or_else(|| s.strip_prefix("byte ptr [")).or_else(|| s.strip_prefix("BYTE PTR [")).or_else(|| s.strip_prefix("byte [")).or_else(|| s.strip_prefix("BYTE [")).or_else(|| s.strip_prefix('[')) {
+    let inner = if let Some(stripped) = s
+        .strip_prefix("dword ptr [").or_else(|| s.strip_prefix("DWORD PTR [")).or_else(|| s.strip_prefix("dword [")).or_else(|| s.strip_prefix("DWORD ["))
+        .or_else(|| s.strip_prefix("qword ptr [")).or_else(|| s.strip_prefix("QWORD PTR [")).or_else(|| s.strip_prefix("qword [")).or_else(|| s.strip_prefix("QWORD ["))
+        .or_else(|| s.strip_prefix("xmmword ptr [")).or_else(|| s.strip_prefix("XMMWORD PTR [")).or_else(|| s.strip_prefix("xmmword [")).or_else(|| s.strip_prefix("XMMWORD ["))
+        .or_else(|| s.strip_prefix("ymmword ptr [")).or_else(|| s.strip_prefix("YMMWORD PTR [")).or_else(|| s.strip_prefix("ymmword [")).or_else(|| s.strip_prefix("YMMWORD ["))
+        .or_else(|| s.strip_prefix("word ptr [")).or_else(|| s.strip_prefix("WORD PTR [")).or_else(|| s.strip_prefix("word [")).or_else(|| s.strip_prefix("WORD ["))
+        .or_else(|| s.strip_prefix("byte ptr [")).or_else(|| s.strip_prefix("BYTE PTR [")).or_else(|| s.strip_prefix("byte [")).or_else(|| s.strip_prefix("BYTE ["))
+        .or_else(|| s.strip_prefix('[')) {
         stripped.strip_suffix(']').ok_or_else(|| format!("unclosed bracket in '{s}'"))?
     } else {
         return Err(format!("expected memory operand with brackets '[...]', got '{s}'"));
@@ -1027,6 +1554,10 @@ fn parse_mem(
             word_ptr(mem)
         } else if is_qword {
             qword_ptr(mem)
+        } else if is_xmmword {
+            xmmword_ptr(mem)
+        } else if is_ymmword {
+            ymmword_ptr(mem)
         } else {
             dword_ptr(mem)
         }
@@ -1753,6 +2284,69 @@ mod ce_verbatim_porting {
         assert!(err_res.is_err());
         let err = err_res.unwrap_err();
         assert!(err.contains("exceeds ±2GB limit"), "Expected diagnostic displacement overflow message, got: {err}");
+    }
+
+    #[test]
+    fn test_vex_avx_mnemonics_assembly() {
+        let symbols = HashMap::new();
+
+        // 1. 2-operand and 3-operand vmovss and vmovsd
+        let vmov_code = r#"
+            vmovss xmm0, [rax + 0x10]
+            vmovss [rcx + 0x20], xmm1
+            vmovss xmm0, xmm1
+            vmovss xmm0, xmm1, xmm2
+            vmovss xmm0, xmm1, [rdx + 0x30]
+            vmovsd xmm3, [rax + 0x40]
+            vmovsd xmm3, xmm4, xmm5
+            vmovsd xmm3, xmm4, [r8 + 0x50]
+        "#;
+        let res_vmov = assemble_text(vmov_code, 0x140000000, &symbols).expect("assemble vmovss/vmovsd");
+        assert_eq!(res_vmov.instruction_count, 8);
+        // VEX prefix bytes start with c4 or c5
+        assert!(res_vmov.bytes.iter().any(|b| *b == 0xc4 || *b == 0xc5));
+
+        // 2. Vector arithmetic & logic: vxorps, vandps, vorps, vaddss, vsubss, vmulss, vdivss
+        let vex_math = r#"
+            vxorps xmm0, xmm0
+            vxorps xmm1, xmm2, xmm3
+            vandps xmm4, xmm4, [rbx + 0x18]
+            vorps xmm5, xmm6, xmm7
+            vaddss xmm0, xmm1, xmm2
+            vsubss xmm3, xmm3, [rsp + 0x20]
+            vmulss xmm4, xmm5, xmm6
+            vdivss xmm7, xmm0, xmm1
+            vmaxss xmm2, xmm2, xmm3
+            vminss xmm4, xmm4, xmm5
+            vpxor xmm0, xmm0
+            vpxor xmm1, xmm2, xmm3
+            vpand xmm4, xmm5, xmm6
+            vpor xmm7, xmm0, xmm1
+            vzeroupper
+        "#;
+        let res_math = assemble_text(vex_math, 0x140000000, &symbols).expect("assemble vex math");
+        assert_eq!(res_math.instruction_count, 15);
+
+        // 3. Comparisons and conversions: vcomiss, vucomiss, vcvtsi2ss, vcvttss2si
+        let vex_cmp = r#"
+            vcomiss xmm0, xmm1
+            vucomiss xmm2, [rax + 0x08]
+            vcvtsi2ss xmm0, xmm0, eax
+            vcvtsi2ss xmm1, xmm1, rdx
+            vcvttss2si eax, xmm0
+            vcvttss2si rbx, xmm1
+        "#;
+        let res_cmp = assemble_text(vex_cmp, 0x140000000, &symbols).expect("assemble vex cmp/cvt");
+        assert_eq!(res_cmp.instruction_count, 6);
+
+        // 4. YMM and packed 256-bit moves: vmovaps, vmovups, ymmword ptr
+        let vex_ymm = r#"
+            vmovaps ymm0, ymm1
+            vmovaps ymm2, ymmword ptr [rax + 0x80]
+            vmovups ymmword ptr [rcx], ymm3
+        "#;
+        let res_ymm = assemble_text(vex_ymm, 0x140000000, &symbols).expect("assemble ymm moves");
+        assert_eq!(res_ymm.instruction_count, 3);
     }
 }
 
