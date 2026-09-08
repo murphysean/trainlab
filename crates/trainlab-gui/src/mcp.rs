@@ -50,7 +50,11 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
         unsafe { CloseHandle(handle); }
         ok != 0 && exit_code == 259 // STILL_ACTIVE == 259
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        trainlab_core::process::is_pid_alive(pid)
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = pid;
         true
@@ -99,10 +103,14 @@ pub(crate) fn game_process(
                 }
             })
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        Ok(Box::new(trainlab_core::memory::unix::LinuxProcess::new(pid as i32)))
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = pid;
-        Err(err("external scan requires the Windows GUI"))
+        Err(err("external scan is not supported on this platform"))
     }
 }
 
@@ -1646,7 +1654,13 @@ impl TrainlabMcpServer {
                 raw_dll.to_string()
             } else if let Ok(exe) = std::env::current_exe() {
                 exe.parent()
-                    .map(|d| d.join(raw_dll).to_string_lossy().into_owned())
+                    .map(|d| {
+                        if raw_dll == "trainlab_inject.dll" && d.join("trainlab.dll").exists() {
+                            d.join("trainlab.dll").to_string_lossy().into_owned()
+                        } else {
+                            d.join(raw_dll).to_string_lossy().into_owned()
+                        }
+                    })
                     .unwrap_or_else(|| raw_dll.to_string())
             } else {
                 raw_dll.to_string()
@@ -1741,19 +1755,62 @@ impl TrainlabMcpServer {
             }
         }
 
+        // Track starting undo ID to automatically rollback any init mutations if load_profile fails mid-way.
+        let init_undo_start_id = {
+            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            s.undo_log().last().map(|u| u.id + 1).unwrap_or(1)
+        };
+
+        let rollback_init_mutations = |session: &SharedSession, reason: &str| {
+            let undos_to_revert = if let Ok(mut s) = session.lock() {
+                s.log_activity("PROFILE", format!("rolling back init mutations due to error: {reason}"));
+                s.drain_undos_since(init_undo_start_id)
+            } else {
+                Vec::new()
+            };
+
+            for entry in undos_to_revert {
+                if entry.original_bytes.is_empty() {
+                    continue;
+                }
+                match call_dll(session, &Request::Write {
+                    address: entry.address,
+                    data: entry.original_bytes.clone(),
+                }) {
+                    Ok(Response::Write { bytes_written }) => {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity("PROFILE", format!("auto-reverted init mutation at {:#x} (restored {} bytes)", entry.address, bytes_written));
+                        }
+                    }
+                    Ok(Response::Error { message }) => {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity("PROFILE", format!("failed to auto-revert init mutation at {:#x}: {message}", entry.address));
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity("PROFILE", format!("failed to send auto-revert write at {:#x}: {e}", entry.address));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+
         // Execute profile init_commands if defined so memory markers and allocations are established
         if let Some(init_cmds) = &profile.init_commands
             && !init_cmds.is_empty() {
                 if let Ok(mut s) = self.session.lock() {
                     s.log_activity("PROFILE", format!("executing {} profile init_command(s)...", init_cmds.len()));
                 }
-                execute_profile_commands(&self.session, init_cmds).map_err(|e| {
+                if let Err(e) = execute_profile_commands(&self.session, init_cmds) {
                     let err_msg = format!("profile init_commands failed: {e}");
+                    rollback_init_mutations(&self.session, &err_msg);
                     if let Ok(mut s) = self.session.lock() {
                         s.log_activity("PROFILE", &err_msg);
                     }
-                    err(err_msg)
-                })?;
+                    return Err(err(err_msg));
+                }
             }
 
         // Materialize cheats and setup markers into the session.
@@ -1775,8 +1832,22 @@ impl TrainlabMcpServer {
         for pc in &profile.cheats {
             let kind = match pc.kind.as_str() {
                 "value" => {
-                    let address = resolve_cheat_address(&resolved, pc)?;
-                    let vt = parse_value_type(pc.value_type.as_deref().unwrap_or("i32"))?;
+                    let address = match resolve_cheat_address(&resolved, pc) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            drop(s);
+                            rollback_init_mutations(&self.session, &e.message);
+                            return Err(e);
+                        }
+                    };
+                    let vt = match parse_value_type(pc.value_type.as_deref().unwrap_or("i32")) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            drop(s);
+                            rollback_init_mutations(&self.session, &e.message);
+                            return Err(e);
+                        }
+                    };
                     crate::session::CheatKind::Value {
                         address,
                         value_type: vt,
@@ -1794,7 +1865,14 @@ impl TrainlabMcpServer {
                     }
                 }
                 "toggle" => {
-                    let target = resolve_cheat_address(&resolved, pc)?;
+                    let target = match resolve_cheat_address(&resolved, pc) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            drop(s);
+                            rollback_init_mutations(&self.session, &e.message);
+                            return Err(e);
+                        }
+                    };
                     // If the cheat provides Cheat-Engine-style assembly text, assemble it now
                     // (origin = target, since the cave payload is emitted relative to it for
                     // the RIP-relative constant slots) to produce the shellcode payload bytes.
@@ -1805,12 +1883,26 @@ impl TrainlabMcpServer {
                             .map(|m| (m.label.clone(), m.address))
                             .collect();
                         let origin = target;
-                        let block = crate::asm::assemble_text(asm_src, origin, &symbols)
-                            .map_err(|e| err(format!("asm for cheat '{}' failed: {e}", pc.id)))?;
+                        let block = match crate::asm::assemble_text(asm_src, origin, &symbols) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                drop(s);
+                                let err_msg = format!("asm for cheat '{}' failed: {e}", pc.id);
+                                rollback_init_mutations(&self.session, &err_msg);
+                                return Err(err(err_msg));
+                            }
+                        };
                         s.log_activity("PROFILE", format!("cheat '{}' assembled {} byte(s) from asm", pc.id, block.bytes.len()));
                         block.bytes
                     } else {
-                        parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?
+                        match parse_hex_bytes(pc.payload.as_deref().unwrap_or("")) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                drop(s);
+                                rollback_init_mutations(&self.session, &e.message);
+                                return Err(e);
+                            }
+                        }
                     };
                     let jump_style = match pc.jump.as_deref().unwrap_or("absolute") {
                         "relative" => trainlab_core::cave_hook::JumpStyle::Relative,
@@ -1819,7 +1911,12 @@ impl TrainlabMcpServer {
                     let hook = match pc.hook.as_deref().unwrap_or("trampoline") {
                         "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline { payload, jump: jump_style },
                         "override" => trainlab_core::cave_hook::CaveHook::Override { payload, jump: jump_style },
-                        other => return Err(err(format!("unknown hook '{other}'"))),
+                        other => {
+                            drop(s);
+                            let err_msg = format!("unknown hook '{other}'");
+                            rollback_init_mutations(&self.session, &err_msg);
+                            return Err(err(err_msg));
+                        }
                     };
                     let host = s.dll_host().to_string();
                     let port = s.dll_port();
@@ -1845,8 +1942,22 @@ impl TrainlabMcpServer {
                     }
                 }
                 "patch" => {
-                    let target = resolve_cheat_address(&resolved, pc)?;
-                    let patch_bytes = parse_hex_bytes(pc.payload.as_deref().unwrap_or(""))?;
+                    let target = match resolve_cheat_address(&resolved, pc) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            drop(s);
+                            rollback_init_mutations(&self.session, &e.message);
+                            return Err(e);
+                        }
+                    };
+                    let patch_bytes = match parse_hex_bytes(pc.payload.as_deref().unwrap_or("")) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            drop(s);
+                            rollback_init_mutations(&self.session, &e.message);
+                            return Err(e);
+                        }
+                    };
                     let host = s.dll_host().to_string();
                     let port = s.dll_port();
                     let original_bytes = if let Some(orig_hex) = &pc.original_bytes {
@@ -1869,7 +1980,12 @@ impl TrainlabMcpServer {
                     let cmds = pc.commands.clone().unwrap_or_default();
                     crate::session::CheatKind::Button { commands: cmds }
                 }
-                other => return Err(err(format!("unknown cheat kind '{other}'"))),
+                other => {
+                    drop(s);
+                    let err_msg = format!("unknown cheat kind '{other}'");
+                    rollback_init_mutations(&self.session, &err_msg);
+                    return Err(err(err_msg));
+                }
             };
             let is_hidden = pc.hidden.unwrap_or(false);
             s.add_cheat_group(&pc.label, kind, pc.group.as_deref(), pc.hotkey.as_deref(), is_hidden, pc.note.as_deref());
@@ -3926,6 +4042,20 @@ impl TrainlabMcpServer {
         let Some(e) = entry else {
             return Err(err("nothing to undo"));
         };
+
+        // Guard against corrupted undo entries whose recorded "original bytes"
+        // match another trainer jump hook (e.g. E9, EB, or FF 25).
+        if trainlab_core::cave_hook::is_hook_jump_bytes(&e.original_bytes) {
+            let warn_msg = format!(
+                "CRITICAL SAFETY REFUSAL: undo entry #{} recorded original bytes at {:#x} match an active jump hook signature ({:02x?}). \
+                Restoring this would re-inject a jump into a potentially dead code cave. Revert aborted to prevent game crash.",
+                e.id, e.address, e.original_bytes
+            );
+            if let Ok(mut s) = self.session.lock() {
+                s.log_activity("mcp", &warn_msg);
+            }
+            return Err(err(warn_msg));
+        }
 
         match call_dll(&self.session, &Request::Write {
             address: e.address,

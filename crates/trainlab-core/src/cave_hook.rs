@@ -44,3 +44,19 @@ pub enum CaveHook {
         jump: JumpStyle,
     },
 }
+
+/// Check whether a slice of bytes matches a jump hook signature (e.g. `E9 rel32`,
+/// `EB rel8`, or `FF 25 00 00 00 00`).
+///
+/// Used to guard undo/revert and cave installation against treating another hook's
+/// jump bytes as "original code".
+pub fn is_hook_jump_bytes(bytes: &[u8]) -> bool {
+    if bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
+        true
+    } else if !bytes.is_empty() && (bytes[0] == 0xE9 || bytes[0] == 0xEB) {
+        true
+    } else {
+        false
+    }
+}
+

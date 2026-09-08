@@ -2034,6 +2034,16 @@ pub fn execute_undo_revert(
     };
     let entry = entry.ok_or_else(|| err(format!("undo entry #{} not found", args.id)))?;
 
+    // Guard against corrupted undo entries whose recorded "original bytes"
+    // match another trainer jump hook (e.g. E9, EB, or FF 25).
+    if crate::cave_hook::is_hook_jump_bytes(&entry.original_bytes) {
+        return Err(err(format!(
+            "CRITICAL SAFETY REFUSAL: undo entry #{} recorded original bytes at {:#x} match an active jump hook signature ({:02x?}). \
+            Restoring this would re-inject a jump into a potentially dead code cave. Revert aborted to prevent game crash.",
+            entry.id, entry.address, entry.original_bytes
+        )));
+    }
+
     // Write back original bytes
     mem.write(entry.address, &entry.original_bytes)
         .map_err(|e| err(format!("failed to revert memory at {:#x}: {e}", entry.address)))?;

@@ -839,6 +839,15 @@ impl SessionState {
     /// Record the DLL's reported version.
     pub fn set_inject_version(&mut self, version: Option<String>) {
         self.inject_version = version;
+        if let SessionLifecycle::Connected { pid, exe_name, .. } = &self.lifecycle {
+            let pid = *pid;
+            let exe_name = exe_name.clone();
+            self.set_lifecycle(SessionLifecycle::Connected {
+                pid,
+                exe_name,
+                dll_version: self.inject_version.clone(),
+            });
+        }
     }
 
     /// Get the DLL's reported version.
@@ -1127,6 +1136,22 @@ impl SessionState {
     /// Get a slice of all recorded undo entries.
     pub fn undo_log(&self) -> &[UndoEntry] {
         &self.undo_log
+    }
+
+    /// Extract and remove all undo entries recorded after or at `start_id`,
+    /// returned in reverse chronological order (newest first) for safe rollback.
+    pub fn drain_undos_since(&mut self, start_id: u64) -> Vec<UndoEntry> {
+        let mut to_rollback = Vec::new();
+        self.undo_log.retain(|e| {
+            if e.id >= start_id {
+                to_rollback.push(e.clone());
+                false
+            } else {
+                true
+            }
+        });
+        to_rollback.reverse();
+        to_rollback
     }
 
     /// Find the most recent recorded original bytes for a target address.

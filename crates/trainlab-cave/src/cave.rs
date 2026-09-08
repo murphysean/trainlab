@@ -115,7 +115,11 @@ where
     // - Absolute jump hook: starts with `FF 25 00 00 00 00` (jmp [rip+0])
     // - Relative jump hook: starts with `E9`
     // - Direct jump / short hook: `EB`
-    if buf.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) || (!buf.is_empty() && (buf[0] == 0xE9 || buf[0] == 0xEB)) {
+    if buf.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
+        return Err(format!(
+            "target {target:#x} is already hooked (starts with absolute jmp FF 25 00 00 00 00); sequence aborted to prevent double-hook corruption"
+        ));
+    } else if !buf.is_empty() && (buf[0] == 0xE9 || buf[0] == 0xEB) {
         return Err(format!(
             "target {target:#x} is already hooked (starts with jmp opcode {:02x}); sequence aborted to prevent double-hook corruption",
             buf[0]
