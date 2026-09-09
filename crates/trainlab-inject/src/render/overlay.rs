@@ -20,8 +20,22 @@ static ACTIVE_TAB: AtomicU64 = AtomicU64::new(0);
 static SELECTED_INDEX: AtomicU64 = AtomicU64::new(0);
 
 // Stick debounce / trigger state
-static STICK_TRIGGERED_Y: AtomicBool = AtomicBool::new(false);
-static STICK_TRIGGERED_X: AtomicBool = AtomicBool::new(false);
+// PER-SLOT (one entry per XInput controller slot): with several controllers connected,
+// a game polls every pad in rotation. A shared latch would be cleared by an idle pad's
+// neutral-stick read while another pad holds its stick deflected -> the held direction
+// re-fires every poll (machine-gun scrolling).
+pub static STICK_TRIGGERED_Y: [AtomicBool; 4] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
+pub static STICK_TRIGGERED_X: [AtomicBool; 4] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
 
 // Active trigger flash feedback: (cheat_id, Instant of trigger)
 static TRIGGER_FLASH: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
@@ -91,7 +105,11 @@ fn get_active_tab_item_count() -> usize {
 }
 
 /// Push controller button state changes and analog stick deflection into egui events.
-pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
+///
+/// `slot` identifies which XInput controller generated the input (0-3), so stick
+/// debounce latches are tracked per-controller and one pad's idle polling cannot
+/// reset another pad's held-direction latch.
+pub fn push_controller_input(slot: usize, just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
     let mut events = Vec::new();
     let cheats_snap = CHEATS.lock().map(|c| c.clone()).unwrap_or_default();
     let categories = get_categories(&cheats_snap);
@@ -124,14 +142,14 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
     let mut move_down = (just_pressed & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
 
     if stick_neutral_y {
-        STICK_TRIGGERED_Y.store(false, Ordering::Relaxed);
-    } else if !STICK_TRIGGERED_Y.load(Ordering::Relaxed) {
+        STICK_TRIGGERED_Y[slot].store(false, Ordering::Relaxed);
+    } else if !STICK_TRIGGERED_Y[slot].load(Ordering::Relaxed) {
         if stick_up {
             move_up = true;
-            STICK_TRIGGERED_Y.store(true, Ordering::Relaxed);
+            STICK_TRIGGERED_Y[slot].store(true, Ordering::Relaxed);
         } else if stick_down {
             move_down = true;
-            STICK_TRIGGERED_Y.store(true, Ordering::Relaxed);
+            STICK_TRIGGERED_Y[slot].store(true, Ordering::Relaxed);
         }
     }
 
@@ -143,14 +161,14 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
     let mut move_right = (just_pressed & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
 
     if stick_neutral_x {
-        STICK_TRIGGERED_X.store(false, Ordering::Relaxed);
-    } else if !STICK_TRIGGERED_X.load(Ordering::Relaxed) {
+        STICK_TRIGGERED_X[slot].store(false, Ordering::Relaxed);
+    } else if !STICK_TRIGGERED_X[slot].load(Ordering::Relaxed) {
         if stick_left {
             move_left = true;
-            STICK_TRIGGERED_X.store(true, Ordering::Relaxed);
+            STICK_TRIGGERED_X[slot].store(true, Ordering::Relaxed);
         } else if stick_right {
             move_right = true;
-            STICK_TRIGGERED_X.store(true, Ordering::Relaxed);
+            STICK_TRIGGERED_X[slot].store(true, Ordering::Relaxed);
         }
     }
 

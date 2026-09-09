@@ -50,6 +50,28 @@ static ORIGINAL_XINPUT_GET_STATE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::n
 static COMBO_WAS_DOWN: AtomicBool = AtomicBool::new(false);
 static PREV_BUTTONS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
+// Per-controller (per XInput user slot) input state. Games poll EVERY connected
+// controller through XInputGetState in rotation, several times per frame. If edge
+// latches are shared process-wide, an idle read from controller B resets the latch
+// for controller A, so a HELD d-pad/stick direction re-fires "just pressed" every
+// poll -> machine-gun scrolling in the overlay. All edge state must therefore be
+// keyed by `user_index`.
+// Index layout: [slot][0]=prev_buttons, [slot][1]=combo_was_down, [slot][2]=stick_y,
+// [slot][3]=stick_x.
+const XINPUT_SLOT_COUNT: usize = 4;
+static SLOT_PREV_BUTTONS: [std::sync::atomic::AtomicU16; XINPUT_SLOT_COUNT] = [
+    std::sync::atomic::AtomicU16::new(0),
+    std::sync::atomic::AtomicU16::new(0),
+    std::sync::atomic::AtomicU16::new(0),
+    std::sync::atomic::AtomicU16::new(0),
+];
+static SLOT_COMBO_WAS_DOWN: [AtomicBool; XINPUT_SLOT_COUNT] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
+
 /// Hooked `XInputGetState` callback with full input proxying to egui.
 pub unsafe extern "system" fn hooked_xinput_get_state(
     user_index: u32,
@@ -64,6 +86,15 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
     };
 
     if ret == 0 && !state.is_null() {
+        // Clamp the controller slot: XInputGetState technically accepts any dwUserIndex,
+        // but games use 0..3. Everything outside is folded onto slot 0 rather than
+        // panicking / wrapping on the fixed-size arrays below.
+        let slot = (user_index as usize) % XINPUT_SLOT_COUNT;
+
+        // Per-slot "combo just fired this press" latch: once a combo edge has toggled the
+        // overlay for THIS controller, suppress re-triggering until the combo is released
+        // on that same controller.
+        let combo_was_down = &SLOT_COMBO_WAS_DOWN[slot];
         let buttons = unsafe { (*state).Gamepad.wButtons };
         let back_start = (buttons & (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START))
             == (XINPUT_GAMEPAD_BACK | XINPUT_GAMEPAD_START);
@@ -71,7 +102,7 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
             == (XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB);
 
         if back_start || sticks {
-            if !COMBO_WAS_DOWN.swap(true, Ordering::Relaxed) {
+            if !combo_was_down.swap(true, Ordering::Relaxed) {
                 // Combo just pressed: Toggle overlay!
                 let count = super::STATE
                     .combo_press_count
@@ -89,7 +120,7 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
                     use std::io::Write;
                     let _ = writeln!(
                         f,
-                        "[COMBO] #{count} (back_start={back_start}, sticks={sticks}) -> overlay_visible={visible}"
+                        "[COMBO] #{count} slot{slot} (back_start={back_start}, sticks={sticks}) -> overlay_visible={visible}"
                     );
                 }
             }
@@ -99,20 +130,21 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
             }
             return ret;
         } else {
-            COMBO_WAS_DOWN.store(false, Ordering::Relaxed);
+            combo_was_down.store(false, Ordering::Relaxed);
         }
 
         let overlay_active = super::STATE.overlay_visible.load(Ordering::Relaxed);
         if overlay_active {
             // Overlay is ACTIVE: Translate buttons & sticks into egui navigation events
-            let prev = PREV_BUTTONS.swap(buttons, Ordering::Relaxed);
+            let prev = SLOT_PREV_BUTTONS[slot].swap(buttons, Ordering::Relaxed);
             let just_pressed = buttons & !prev;
 
             let thumb_ly = unsafe { (*state).Gamepad.sThumbLY };
             let thumb_lx = unsafe { (*state).Gamepad.sThumbLX };
 
-            // Route to egui event queue
-            super::overlay::push_controller_input(just_pressed, thumb_ly, thumb_lx);
+            // Route to egui event queue (stick latches in push_controller_input are
+            // per-slot; one pad's idle polling cannot clear another pad's held latch).
+            super::overlay::push_controller_input(slot, just_pressed, thumb_ly, thumb_lx);
 
             // MASK OUT game buttons so game receives ZERO input while overlay is open
             unsafe {
@@ -125,7 +157,7 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
                 (*state).Gamepad.bRightTrigger = 0;
             }
         } else {
-            PREV_BUTTONS.store(0, Ordering::Relaxed);
+            SLOT_PREV_BUTTONS[slot].store(0, Ordering::Relaxed);
         }
     }
 
