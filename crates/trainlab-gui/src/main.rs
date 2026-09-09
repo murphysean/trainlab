@@ -365,6 +365,12 @@ impl TrainlabApp {
                     // If a matching profile exists, overlay its render and network configuration into initial handshake
                     if let Some((_, prof)) = &matched_profile {
                         if let Some(render_cfg) = &prof.render {
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("UI", format!(
+                                    "RENDER: profile render block OVERRIDES app config — overlay={}, wndproc={}, xinput={} (profile values; app config ignored)",
+                                    render_cfg.overlay, render_cfg.hook_wndproc, render_cfg.xinput_hooks,
+                                ));
+                            }
                             features.display.overlay = render_cfg.overlay;
                             features.input.wndproc = render_cfg.hook_wndproc;
                             features.input.xinput = render_cfg.xinput_hooks;
