@@ -13,11 +13,11 @@
 /// is running. Uses `CreateToolhelp32Snapshot` + `Process32FirstW/NextW`.
 #[cfg(windows)]
 pub fn find_game(exe_name: &str) -> Option<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 
     let target_clean = std::path::Path::new(exe_name)
         .file_name()
@@ -72,12 +72,14 @@ pub struct ProcessInfo {
 /// the raw API; use [`find_game_candidates`] to narrow to likely games.
 #[cfg(windows)]
 pub fn list_processes() -> Vec<ProcessInfo> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
 
     let mut out = Vec::new();
     // SAFETY: snapshot handle is a valid HANDLE; we close it on all paths.
@@ -97,15 +99,21 @@ pub fn list_processes() -> Vec<ProcessInfo> {
 
             // Try to resolve full image path via QueryFullProcessImageNameW
             let mut full_path = None;
-            let proc_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID) };
+            let proc_handle =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID) };
             if !proc_handle.is_null() {
                 let mut path_buf = [0u16; 1024];
                 let mut size = path_buf.len() as u32;
-                if unsafe { QueryFullProcessImageNameW(proc_handle, 0, path_buf.as_mut_ptr(), &mut size) } != 0 {
+                if unsafe {
+                    QueryFullProcessImageNameW(proc_handle, 0, path_buf.as_mut_ptr(), &mut size)
+                } != 0
+                {
                     let path_str = String::from_utf16_lossy(&path_buf[..size as usize]);
                     full_path = Some(path_str);
                 }
-                unsafe { CloseHandle(proc_handle); }
+                unsafe {
+                    CloseHandle(proc_handle);
+                }
             }
 
             out.push(ProcessInfo {
@@ -135,12 +143,41 @@ fn looks_like_game(name: &str) -> bool {
     let n = name.to_lowercase();
     // Exclude known system / background / tooling processes.
     const NON_GAMES: &[&str] = &[
-        "svchost", "explorer", "csrss", "wininit", "winlogon", "services", "lsass",
-        "smss", "dwm", "conhost", "cmd", "powershell", "pwsh", "taskmgr", "notepad",
-        "wine", "wineserver", "winedevice", "services.exe", "rundll32", "dllhost",
-        "sihost", "taskhostw", "fontdrvhost", "spoolsv", "searchindexer", "audiodg",
-        "steam", "steamwebhelper", "steamservice", "steamclient", "gameoverlayui",
-        "trainlab", "trainlab-gui", "trainlab_inject",
+        "svchost",
+        "explorer",
+        "csrss",
+        "wininit",
+        "winlogon",
+        "services",
+        "lsass",
+        "smss",
+        "dwm",
+        "conhost",
+        "cmd",
+        "powershell",
+        "pwsh",
+        "taskmgr",
+        "notepad",
+        "wine",
+        "wineserver",
+        "winedevice",
+        "services.exe",
+        "rundll32",
+        "dllhost",
+        "sihost",
+        "taskhostw",
+        "fontdrvhost",
+        "spoolsv",
+        "searchindexer",
+        "audiodg",
+        "steam",
+        "steamwebhelper",
+        "steamservice",
+        "steamclient",
+        "gameoverlayui",
+        "trainlab",
+        "trainlab-gui",
+        "trainlab_inject",
     ];
     if NON_GAMES.iter().any(|s| n.contains(s)) {
         return false;
@@ -179,14 +216,14 @@ pub fn find_game_candidates() -> Vec<ProcessInfo> {
 /// Returns `Ok(())` on success, or an error string.
 #[cfg(windows)]
 pub fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
+    use windows_sys::Win32::Foundation::{BOOL, CloseHandle, HANDLE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     use windows_sys::Win32::System::Memory::{
-        VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx, VirtualFreeEx,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateRemoteThread, OpenProcess, WaitForSingleObject, INFINITE, PROCESS_ALL_ACCESS,
+        CreateRemoteThread, INFINITE, OpenProcess, PROCESS_ALL_ACCESS, WaitForSingleObject,
     };
 
     // The path must be a null-terminated ANSI string for LoadLibraryA.
@@ -217,7 +254,9 @@ pub fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
         let err = unsafe { GetLastError() };
         // SAFETY: process is a valid handle.
         unsafe { CloseHandle(process) };
-        return Err(format!("VirtualAllocEx failed (pid {pid}, size {path_len}, winerr {err})"));
+        return Err(format!(
+            "VirtualAllocEx failed (pid {pid}, size {path_len}, winerr {err})"
+        ));
     }
 
     // SAFETY: WriteProcessMemory writes path_bytes into the target's memory.
@@ -238,7 +277,9 @@ pub fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
             VirtualFreeEx(process, remote_addr, 0, MEM_RELEASE);
             CloseHandle(process);
         }
-        return Err(format!("WriteProcessMemory failed (pid {pid}, addr {remote_addr:p}, len {path_len}, written {written}, winerr {err})"));
+        return Err(format!(
+            "WriteProcessMemory failed (pid {pid}, addr {remote_addr:p}, len {path_len}, written {written}, winerr {err})"
+        ));
     }
 
     // Resolve LoadLibraryA's address in kernel32 (same in every process).
@@ -271,9 +312,10 @@ pub fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
             process,
             std::ptr::null(),
             0,
-            Some(std::mem::transmute::<_, unsafe extern "system" fn(*mut core::ffi::c_void) -> u32>(
-                loadlib,
-            )),
+            Some(std::mem::transmute::<
+                _,
+                unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+            >(loadlib)),
             remote_addr as *const core::ffi::c_void,
             0,
             &mut thread_id,
@@ -303,23 +345,165 @@ pub fn inject_dll(pid: u32, dll_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Non-Windows stubs so the crate still compiles on Linux.
-#[cfg(not(windows))]
+/// Unix implementation using /proc enumeration.
+#[cfg(unix)]
+fn looks_like_linux_game(name: &str, path: Option<&str>) -> bool {
+    let n = name.to_lowercase();
+    const NON_GAMES: &[&str] = &[
+        "systemd",
+        "kworker",
+        "bash",
+        "sh",
+        "zsh",
+        "sshd",
+        "ssh",
+        "tmux",
+        "screen",
+        "pulseaudio",
+        "pipewire",
+        "wireplumber",
+        "dbus",
+        "gnome",
+        "kde",
+        "x11",
+        "wayland",
+        "steam",
+        "steamwebhelper",
+        "steamservice",
+        "steamclient",
+        "gameoverlayui",
+        "pressure-vessel",
+        "srt-bwrap",
+        "pv-adverb",
+        "trainlab",
+        "trainlab-gui",
+        "trainlab_inject",
+    ];
+    if NON_GAMES.iter().any(|s| n.contains(s)) {
+        return false;
+    }
+    if let Some(p) = path {
+        let p_lower = p.to_lowercase();
+        if p_lower.contains("/usr/bin/")
+            || p_lower.contains("/usr/sbin/")
+            || p_lower.contains("/usr/lib/")
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(unix)]
+pub fn list_processes() -> Vec<ProcessInfo> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name_str = file_name.to_string_lossy();
+            if let Ok(pid) = name_str.parse::<u32>() {
+                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let path = std::fs::read_link(format!("/proc/{pid}/exe"))
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned());
+
+                let display_name = if !comm.is_empty() {
+                    comm
+                } else if let Some(ref p) = path {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| pid.to_string())
+                } else {
+                    continue;
+                };
+
+                out.push(ProcessInfo {
+                    name: display_name,
+                    pid,
+                    path,
+                });
+            }
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
+pub fn find_game(exe_name: &str) -> Option<u32> {
+    let target = exe_name.trim().to_lowercase();
+    let target_clean = std::path::Path::new(exe_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(exe_name)
+        .trim()
+        .to_lowercase();
+    let target_no_ext = target_clean.trim_end_matches(".exe");
+
+    let procs = list_processes();
+    for p in &procs {
+        let name_lower = p.name.to_lowercase();
+        let name_clean = std::path::Path::new(&p.name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&p.name)
+            .trim()
+            .to_lowercase();
+        let name_no_ext = name_clean.trim_end_matches(".exe");
+
+        if name_lower == target || name_clean == target_clean || name_no_ext == target_no_ext {
+            return Some(p.pid);
+        }
+
+        if let Some(ref path) = p.path {
+            let path_clean = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            let path_no_ext = path_clean.trim_end_matches(".exe");
+            if path_clean == target_clean || path_no_ext == target_no_ext {
+                return Some(p.pid);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+pub fn find_game_candidates() -> Vec<ProcessInfo> {
+    list_processes()
+        .into_iter()
+        .filter(|p| looks_like_linux_game(&p.name, p.path.as_deref()))
+        .collect()
+}
+
+#[cfg(unix)]
+pub fn inject_dll(_pid: u32, _dll_path: &str) -> Result<(), String> {
+    Err("In-process DLL injection is Windows-only; on Linux use LD_PRELOAD via launch.sh".into())
+}
+
+/// Fallback stubs for non-Windows, non-Unix systems.
+#[cfg(not(any(windows, unix)))]
 pub fn find_game(_exe_name: &str) -> Option<u32> {
     None
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 pub fn inject_dll(_pid: u32, _dll_path: &str) -> Result<(), String> {
-    Err("DLL injection is only supported on Windows".into())
+    Err("DLL injection is not supported on this platform".into())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 pub fn list_processes() -> Vec<ProcessInfo> {
     Vec::new()
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 pub fn find_game_candidates() -> Vec<ProcessInfo> {
     Vec::new()
 }

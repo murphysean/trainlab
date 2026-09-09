@@ -1,0 +1,4 @@
+[alias]
+prep-release = "run --package trainlab-release"
+dist = "run --package trainlab-release"
+deploy = "run --package trainlab-release -- --deploy"

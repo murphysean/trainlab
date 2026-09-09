@@ -7,7 +7,7 @@
 //! `TRAINLAB_DLL_HOST`, `TRAINLAB_DLL_PORT`) override file settings.
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use trainlab_core::protocol::InjectFeaturesConfig;
 
 /// Root configuration structure.
@@ -27,16 +27,16 @@ pub struct AppConfig {
 /// GUI window & appearance settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuiConfig {
-    /// UI scale multiplier (DPI scaling / pixels_per_point). Default is 1.0.
+    /// UI scale multiplier (DPI scaling / pixels_per_point). Default is 1.5.
     /// On high-DPI displays or small laptop screens, set to e.g. 1.25, 1.5, or 2.0.
     #[serde(default = "default_scale")]
     pub scale: f32,
-    /// Default window width in logical points (default 1280.0).
-    #[serde(default = "default_width")]
-    pub width: f32,
-    /// Default window height in logical points (default 800.0).
-    #[serde(default = "default_height")]
-    pub height: f32,
+    /// Window width in logical points (optional). If omitted, let window manager / Gamescope decide.
+    #[serde(default)]
+    pub width: Option<f32>,
+    /// Window height in logical points (optional). If omitted, let window manager / Gamescope decide.
+    #[serde(default)]
+    pub height: Option<f32>,
     /// Force fullscreen / maximized mode.
     #[serde(default)]
     pub fullscreen: bool,
@@ -52,8 +52,8 @@ impl Default for GuiConfig {
     fn default() -> Self {
         Self {
             scale: default_scale(),
-            width: default_width(),
-            height: default_height(),
+            width: None,
+            height: None,
             fullscreen: false,
             theme: default_theme(),
             pin_rate_hz: default_pin_rate_hz(),
@@ -66,13 +66,7 @@ fn default_pin_rate_hz() -> u32 {
 }
 
 fn default_scale() -> f32 {
-    1.0
-}
-fn default_width() -> f32 {
-    1280.0
-}
-fn default_height() -> f32 {
-    800.0
+    1.5
 }
 fn default_theme() -> String {
     "dark".to_string()
@@ -175,25 +169,28 @@ impl AppConfig {
         for path in &candidates {
             if path.is_file()
                 && let Ok(content) = std::fs::read_to_string(path)
-                && let Ok(parsed) = serde_yaml::from_str::<Self>(&content) {
-                    tracing::info!("Loaded configuration from {}", path.display());
-                    return Some(parsed);
-                }
+                && let Ok(parsed) = serde_yaml::from_str::<Self>(&content)
+            {
+                tracing::info!("Loaded configuration from {}", path.display());
+                return Some(parsed);
+            }
         }
 
         // Check next to the executable if different from current dir
         if let Ok(exe_path) = std::env::current_exe()
-            && let Some(exe_dir) = exe_path.parent() {
-                for file_name in &["config.yaml", "config.yml", "trainlab.yaml", "trainlab.yml"] {
-                    let candidate = exe_dir.join(file_name);
-                    if candidate.is_file()
-                        && let Ok(content) = std::fs::read_to_string(&candidate)
-                        && let Ok(parsed) = serde_yaml::from_str::<Self>(&content) {
-                            tracing::info!("Loaded configuration from {}", candidate.display());
-                            return Some(parsed);
-                        }
+            && let Some(exe_dir) = exe_path.parent()
+        {
+            for file_name in &["config.yaml", "config.yml", "trainlab.yaml", "trainlab.yml"] {
+                let candidate = exe_dir.join(file_name);
+                if candidate.is_file()
+                    && let Ok(content) = std::fs::read_to_string(&candidate)
+                    && let Ok(parsed) = serde_yaml::from_str::<Self>(&content)
+                {
+                    tracing::info!("Loaded configuration from {}", candidate.display());
+                    return Some(parsed);
                 }
             }
+        }
 
         None
     }
@@ -201,23 +198,27 @@ impl AppConfig {
     /// Apply environment variable overrides (precedence over config file).
     pub fn apply_env_overrides(&mut self) {
         // GUI Scale / DPI factor
-        if let Ok(val) = std::env::var("TRAINLAB_SCALE").or_else(|_| std::env::var("TRAINLAB_DPI_SCALE"))
+        if let Ok(val) =
+            std::env::var("TRAINLAB_SCALE").or_else(|_| std::env::var("TRAINLAB_DPI_SCALE"))
             && let Ok(scale) = val.parse::<f32>()
-            && scale > 0.1 {
-                self.gui.scale = scale;
-            }
+            && scale > 0.1
+        {
+            self.gui.scale = scale;
+        }
 
         // GUI Dimensions
         if let Ok(val) = std::env::var("TRAINLAB_WIDTH")
             && let Ok(w) = val.parse::<f32>()
-            && w > 200.0 {
-                self.gui.width = w;
-            }
+            && w > 200.0
+        {
+            self.gui.width = Some(w);
+        }
         if let Ok(val) = std::env::var("TRAINLAB_HEIGHT")
             && let Ok(h) = val.parse::<f32>()
-            && h > 200.0 {
-                self.gui.height = h;
-            }
+            && h > 200.0
+        {
+            self.gui.height = Some(h);
+        }
 
         // Fullscreen
         if let Ok(val) = std::env::var("TRAINLAB_FULLSCREEN") {
@@ -245,9 +246,10 @@ impl AppConfig {
 
         // MCP Server Port
         if let Ok(val) = std::env::var("TRAINLAB_MCP_PORT")
-            && let Ok(port) = val.parse::<u16>() {
-                self.server.mcp_port = port;
-            }
+            && let Ok(port) = val.parse::<u16>()
+        {
+            self.server.mcp_port = port;
+        }
 
         // DLL Host & Port
         if let Ok(val) = std::env::var("TRAINLAB_DLL_HOST") {
@@ -257,9 +259,10 @@ impl AppConfig {
             }
         }
         if let Ok(val) = std::env::var("TRAINLAB_DLL_PORT")
-            && let Ok(port) = val.parse::<u16>() {
-                self.inject.dll_port = port;
-            }
+            && let Ok(port) = val.parse::<u16>()
+        {
+            self.inject.dll_port = port;
+        }
         if let Ok(val) = std::env::var("TRAINLAB_DLL_PATH") {
             let trimmed = val.trim().to_string();
             if !trimmed.is_empty() {

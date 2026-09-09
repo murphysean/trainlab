@@ -3,11 +3,13 @@
 //! Every client (MCP server, REST API, Web dashboard, egui GUI, CLI) invokes these
 //! exact same tools with typed arguments and receives structured results.
 
-use serde::{Deserialize, Serialize};
-use std::path::Path;
-use crate::expr::{format_value, parse_addr_expr_custom, parse_hex_bytes, parse_value_bytes, parse_value_type};
+use crate::expr::{
+    format_value, parse_addr_expr_custom, parse_hex_bytes, parse_value_bytes, parse_value_type,
+};
 use crate::memory::ProcessMemory;
 use crate::session::{CheatKind, ClientContext, SharedSession};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Result of executing a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -492,13 +494,25 @@ pub fn read_cstr(proc: &dyn ProcessMemory, addr: u64, max_len: usize) -> Result<
     if slice.is_empty() {
         return Ok(String::new());
     }
-    if slice.iter().all(|&b| (0x20..=0x7e).contains(&b) || b == b'\t' || b == b'\n' || b == b'\r') {
+    if slice
+        .iter()
+        .all(|&b| (0x20..=0x7e).contains(&b) || b == b'\t' || b == b'\n' || b == b'\r')
+    {
         if slice.len() > 1024 {
             // Write oversized string to a snapshot file
-            let file_name = format!("cstr_{addr:#x}_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+            let file_name = format!(
+                "cstr_{addr:#x}_{}.txt",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            );
             let preview = String::from_utf8_lossy(&slice[..256]);
             if let Ok(rel_path) = write_output_artifact("snapshots", &file_name, slice) {
-                Ok(format!("{preview}... [{} bytes total, saved to {rel_path}]", slice.len()))
+                Ok(format!(
+                    "{preview}... [{} bytes total, saved to {rel_path}]",
+                    slice.len()
+                ))
             } else {
                 Ok(format!("{preview}... [{} bytes total]", slice.len()))
             }
@@ -507,22 +521,37 @@ pub fn read_cstr(proc: &dyn ProcessMemory, addr: u64, max_len: usize) -> Result<
         }
     } else {
         // Binary / non-printable: if no null terminator or raw binary, save full snapshot and return preview
-        let file_name = format!("bin_{addr:#x}_{}.bin", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let file_name = format!(
+            "bin_{addr:#x}_{}.bin",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
         let display_len = slice.len().min(32);
         let hex_preview = slice[..display_len]
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let nul_note = if !has_nul { " (no null terminator found)" } else { "" };
-        if let Ok(rel_path) = write_output_artifact("snapshots", &file_name, slice) {
-            Ok(format!("<non-ascii {} bytes{nul_note}> {hex_preview}... [saved to {rel_path}]", slice.len()))
+        let nul_note = if !has_nul {
+            " (no null terminator found)"
         } else {
-            Ok(format!("<non-ascii {} bytes{nul_note}> {hex_preview}...", slice.len()))
+            ""
+        };
+        if let Ok(rel_path) = write_output_artifact("snapshots", &file_name, slice) {
+            Ok(format!(
+                "<non-ascii {} bytes{nul_note}> {hex_preview}... [saved to {rel_path}]",
+                slice.len()
+            ))
+        } else {
+            Ok(format!(
+                "<non-ascii {} bytes{nul_note}> {hex_preview}...",
+                slice.len()
+            ))
         }
     }
 }
-
 
 /// Format a memory buffer as hex + ASCII text view.
 pub fn format_dump(base_address: u64, data: &[u8]) -> String {
@@ -562,19 +591,26 @@ pub fn format_dump(base_address: u64, data: &[u8]) -> String {
 
 /// Write an oversized tool output to a specific subfolder (e.g. `scans/`, `regions/`, `snapshots/`)
 /// and enforce a FIFO quota (max 50 files per directory) to prevent disk/context bloat.
-pub fn write_output_artifact(subdir: &str, file_name: &str, content: &[u8]) -> std::io::Result<String> {
+pub fn write_output_artifact(
+    subdir: &str,
+    file_name: &str,
+    content: &[u8],
+) -> std::io::Result<String> {
     let dir = std::path::Path::new(subdir);
     let _ = std::fs::create_dir_all(dir);
-    
+
     // Auto-clean: keep at most 50 files in this directory to avoid disk clutter
     if let Ok(entries) = std::fs::read_dir(dir) {
         let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-            .filter_map(|e| {
+            .map(|e| {
                 let path = e.path();
-                let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                Some((modified, path))
+                let modified = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                (modified, path)
             })
             .collect();
 
@@ -599,7 +635,6 @@ pub fn write_output_artifact(subdir: &str, file_name: &str, content: &[u8]) -> s
 // Universal Tool Dispatchers
 // ---------------------------------------------------------------------------
 
-
 /// Evaluate an address expression against session markers and loaded modules.
 pub fn eval_addr_expr(
     session: &SharedSession,
@@ -608,13 +643,16 @@ pub fn eval_addr_expr(
 ) -> Result<u64, ToolError> {
     let s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let resolve_marker = |name: &str| s.get_marker(name).map(|m| m.address);
-    let resolve_module = |name: &str| {
+    let resolve_module = |_name: &str| {
         if let Some(pid) = s.game_pid() {
             #[cfg(windows)]
             {
                 if let Ok(modules) = crate::modinfo::enumerate_windows(pid) {
                     let target = name.to_lowercase();
-                    return modules.iter().find(|m| m.name.to_lowercase() == target).map(|m| m.base);
+                    return modules
+                        .iter()
+                        .find(|m| m.name.to_lowercase() == target)
+                        .map(|m| m.base);
                 }
             }
             #[cfg(not(windows))]
@@ -635,7 +673,12 @@ pub fn execute_read(
     args: ReadArgs,
 ) -> Result<ToolResult, ToolError> {
     let target_addr = eval_addr_expr(session, &args.address, Some(mem))?;
-    let vt_str = args.value_type.as_deref().unwrap_or("hex").trim().to_lowercase();
+    let vt_str = args
+        .value_type
+        .as_deref()
+        .unwrap_or("hex")
+        .trim()
+        .to_lowercase();
 
     match vt_str.as_str() {
         "hex" | "bytes" => {
@@ -654,10 +697,24 @@ pub fn execute_read(
                 ));
             }
             if bytes.len() > 512 {
-                let file_name = format!("read_hex_{target_addr:#x}_{}.bin", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
-                let preview = bytes[..64].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-                let rel_path = write_output_artifact("snapshots", &file_name, &bytes).unwrap_or_else(|_| format!("snapshots/{file_name}"));
-                let text = format!("{preview}... [{} bytes total, saved to {rel_path}]", bytes.len());
+                let file_name = format!(
+                    "read_hex_{target_addr:#x}_{}.bin",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                );
+                let preview = bytes[..64]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let rel_path = write_output_artifact("snapshots", &file_name, &bytes)
+                    .unwrap_or_else(|_| format!("snapshots/{file_name}"));
+                let text = format!(
+                    "{preview}... [{} bytes total, saved to {rel_path}]",
+                    bytes.len()
+                );
                 Ok(ToolResult::with_data(
                     text,
                     serde_json::json!({
@@ -668,7 +725,11 @@ pub fn execute_read(
                     }),
                 ))
             } else {
-                let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                let hex = bytes
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 Ok(ToolResult::with_data(
                     hex.clone(),
                     serde_json::json!({
@@ -710,7 +771,9 @@ pub fn execute_read(
         other => {
             let vt = parse_value_type(other).map_err(err)?;
             let read_len = vt.size();
-            let bytes = mem.read(target_addr, read_len).map_err(|e| err(e.to_string()))?;
+            let bytes = mem
+                .read(target_addr, read_len)
+                .map_err(|e| err(e.to_string()))?;
             let formatted = format_value(&bytes, vt);
             Ok(ToolResult::with_data(
                 formatted.clone(),
@@ -739,22 +802,31 @@ pub fn execute_write(
         let vt_str = args.value_type.as_deref().unwrap_or("i32");
         let vt = parse_value_type(vt_str).map_err(err)?;
         let data = parse_value_bytes(val_str, vt).map_err(err)?;
-        (data, format!("write {val_str} ({vt_str}) @ {target_addr:#x}"))
+        (
+            data,
+            format!("write {val_str} ({vt_str}) @ {target_addr:#x}"),
+        )
     } else if let Some(hex_data) = &args.data {
         let data = parse_hex_bytes(hex_data).map_err(err)?;
         if data.is_empty() {
             return Err(err("write data cannot be empty"));
         }
-        (data.clone(), format!("write {} byte(s) @ {target_addr:#x}", data.len()))
+        (
+            data.clone(),
+            format!("write {} byte(s) @ {target_addr:#x}", data.len()),
+        )
     } else {
-        return Err(err("either 'value' (with value_type) or 'data' (hex) must be provided"));
+        return Err(err(
+            "either 'value' (with value_type) or 'data' (hex) must be provided",
+        ));
     };
 
     // Pre-mutation snapshot for automatic undo
     let original = mem.read(target_addr, bytes.len()).unwrap_or_default();
 
     // Perform direct write
-    mem.write(target_addr, &bytes).map_err(|e| err(format!("write failed: {e}")))?;
+    mem.write(target_addr, &bytes)
+        .map_err(|e| err(format!("write failed: {e}")))?;
 
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let undo_id = if !original.is_empty() {
@@ -763,7 +835,14 @@ pub fn execute_write(
         None
     };
 
-    s.log_activity(&ctx.id, format!("wrote {} byte(s) @ {target_addr:#x} (undo: {:?})", bytes.len(), undo_id));
+    s.log_activity(
+        &ctx.id,
+        format!(
+            "wrote {} byte(s) @ {target_addr:#x} (undo: {:?})",
+            bytes.len(),
+            undo_id
+        ),
+    );
 
     let undo_msg = match undo_id {
         Some(id) => format!(" (undo id #{id} recorded)"),
@@ -789,7 +868,9 @@ pub fn execute_dump(
     args: DumpArgs,
 ) -> Result<ToolResult, ToolError> {
     let target_addr = eval_addr_expr(session, &args.address, Some(mem))?;
-    let data = mem.read(target_addr, args.len).map_err(|e| err(format!("dump failed: {e}")))?;
+    let data = mem
+        .read(target_addr, args.len)
+        .map_err(|e| err(format!("dump failed: {e}")))?;
 
     if data.iter().all(|&b| b == 0) {
         return Ok(ToolResult::with_data(
@@ -805,7 +886,13 @@ pub fn execute_dump(
 
     if data.len() > 1024 {
         let _ = std::fs::create_dir_all("snapshots");
-        let file_name = format!("dump_{target_addr:#x}_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let file_name = format!(
+            "dump_{target_addr:#x}_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
         let file_path = format!("snapshots/{file_name}");
         let full_text = format_dump(target_addr, &data);
         if let Ok(mut f) = std::fs::File::create(&file_path) {
@@ -813,7 +900,10 @@ pub fn execute_dump(
             let _ = f.write_all(full_text.as_bytes());
         }
         let preview = format_dump(target_addr, &data[..256]);
-        let text = format!("{preview}\n... [{} bytes total, full dump saved to snapshots/{file_name}]", data.len());
+        let text = format!(
+            "{preview}\n... [{} bytes total, full dump saved to snapshots/{file_name}]",
+            data.len()
+        );
         Ok(ToolResult::with_data(
             text,
             serde_json::json!({
@@ -875,7 +965,16 @@ pub fn execute_dump_struct(
             "bytes" => {
                 let n = f.len.unwrap_or(16).max(1);
                 mem.read(field_addr, n)
-                    .map(|d| format!("[{}] {}", d.len(), d.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
+                    .map(|d| {
+                        format!(
+                            "[{}] {}",
+                            d.len(),
+                            d.iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    })
                     .map_err(|e| e.to_string())
             }
             other => Err(format!("unknown field type '{other}'")),
@@ -883,7 +982,10 @@ pub fn execute_dump_struct(
 
         match &result {
             Ok(v) => {
-                lines.push(format!("{:+5} {:<6} {}: {}", f.offset, f.value_type, f.name, v));
+                lines.push(format!(
+                    "{:+5} {:<6} {}: {}",
+                    f.offset, f.value_type, f.name, v
+                ));
                 field_results.push(serde_json::json!({
                     "name": f.name,
                     "offset": f.offset,
@@ -893,7 +995,10 @@ pub fn execute_dump_struct(
                 }));
             }
             Err(e) => {
-                lines.push(format!("{:+5} {:<6} {}: <error: {e}>", f.offset, f.value_type, f.name));
+                lines.push(format!(
+                    "{:+5} {:<6} {}: <error: {e}>",
+                    f.offset, f.value_type, f.name
+                ));
                 field_results.push(serde_json::json!({
                     "name": f.name,
                     "offset": f.offset,
@@ -905,7 +1010,10 @@ pub fn execute_dump_struct(
         }
     }
 
-    let mut text = format!("struct @ {address:#018x} ({} field(s))\n", args.fields.len());
+    let mut text = format!(
+        "struct @ {address:#018x} ({} field(s))\n",
+        args.fields.len()
+    );
     text.push_str(&lines.join("\n"));
 
     Ok(ToolResult::with_data(
@@ -944,19 +1052,33 @@ pub fn execute_snapshot(
         (None, None) => return Err(err("must specify either 'end' or 'len'")),
     };
 
-    let file_name = args.name.unwrap_or_else(|| format!("snap_0x{start:08x}_{len}.bin"));
+    let file_name = args
+        .name
+        .unwrap_or_else(|| format!("snap_0x{start:08x}_{len}.bin"));
     let snap_dir = Path::new("snapshots");
     let file_path = snap_dir.join(&file_name);
 
-    let bytes_written = crate::memory::dump_range_to_file(mem, start, len, &file_path, args.max_len)
-        .map_err(|e| err(format!("snapshot dump failed: {e}")))?;
+    let bytes_written =
+        crate::memory::dump_range_to_file(mem, start, len, &file_path, args.max_len)
+            .map_err(|e| err(format!("snapshot dump failed: {e}")))?;
 
     if let Ok(mut s) = session.lock() {
-        s.log_activity(&ctx.id, format!("created snapshot '{}' ({} bytes)", file_path.display(), bytes_written));
+        s.log_activity(
+            &ctx.id,
+            format!(
+                "created snapshot '{}' ({} bytes)",
+                file_path.display(),
+                bytes_written
+            ),
+        );
     }
 
     Ok(ToolResult::with_data(
-        format!("created snapshot '{}' ({} bytes at {start:#x})", file_path.display(), bytes_written),
+        format!(
+            "created snapshot '{}' ({} bytes at {start:#x})",
+            file_path.display(),
+            bytes_written
+        ),
         serde_json::json!({
             "file_name": file_name,
             "path": file_path.to_string_lossy(),
@@ -976,7 +1098,9 @@ pub fn execute_disassemble(
     args: DisassembleArgs,
 ) -> Result<ToolResult, ToolError> {
     let address = eval_addr_expr(session, &args.address, Some(mem))?;
-    let data = mem.read(address, args.len).map_err(|e| err(format!("disassemble read failed: {e}")))?;
+    let data = mem
+        .read(address, args.len)
+        .map_err(|e| err(format!("disassemble read failed: {e}")))?;
     let lines = crate::disasm::disassemble(address, &data, Some(args.max_instructions));
 
     Ok(ToolResult::with_data(
@@ -998,21 +1122,32 @@ pub fn execute_allocate_string(
 ) -> Result<ToolResult, ToolError> {
     let kind = args.kind.trim().to_lowercase();
     let is_rust = kind == "rust";
-    let is_c_like = matches!(kind.as_str(), "c" | "json" | "yaml" | "xml" | "js" | "config");
+    let is_c_like = matches!(
+        kind.as_str(),
+        "c" | "json" | "yaml" | "xml" | "js" | "config"
+    );
 
     if !is_rust && !is_c_like {
-        return Err(err(format!("unknown string kind '{kind}' (expected 'c', 'rust', 'json', 'yaml', 'xml', 'js', or 'config')")));
+        return Err(err(format!(
+            "unknown string kind '{kind}' (expected 'c', 'rust', 'json', 'yaml', 'xml', 'js', or 'config')"
+        )));
     }
 
     let mut bytes = if let Some(path_str) = args.path {
-        std::fs::read(&path_str).map_err(|e| err(format!("failed to read file '{path_str}' for allocate_string: {e}")))?
+        std::fs::read(&path_str).map_err(|e| {
+            err(format!(
+                "failed to read file '{path_str}' for allocate_string: {e}"
+            ))
+        })?
     } else if let Some(content) = args.content {
         content.into_bytes()
     } else if let Some(size) = args.size {
         let fill = args.fill_byte.unwrap_or(0);
         vec![fill; size]
     } else {
-        return Err(err("either 'path', 'content', or 'size' must be provided for allocate_string"));
+        return Err(err(
+            "either 'path', 'content', or 'size' must be provided for allocate_string",
+        ));
     };
 
     if is_c_like && !bytes.ends_with(&[0]) {
@@ -1022,10 +1157,13 @@ pub fn execute_allocate_string(
 
     #[cfg(windows)]
     let alloc_addr = {
-        use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx,
+        };
         let pid = {
             let s = session.lock().map_err(|_| err("session lock poisoned"))?;
-            s.game_pid().ok_or_else(|| err("no attached game process to allocate string in"))?
+            s.game_pid()
+                .ok_or_else(|| err("no attached game process to allocate string in"))?
         };
         let proc_handle = unsafe {
             windows_sys::Win32::System::Threading::OpenProcess(
@@ -1040,9 +1178,17 @@ pub fn execute_allocate_string(
             return Err(err("failed to open process for allocation"));
         }
         let ptr = unsafe {
-            VirtualAllocEx(proc_handle, std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+            VirtualAllocEx(
+                proc_handle,
+                std::ptr::null(),
+                len,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            )
         };
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(proc_handle);
+        }
         if ptr.is_null() {
             return Err(err("VirtualAllocEx failed in target process"));
         }
@@ -1055,18 +1201,34 @@ pub fn execute_allocate_string(
         let _ = ctx;
         let _ = mem;
         let _ = len;
-        return Err(err("string allocation is only supported on Windows"));
+        Err(err("string allocation is only supported on Windows"))
     }
 
     #[cfg(windows)]
     {
-        mem.write(alloc_addr, &bytes).map_err(|e| err(format!("failed to write string bytes: {e}")))?;
+        mem.write(alloc_addr, &bytes)
+            .map_err(|e| err(format!("failed to write string bytes: {e}")))?;
 
         if let Ok(mut s) = session.lock() {
-            s.log_activity(&ctx.id, format!("allocated string ({kind}, {len} bytes) at {alloc_addr:#x}"));
-            s.record_allocation(alloc_addr, len, format!("string ({kind})"), args.marker.clone());
+            s.log_activity(
+                &ctx.id,
+                format!("allocated string ({kind}, {len} bytes) at {alloc_addr:#x}"),
+            );
+            s.record_allocation(
+                alloc_addr,
+                len,
+                format!("string ({kind})"),
+                args.marker.clone(),
+            );
             if let Some(m) = &args.marker {
-                let _ = s.set_marker_full(m, alloc_addr, Some(len), crate::session::MarkerKind::Buffer, None, Some(&format!("Allocated string ('{kind}', {len} bytes)")));
+                let _ = s.set_marker_full(
+                    m,
+                    alloc_addr,
+                    Some(len),
+                    crate::session::MarkerKind::Buffer,
+                    None,
+                    Some(&format!("Allocated string ('{kind}', {len} bytes)")),
+                );
             }
         }
 
@@ -1098,10 +1260,17 @@ pub fn execute_allocate_memory(
     #[cfg(windows)]
     let (alloc_addr, prot_flags) = {
         use windows_sys::Win32::System::Memory::{
-            VirtualAllocEx, MEM_COMMIT, MEM_RESERVE,
-            PAGE_READWRITE, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_READ, PAGE_READONLY
+            MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READONLY,
+            PAGE_READWRITE, VirtualAllocEx,
         };
-        let prot = match args.permissions.as_deref().unwrap_or("rw").trim().to_lowercase().as_str() {
+        let prot = match args
+            .permissions
+            .as_deref()
+            .unwrap_or("rw")
+            .trim()
+            .to_lowercase()
+            .as_str()
+        {
             "rwx" | "wx" | "exec_rw" => PAGE_EXECUTE_READWRITE,
             "rx" | "exec_r" => PAGE_EXECUTE_READ,
             "r" | "ro" => PAGE_READONLY,
@@ -1110,7 +1279,8 @@ pub fn execute_allocate_memory(
 
         let pid = {
             let s = session.lock().map_err(|_| err("session lock poisoned"))?;
-            s.game_pid().ok_or_else(|| err("no attached game process to allocate memory in"))?
+            s.game_pid()
+                .ok_or_else(|| err("no attached game process to allocate memory in"))?
         };
         let proc_handle = unsafe {
             windows_sys::Win32::System::Threading::OpenProcess(
@@ -1125,9 +1295,17 @@ pub fn execute_allocate_memory(
             return Err(err("failed to open process for allocation"));
         }
         let ptr = unsafe {
-            VirtualAllocEx(proc_handle, std::ptr::null(), size, MEM_COMMIT | MEM_RESERVE, prot)
+            VirtualAllocEx(
+                proc_handle,
+                std::ptr::null(),
+                size,
+                MEM_COMMIT | MEM_RESERVE,
+                prot,
+            )
         };
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(proc_handle);
+        }
         if ptr.is_null() {
             return Err(err("VirtualAllocEx failed in target process"));
         }
@@ -1140,7 +1318,7 @@ pub fn execute_allocate_memory(
         let _ = ctx;
         let _ = mem;
         let _ = size;
-        return Err(err("memory allocation is only supported on Windows"));
+        Err(err("memory allocation is only supported on Windows"))
     }
 
     #[cfg(windows)]
@@ -1151,10 +1329,20 @@ pub fn execute_allocate_memory(
         }
 
         if let Ok(mut s) = session.lock() {
-            s.log_activity(&ctx.id, format!("allocated memory ({size} bytes) at {alloc_addr:#x}"));
+            s.log_activity(
+                &ctx.id,
+                format!("allocated memory ({size} bytes) at {alloc_addr:#x}"),
+            );
             s.record_allocation(alloc_addr, size, "raw memory buffer", args.marker.clone());
             if let Some(m) = &args.marker {
-                let _ = s.set_marker_full(m, alloc_addr, Some(size), crate::session::MarkerKind::Buffer, None, Some(&format!("Allocated memory buffer ({size} bytes)")));
+                let _ = s.set_marker_full(
+                    m,
+                    alloc_addr,
+                    Some(size),
+                    crate::session::MarkerKind::Buffer,
+                    None,
+                    Some(&format!("Allocated memory buffer ({size} bytes)")),
+                );
             }
         }
 
@@ -1184,10 +1372,11 @@ pub fn execute_free_memory(
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::Memory::{VirtualFreeEx, MEM_RELEASE, MEM_DECOMMIT};
+        use windows_sys::Win32::System::Memory::{MEM_DECOMMIT, MEM_RELEASE, VirtualFreeEx};
         let pid = {
             let s = session.lock().map_err(|_| err("session lock poisoned"))?;
-            s.game_pid().ok_or_else(|| err("no attached game process to free memory in"))?
+            s.game_pid()
+                .ok_or_else(|| err("no attached game process to free memory in"))?
         };
         let proc_handle = unsafe {
             windows_sys::Win32::System::Threading::OpenProcess(
@@ -1207,13 +1396,16 @@ pub fn execute_free_memory(
             (0, MEM_RELEASE)
         };
 
-        let res = unsafe {
-            VirtualFreeEx(proc_handle, target_addr as *mut _, free_size, free_type)
-        };
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+        let res =
+            unsafe { VirtualFreeEx(proc_handle, target_addr as *mut _, free_size, free_type) };
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(proc_handle);
+        }
 
         if res == 0 {
-            return Err(err(format!("VirtualFreeEx failed for address {target_addr:#x}")));
+            return Err(err(format!(
+                "VirtualFreeEx failed for address {target_addr:#x}"
+            )));
         }
 
         if let Ok(mut s) = session.lock() {
@@ -1258,7 +1450,9 @@ pub fn execute_scan_start(
     };
 
     let regions = {
-        let all_regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        let all_regions = mem
+            .regions()
+            .map_err(|e| err(format!("regions failed: {e}")))?;
         if let Some(r_name) = &args.region {
             let (r_start, r_end) = {
                 let s = session.lock().map_err(|_| err("session lock poisoned"))?;
@@ -1285,7 +1479,9 @@ pub fn execute_scan_start(
                 })
                 .collect();
             if filtered.is_empty() {
-                return Err(err(format!("specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages")));
+                return Err(err(format!(
+                    "specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages"
+                )));
             }
             filtered
         } else {
@@ -1293,7 +1489,8 @@ pub fn execute_scan_start(
         }
     };
     let mut scan = crate::scan::Scan::new(vt).with_alignment(alignment);
-    scan.first_scan(mem, &regions, op).map_err(|e| err(format!("scan failed: {e}")))?;
+    scan.first_scan(mem, &regions, op)
+        .map_err(|e| err(format!("scan failed: {e}")))?;
 
     let count = scan.len();
     let top_matches: Vec<(u64, f64)> = scan.matches().iter().take(10).copied().collect();
@@ -1302,7 +1499,10 @@ pub fn execute_scan_start(
     ctx.scan = Some(scan);
 
     if let Ok(mut s) = session.lock() {
-        s.log_activity(&ctx.id, format!("started value scan ({:?}): {count} match(es)", vt));
+        s.log_activity(
+            &ctx.id,
+            format!("started value scan ({:?}): {count} match(es)", vt),
+        );
     }
 
     let mut lines = Vec::new();
@@ -1313,7 +1513,10 @@ pub fn execute_scan_start(
     let mut text = format!("scan started: {count} match(es) (type: {vt:?})\n");
     text.push_str(&lines.join("\n"));
     if count > 10 {
-        text.push_str(&format!("\n... and {} more (use 'scan_status' to view)", count - 10));
+        text.push_str(&format!(
+            "\n... and {} more (use 'scan_status' to view)",
+            count - 10
+        ));
     }
 
     Ok(ToolResult::with_data(
@@ -1345,22 +1548,35 @@ pub fn execute_scan_next(
             ScanOp::Exact { value: v }
         }
         "range" => {
-            let min = args.value.ok_or_else(|| err("'range' requires 'value' (min)"))?;
+            let min = args
+                .value
+                .ok_or_else(|| err("'range' requires 'value' (min)"))?;
             let max = args.max.ok_or_else(|| err("'range' requires 'max'"))?;
             ScanOp::Range { min, max }
         }
-        other => return Err(err(format!("unknown scan op '{other}' (expected changed, unchanged, increased, decreased, exact, range)"))),
+        other => {
+            return Err(err(format!(
+                "unknown scan op '{other}' (expected changed, unchanged, increased, decreased, exact, range)"
+            )));
+        }
     };
 
-    let scan = ctx.scan.as_mut().ok_or_else(|| err("no active scan in this context; run 'scan_start' first"))?;
-    scan.refine(mem, op).map_err(|e| err(format!("refine failed: {e}")))?;
+    let scan = ctx
+        .scan
+        .as_mut()
+        .ok_or_else(|| err("no active scan in this context; run 'scan_start' first"))?;
+    scan.refine(mem, op)
+        .map_err(|e| err(format!("refine failed: {e}")))?;
 
     let count = scan.len();
     let vt = scan.value_type();
     let top_matches: Vec<(u64, f64)> = scan.matches().iter().take(10).copied().collect();
 
     if let Ok(mut s) = session.lock() {
-        s.log_activity(&ctx.id, format!("narrowed scan: {count} match(es) remaining"));
+        s.log_activity(
+            &ctx.id,
+            format!("narrowed scan: {count} match(es) remaining"),
+        );
     }
 
     let mut lines = Vec::new();
@@ -1390,7 +1606,10 @@ pub fn execute_scan_status(
     _session: &SharedSession,
     ctx: &ClientContext,
 ) -> Result<ToolResult, ToolError> {
-    let scan = ctx.scan.as_ref().ok_or_else(|| err("no active scan in this context"))?;
+    let scan = ctx
+        .scan
+        .as_ref()
+        .ok_or_else(|| err("no active scan in this context"))?;
     let count = scan.len();
     let vt = scan.value_type();
     let align = scan.alignment();
@@ -1426,7 +1645,10 @@ pub fn execute_scan_set(
     mem: &dyn ProcessMemory,
     args: ScanSetArgs,
 ) -> Result<ToolResult, ToolError> {
-    let scan = ctx.scan.as_ref().ok_or_else(|| err("no active scan in this context; run 'scan_start' first"))?;
+    let scan = ctx
+        .scan
+        .as_ref()
+        .ok_or_else(|| err("no active scan in this context; run 'scan_start' first"))?;
     let matches = scan.matches().to_vec();
     if matches.is_empty() {
         return Err(err("active scan has 0 matches to write to"));
@@ -1455,10 +1677,21 @@ pub fn execute_scan_set(
         }
     }
 
-    s.log_activity(&ctx.id, format!("scan_set: wrote {} to {} candidate addresses", args.value, updated));
+    s.log_activity(
+        &ctx.id,
+        format!(
+            "scan_set: wrote {} to {} candidate addresses",
+            args.value, updated
+        ),
+    );
 
     Ok(ToolResult::with_data(
-        format!("scan_set: successfully wrote '{}' to {} address(es) (recorded {} undo snapshots)", args.value, updated, undo_ids.len()),
+        format!(
+            "scan_set: successfully wrote '{}' to {} address(es) (recorded {} undo snapshots)",
+            args.value,
+            updated,
+            undo_ids.len()
+        ),
         serde_json::json!({
             "updated_count": updated,
             "value": args.value,
@@ -1481,7 +1714,11 @@ pub fn execute_scan_clear(
     }
 
     Ok(ToolResult::with_data(
-        if was_active { "scan cleared" } else { "no active scan was present" },
+        if was_active {
+            "scan cleared"
+        } else {
+            "no active scan was present"
+        },
         serde_json::json!({
             "cleared": was_active,
             "client_id": ctx.id,
@@ -1502,7 +1739,9 @@ pub fn execute_scan_aob(
     }
 
     let regions = {
-        let all_regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        let all_regions = mem
+            .regions()
+            .map_err(|e| err(format!("regions failed: {e}")))?;
         if let Some(r_name) = &args.region {
             let (r_start, r_end) = {
                 let s = session.lock().map_err(|_| err("session lock poisoned"))?;
@@ -1528,7 +1767,9 @@ pub fn execute_scan_aob(
                 })
                 .collect();
             if filtered.is_empty() {
-                return Err(err(format!("specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages")));
+                return Err(err(format!(
+                    "specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages"
+                )));
             }
             filtered
         } else {
@@ -1558,33 +1799,55 @@ pub fn execute_scan_aob(
 
     if let Some(m) = &args.marker
         && let Some(&first) = matches.first()
-            && let Ok(mut s) = session.lock() {
-                let _ = s.set_marker(m, first, Some(&format!("AOB match for '{}'", args.pattern)));
-            }
+        && let Ok(mut s) = session.lock()
+    {
+        let _ = s.set_marker(m, first, Some(&format!("AOB match for '{}'", args.pattern)));
+    }
 
     if let Ok(mut s) = session.lock() {
-        s.log_activity(&ctx.id, format!("AOB scan '{}': {count} match(es) across {regions_scanned} region(s)", args.pattern));
+        s.log_activity(
+            &ctx.id,
+            format!(
+                "AOB scan '{}': {count} match(es) across {regions_scanned} region(s)",
+                args.pattern
+            ),
+        );
     }
 
     let mb_scanned = (total_bytes as f64) / (1024.0 * 1024.0);
     let limit = args.limit.unwrap_or(20);
     let preview_matches: Vec<u64> = matches.iter().copied().take(limit).collect();
-    let lines: Vec<String> = preview_matches.iter().map(|m| format!("{m:#018x}")).collect();
-    let mut text = format!("{count} match(es) (scanned {regions_scanned} region(s), {mb_scanned:.1} MB)\n");
+    let lines: Vec<String> = preview_matches
+        .iter()
+        .map(|m| format!("{m:#018x}"))
+        .collect();
+    let mut text =
+        format!("{count} match(es) (scanned {regions_scanned} region(s), {mb_scanned:.1} MB)\n");
     text.push_str(&lines.join("\n"));
-    
+
     let mut scan_file = None;
     if count > limit {
-        let s_file = format!("aob_scan_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let s_file = format!(
+            "aob_scan_{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
         let full_json = serde_json::json!({
             "count": count,
             "pattern": args.pattern,
             "alignment": alignment,
             "matches": matches,
         });
-        if let Ok(rel_path) = write_output_artifact("scans", &s_file, full_json.to_string().as_bytes()) {
+        if let Ok(rel_path) =
+            write_output_artifact("scans", &s_file, full_json.to_string().as_bytes())
+        {
             scan_file = Some(rel_path.clone());
-            text.push_str(&format!("\n... and {} more [full matches saved to {rel_path}]", count - limit));
+            text.push_str(&format!(
+                "\n... and {} more [full matches saved to {rel_path}]",
+                count - limit
+            ));
         } else {
             text.push_str(&format!("\n... and {} more", count - limit));
         }
@@ -1615,35 +1878,54 @@ pub fn execute_scan_pointer(
     let lo = address;
     let hi = address.saturating_add(size).saturating_sub(1);
 
-    let regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+    let regions = mem
+        .regions()
+        .map_err(|e| err(format!("regions failed: {e}")))?;
     let matches = crate::pointer::reverse_scan(mem, &regions, lo, hi)
         .map_err(|e| err(format!("pointer_scan failed: {e}")))?;
 
     let count = matches.len();
     let limit = args.limit.unwrap_or(50);
     let preview_matches: Vec<(u64, u64)> = matches.iter().copied().take(limit).collect();
-    let lines: Vec<String> = preview_matches.iter().map(|(a, p)| format!("{a:#018x} -> {p:#018x}")).collect();
+    let lines: Vec<String> = preview_matches
+        .iter()
+        .map(|(a, p)| format!("{a:#018x} -> {p:#018x}"))
+        .collect();
     let mut text = format!("{count} referrer(s)\n");
     text.push_str(&lines.join("\n"));
-    
+
     let mut scan_file = None;
     if count > limit {
-        let s_file = format!("pointer_scan_{address:#x}_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let s_file = format!(
+            "pointer_scan_{address:#x}_{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
         let full_json = serde_json::json!({
             "count": count,
             "target": address,
             "referrers": matches.iter().map(|(a, p)| serde_json::json!({ "address": a, "points_to": p })).collect::<Vec<_>>(),
         });
-        if let Ok(rel_path) = write_output_artifact("scans", &s_file, full_json.to_string().as_bytes()) {
+        if let Ok(rel_path) =
+            write_output_artifact("scans", &s_file, full_json.to_string().as_bytes())
+        {
             scan_file = Some(rel_path.clone());
-            text.push_str(&format!("\n... and {} more [full results saved to {rel_path}]", count - limit));
+            text.push_str(&format!(
+                "\n... and {} more [full results saved to {rel_path}]",
+                count - limit
+            ));
         } else {
             text.push_str(&format!("\n... and {} more", count - limit));
         }
     }
 
     if let Ok(mut s) = session.lock() {
-        s.log_activity(&ctx.id, format!("pointer scan for {address:#x}: {count} referrer(s)"));
+        s.log_activity(
+            &ctx.id,
+            format!("pointer scan for {address:#x}: {count} referrer(s)"),
+        );
     }
 
     Ok(ToolResult::with_data(
@@ -1671,7 +1953,9 @@ pub fn execute_scan_rgrep(
         .map_err(|e| err(format!("invalid regex pattern '{}': {e}", args.pattern)))?;
 
     let regions = {
-        let all_regions = mem.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        let all_regions = mem
+            .regions()
+            .map_err(|e| err(format!("regions failed: {e}")))?;
         if let Some(r_name) = &args.region {
             let (r_start, r_end) = {
                 let s = session.lock().map_err(|_| err("session lock poisoned"))?;
@@ -1697,7 +1981,9 @@ pub fn execute_scan_rgrep(
                 })
                 .collect();
             if filtered.is_empty() {
-                return Err(err(format!("specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages")));
+                return Err(err(format!(
+                    "specified region '{r_name}' ({r_start:#x}..{r_end:#x}) contains no readable memory pages"
+                )));
             }
             filtered
         } else {
@@ -1728,31 +2014,64 @@ pub fn execute_scan_rgrep(
 
     if let Some(m) = &args.marker
         && let Some((first_addr, _)) = matches.first()
-            && let Ok(mut s) = session.lock() {
-                let _ = s.set_marker(m, *first_addr, Some(&format!("Regex match for '{}'", args.pattern)));
-            }
+        && let Ok(mut s) = session.lock()
+    {
+        let _ = s.set_marker(
+            m,
+            *first_addr,
+            Some(&format!("Regex match for '{}'", args.pattern)),
+        );
+    }
 
     if let Ok(mut s) = session.lock() {
-        s.log_activity(&ctx.id, format!("rgrep scan '{}': {count} match(es) across {regions_scanned} region(s)", args.pattern));
+        s.log_activity(
+            &ctx.id,
+            format!(
+                "rgrep scan '{}': {count} match(es) across {regions_scanned} region(s)",
+                args.pattern
+            ),
+        );
     }
 
     let mb_scanned = (total_bytes as f64) / (1024.0 * 1024.0);
     let limit = args.limit.unwrap_or(20);
     let preview_matches: Vec<&(u64, Vec<u8>)> = matches.iter().take(limit).collect();
-    
+
     let mut lines = Vec::new();
     for (addr, bytes) in &preview_matches {
-        let hex_str = bytes.iter().take(16).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-        let ascii_str: String = bytes.iter().take(32).map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' }).collect();
+        let hex_str = bytes
+            .iter()
+            .take(16)
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ascii_str: String = bytes
+            .iter()
+            .take(32)
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
         lines.push(format!("{addr:#018x}: [{hex_str}] \"{ascii_str}\""));
     }
 
-    let mut text = format!("{count} match(es) (scanned {regions_scanned} region(s), {mb_scanned:.1} MB)\n");
+    let mut text =
+        format!("{count} match(es) (scanned {regions_scanned} region(s), {mb_scanned:.1} MB)\n");
     text.push_str(&lines.join("\n"));
 
     let mut scan_file = None;
     if count > limit {
-        let s_file = format!("rgrep_scan_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+        let s_file = format!(
+            "rgrep_scan_{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
         let full_json = serde_json::json!({
             "count": count,
             "pattern": args.pattern,
@@ -1762,9 +2081,14 @@ pub fn execute_scan_rgrep(
                 "bytes": b.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" "),
             })).collect::<Vec<_>>(),
         });
-        if let Ok(rel_path) = write_output_artifact("scans", &s_file, full_json.to_string().as_bytes()) {
+        if let Ok(rel_path) =
+            write_output_artifact("scans", &s_file, full_json.to_string().as_bytes())
+        {
             scan_file = Some(rel_path.clone());
-            text.push_str(&format!("\n... and {} more [full matches saved to {rel_path}]", count - limit));
+            text.push_str(&format!(
+                "\n... and {} more [full matches saved to {rel_path}]",
+                count - limit
+            ));
         } else {
             text.push_str(&format!("\n... and {} more", count - limit));
         }
@@ -1786,7 +2110,6 @@ pub fn execute_scan_rgrep(
     ))
 }
 
-
 /// Execute a pointer chase operation.
 pub fn execute_pointer_chase(
     session: &SharedSession,
@@ -1799,8 +2122,13 @@ pub fn execute_pointer_chase(
     // skip the initial dereference — the base IS the object instance.
     let base_is_object = {
         let raw = args.base.trim().trim_start_matches('$');
-        session.lock().ok()
-            .and_then(|s| s.get_marker(raw).map(|m| m.kind == crate::session::MarkerKind::Object))
+        session
+            .lock()
+            .ok()
+            .and_then(|s| {
+                s.get_marker(raw)
+                    .map(|m| m.kind == crate::session::MarkerKind::Object)
+            })
             .unwrap_or(false)
     };
     let mut offsets = Vec::new();
@@ -1826,7 +2154,11 @@ pub fn execute_pointer_chase(
         .collect();
 
     let final_addr = hops.last().copied().unwrap_or(base);
-    let mode_note = if base_is_object { " (object mode: no initial deref)" } else { "" };
+    let mode_note = if base_is_object {
+        " (object mode: no initial deref)"
+    } else {
+        ""
+    };
 
     Ok(ToolResult::with_data(
         format!("{}{}", lines.join("\n"), mode_note),
@@ -1851,13 +2183,24 @@ pub fn execute_set_marker(
     let kind = match args.kind.as_deref() {
         Some("object") => crate::session::MarkerKind::Object,
         Some("buffer") => crate::session::MarkerKind::Buffer,
-        Some("code")   => crate::session::MarkerKind::Code,
-        _              => crate::session::MarkerKind::Pointer,
+        Some("code") => crate::session::MarkerKind::Code,
+        _ => crate::session::MarkerKind::Pointer,
     };
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
-    s.set_marker_full(&args.label, target_addr, args.size, kind, args.struct_type.clone(), args.note.as_deref()).map_err(err)?;
+    s.set_marker_full(
+        &args.label,
+        target_addr,
+        args.size,
+        kind,
+        args.struct_type.clone(),
+        args.note.as_deref(),
+    )
+    .map_err(err)?;
     let size_msg = match args.size {
-        Some(sz) => format!(" (region: {target_addr:#x}..{:#x}, {sz:#x} bytes)", target_addr.saturating_add(sz as u64)),
+        Some(sz) => format!(
+            " (region: {target_addr:#x}..{:#x}, {sz:#x} bytes)",
+            target_addr.saturating_add(sz as u64)
+        ),
         None => String::new(),
     };
     let kind_msg = if kind != crate::session::MarkerKind::Pointer {
@@ -1865,10 +2208,19 @@ pub fn execute_set_marker(
     } else {
         String::new()
     };
-    s.log_activity(&ctx.id, format!("saved marker '${}' = {target_addr:#x}{size_msg}{kind_msg}", args.label));
+    s.log_activity(
+        &ctx.id,
+        format!(
+            "saved marker '${}' = {target_addr:#x}{size_msg}{kind_msg}",
+            args.label
+        ),
+    );
 
     Ok(ToolResult::with_data(
-        format!("saved marker '${}' = {target_addr:#x}{size_msg}{kind_msg}", args.label),
+        format!(
+            "saved marker '${}' = {target_addr:#x}{size_msg}{kind_msg}",
+            args.label
+        ),
         serde_json::json!({
             "label": args.label,
             "address": target_addr,
@@ -1897,13 +2249,28 @@ pub fn execute_get_marker(
             };
             let kind_str = match m.kind {
                 crate::session::MarkerKind::Pointer => String::new(),
-                crate::session::MarkerKind::Object  => " [object]".to_string(),
-                crate::session::MarkerKind::Buffer  => " [buffer]".to_string(),
-                crate::session::MarkerKind::Code    => " [code]".to_string(),
+                crate::session::MarkerKind::Object => " [object]".to_string(),
+                crate::session::MarkerKind::Buffer => " [buffer]".to_string(),
+                crate::session::MarkerKind::Code => " [code]".to_string(),
             };
-            let type_str = m.struct_type.as_deref().map(|t| format!(" <{t}>")).unwrap_or_default();
-            let text = format!("{} = {:#018x}{}{}{}{}", m.label, m.address, region_str, kind_str, type_str,
-                if note.is_empty() { String::new() } else { format!("  ({note})") });
+            let type_str = m
+                .struct_type
+                .as_deref()
+                .map(|t| format!(" <{t}>"))
+                .unwrap_or_default();
+            let text = format!(
+                "{} = {:#018x}{}{}{}{}",
+                m.label,
+                m.address,
+                region_str,
+                kind_str,
+                type_str,
+                if note.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({note})")
+                }
+            );
             Ok(ToolResult::with_data(
                 text,
                 serde_json::json!({
@@ -1945,13 +2312,28 @@ pub fn execute_list_markers(
             };
             let kind_str = match m.kind {
                 crate::session::MarkerKind::Pointer => String::new(),
-                crate::session::MarkerKind::Object  => " [object]".to_string(),
-                crate::session::MarkerKind::Buffer  => " [buffer]".to_string(),
-                crate::session::MarkerKind::Code    => " [code]".to_string(),
+                crate::session::MarkerKind::Object => " [object]".to_string(),
+                crate::session::MarkerKind::Buffer => " [buffer]".to_string(),
+                crate::session::MarkerKind::Code => " [code]".to_string(),
             };
-            let type_str = m.struct_type.as_deref().map(|t| format!(" <{t}>")).unwrap_or_default();
-            format!("{:<20} {:#018x}{}{}{}{}", m.label, m.address, region_str, kind_str, type_str,
-                if note.is_empty() { String::new() } else { format!("  ({note})") })
+            let type_str = m
+                .struct_type
+                .as_deref()
+                .map(|t| format!(" <{t}>"))
+                .unwrap_or_default();
+            format!(
+                "{:<20} {:#018x}{}{}{}{}",
+                m.label,
+                m.address,
+                region_str,
+                kind_str,
+                type_str,
+                if note.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({note})")
+                }
+            )
         })
         .collect();
 
@@ -1981,7 +2363,10 @@ pub fn execute_remove_marker(
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
     match s.remove_marker(&args.label) {
         Some(m) => {
-            s.log_activity(&ctx.id, format!("removed marker '${}' ({:#018x})", m.label, m.address));
+            s.log_activity(
+                &ctx.id,
+                format!("removed marker '${}' ({:#018x})", m.label, m.address),
+            );
             Ok(ToolResult::with_data(
                 format!("removed marker '${}' ({:#018x})", m.label, m.address),
                 serde_json::json!({
@@ -2008,7 +2393,13 @@ pub fn execute_undo_info(
     };
     match entry {
         Some(e) => Ok(ToolResult::with_data(
-            format!("undo #{}: {} @ {:#018x} ({} original byte(s))", e.id, e.description, e.address, e.original_bytes.len()),
+            format!(
+                "undo #{}: {} @ {:#018x} ({} original byte(s))",
+                e.id,
+                e.description,
+                e.address,
+                e.original_bytes.len()
+            ),
             serde_json::json!({
                 "id": e.id,
                 "description": e.description,
@@ -2046,14 +2437,28 @@ pub fn execute_undo_revert(
 
     // Write back original bytes
     mem.write(entry.address, &entry.original_bytes)
-        .map_err(|e| err(format!("failed to revert memory at {:#x}: {e}", entry.address)))?;
+        .map_err(|e| {
+            err(format!(
+                "failed to revert memory at {:#x}: {e}",
+                entry.address
+            ))
+        })?;
 
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
     s.pop_undo(entry.id);
-    s.log_activity(&ctx.id, format!("reverted undo #{}: {}", entry.id, entry.description));
+    s.log_activity(
+        &ctx.id,
+        format!("reverted undo #{}: {}", entry.id, entry.description),
+    );
 
     Ok(ToolResult::with_data(
-        format!("successfully reverted undo #{}: {} (restored {} bytes @ {:#x})", entry.id, entry.description, entry.original_bytes.len(), entry.address),
+        format!(
+            "successfully reverted undo #{}: {} (restored {} bytes @ {:#x})",
+            entry.id,
+            entry.description,
+            entry.original_bytes.len(),
+            entry.address
+        ),
         serde_json::json!({
             "id": entry.id,
             "address": entry.address,
@@ -2072,7 +2477,9 @@ pub fn execute_add_cheat(
 ) -> Result<ToolResult, ToolError> {
     let cheat_kind = match args.kind.to_lowercase().as_str() {
         "value" => {
-            let addr_str = args.address.ok_or_else(|| err("value cheat requires 'address'"))?;
+            let addr_str = args
+                .address
+                .ok_or_else(|| err("value cheat requires 'address'"))?;
             let target_addr = eval_addr_expr(session, &addr_str, mem)?;
             let vt = parse_value_type(args.value_type.as_deref().unwrap_or("i32")).map_err(err)?;
             CheatKind::Value {
@@ -2081,17 +2488,35 @@ pub fn execute_add_cheat(
                 address_expr: Some(addr_str),
             }
         }
-        other => return Err(err(format!("unsupported cheat kind: '{other}' (expected 'value')"))),
+        other => {
+            return Err(err(format!(
+                "unsupported cheat kind: '{other}' (expected 'value')"
+            )));
+        }
     };
 
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let is_hidden = args.hidden.unwrap_or(false);
-    let id = s.add_cheat_group(&args.label, cheat_kind, args.group.as_deref(), args.hotkey.as_deref(), is_hidden, args.note.as_deref());
+    let id = s.add_cheat_group(
+        &args.label,
+        cheat_kind,
+        args.group.as_deref(),
+        args.hotkey.as_deref(),
+        is_hidden,
+        args.note.as_deref(),
+    );
     let group_str = match &args.group {
         Some(g) => format!(" [group: '{g}']"),
         None => String::new(),
     };
-    s.log_activity(&ctx.id, format!("added cheat '{}' (id {id}{group_str}{})", args.label, if is_hidden { ", hidden" } else { "" }));
+    s.log_activity(
+        &ctx.id,
+        format!(
+            "added cheat '{}' (id {id}{group_str}{})",
+            args.label,
+            if is_hidden { ", hidden" } else { "" }
+        ),
+    );
 
     Ok(ToolResult::with_data(
         format!("added cheat '{}' (id {id}{group_str})", args.label),
@@ -2125,22 +2550,46 @@ pub fn execute_list_cheats(
                 None => String::new(),
             };
             let kind = match &c.kind {
-                CheatKind::Value { address, value_type, address_expr } => {
+                CheatKind::Value {
+                    address,
+                    value_type,
+                    address_expr,
+                } => {
                     if let Some(expr) = address_expr {
                         format!("value {value_type:?} @ {expr} ({address:#x})")
                     } else {
                         format!("value {value_type:?} @ {address:#x}")
                     }
                 }
-                CheatKind::Struct { base_address, base_expr, fields } => {
-                    format!("struct ({base_expr} @ {base_address:#x}) [{} field(s)]", fields.len())
+                CheatKind::Struct {
+                    base_address,
+                    base_expr,
+                    fields,
+                } => {
+                    format!(
+                        "struct ({base_expr} @ {base_address:#x}) [{} field(s)]",
+                        fields.len()
+                    )
                 }
-                CheatKind::Toggle { target, enabled, .. } => {
-                    format!("toggle @ {target:#x} ({})", if *enabled { "on" } else { "off" })
+                CheatKind::Toggle {
+                    target, enabled, ..
+                } => {
+                    format!(
+                        "toggle @ {target:#x} ({})",
+                        if *enabled { "on" } else { "off" }
+                    )
                 }
-                CheatKind::Patch { target, enabled, cave_ref, .. } => {
+                CheatKind::Patch {
+                    target,
+                    enabled,
+                    cave_ref,
+                    ..
+                } => {
                     let desc = cave_ref.as_deref().unwrap_or("fast patch");
-                    format!("patch @ {target:#x} ({}, {desc})", if *enabled { "on" } else { "off" })
+                    format!(
+                        "patch @ {target:#x} ({}, {desc})",
+                        if *enabled { "on" } else { "off" }
+                    )
                 }
                 CheatKind::Button { commands } => {
                     format!("button ({} cmd(s))", commands.len())
@@ -2174,9 +2623,7 @@ pub fn execute_set_cheat_toggle(
     use crate::session::PendingKind;
 
     let kind = {
-        let s = session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
+        let s = session.lock().map_err(|_| err("session lock poisoned"))?;
         let c = s
             .get_cheat(args.id)
             .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
@@ -2184,7 +2631,13 @@ pub fn execute_set_cheat_toggle(
     };
 
     match kind {
-        CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
+        CheatKind::Toggle {
+            target,
+            hook,
+            enabled,
+            original_bytes,
+            ..
+        } => {
             if enabled == args.enabled {
                 return Ok(ToolResult::with_data(
                     format!(
@@ -2211,13 +2664,15 @@ pub fn execute_set_cheat_toggle(
                 }
             }
 
-            let mut s = session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
+            let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
             let pid = if args.enabled {
                 s.stage_op_with_cheat(
                     target,
-                    PendingKind::InstallCave { hook, marker: None, label_offsets: std::collections::HashMap::new() },
+                    PendingKind::InstallCave {
+                        hook,
+                        marker: None,
+                        label_offsets: std::collections::HashMap::new(),
+                    },
                     format!("enable toggle cheat {} at {:#x}", args.id, target),
                     Some(args.id),
                 )
@@ -2235,7 +2690,13 @@ pub fn execute_set_cheat_toggle(
                     Some(args.id),
                 )
             };
-            s.log_activity(&ctx.id, format!("staged toggle change (pending id {pid}) for cheat {}", args.id));
+            s.log_activity(
+                &ctx.id,
+                format!(
+                    "staged toggle change (pending id {pid}) for cheat {}",
+                    args.id
+                ),
+            );
             drop(s);
 
             Ok(ToolResult::with_data(
@@ -2251,7 +2712,13 @@ pub fn execute_set_cheat_toggle(
                 }),
             ))
         }
-        CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+        CheatKind::Patch {
+            target,
+            patch_bytes,
+            original_bytes,
+            enabled,
+            cave_ref,
+        } => {
             if enabled == args.enabled {
                 return Ok(ToolResult::with_data(
                     format!(
@@ -2273,17 +2740,30 @@ pub fn execute_set_cheat_toggle(
                     args.id
                 )));
             }
-            let data = if args.enabled { patch_bytes } else { original_bytes };
-            let mut s = session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
+            let data = if args.enabled {
+                patch_bytes
+            } else {
+                original_bytes
+            };
+            let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
             let pid = s.stage_op_with_cheat(
                 target,
                 PendingKind::Write { data },
-                format!("{} patch cheat {} at {:#x} ({desc})", if args.enabled { "enable" } else { "disable" }, args.id, target),
+                format!(
+                    "{} patch cheat {} at {:#x} ({desc})",
+                    if args.enabled { "enable" } else { "disable" },
+                    args.id,
+                    target
+                ),
                 Some(args.id),
             );
-            s.log_activity(&ctx.id, format!("staged patch toggle (pending id {pid}) for cheat {}", args.id));
+            s.log_activity(
+                &ctx.id,
+                format!(
+                    "staged patch toggle (pending id {pid}) for cheat {}",
+                    args.id
+                ),
+            );
             drop(s);
 
             Ok(ToolResult::with_data(
@@ -2299,7 +2779,10 @@ pub fn execute_set_cheat_toggle(
                 }),
             ))
         }
-        _ => Err(err(format!("cheat {} is not a toggle or patch cheat", args.id))),
+        _ => Err(err(format!(
+            "cheat {} is not a toggle or patch cheat",
+            args.id
+        ))),
     }
 }
 
@@ -2312,7 +2795,10 @@ pub fn execute_remove_cheat(
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
     match s.remove_cheat(args.id) {
         Some(c) => {
-            s.log_activity(&ctx.id, format!("removed cheat '{}' (id {})", c.label, c.id));
+            s.log_activity(
+                &ctx.id,
+                format!("removed cheat '{}' (id {})", c.label, c.id),
+            );
             Ok(ToolResult::with_data(
                 format!("removed cheat '{}' (id {})", c.label, c.id),
                 serde_json::json!({
@@ -2336,9 +2822,15 @@ pub fn execute_set_cheat_value(
     let (target_addr, value_type) = {
         let (expr_opt, addr_fallback, vt) = {
             let s = session.lock().map_err(|_| err("session lock poisoned"))?;
-            let c = s.get_cheat(args.id).ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
+            let c = s
+                .get_cheat(args.id)
+                .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
             match &c.kind {
-                CheatKind::Value { address, value_type, address_expr } => (address_expr.clone(), *address, *value_type),
+                CheatKind::Value {
+                    address,
+                    value_type,
+                    address_expr,
+                } => (address_expr.clone(), *address, *value_type),
                 _ => return Err(err(format!("cheat {} is not a value cheat", args.id))),
             }
         };
@@ -2353,19 +2845,33 @@ pub fn execute_set_cheat_value(
     let data = parse_value_bytes(&args.value, value_type).map_err(err)?;
     let orig = mem.read(target_addr, data.len()).unwrap_or_default();
 
-    mem.write(target_addr, &data).map_err(|e| err(format!("failed to write cheat value: {e}")))?;
+    mem.write(target_addr, &data)
+        .map_err(|e| err(format!("failed to write cheat value: {e}")))?;
 
     let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let undo_id = if !orig.is_empty() {
-        Some(s.record_undo(target_addr, orig, format!("set cheat #{} to {}", args.id, args.value)))
+        Some(s.record_undo(
+            target_addr,
+            orig,
+            format!("set cheat #{} to {}", args.id, args.value),
+        ))
     } else {
         None
     };
 
-    s.log_activity(&ctx.id, format!("set cheat #{} value to '{}' @ {target_addr:#x}", args.id, args.value));
+    s.log_activity(
+        &ctx.id,
+        format!(
+            "set cheat #{} value to '{}' @ {target_addr:#x}",
+            args.id, args.value
+        ),
+    );
 
     Ok(ToolResult::with_data(
-        format!("set cheat #{} value to '{}' @ {target_addr:#x}", args.id, args.value),
+        format!(
+            "set cheat #{} value to '{}' @ {target_addr:#x}",
+            args.id, args.value
+        ),
         serde_json::json!({
             "id": args.id,
             "address": target_addr,
@@ -2394,7 +2900,10 @@ pub fn execute_list_profiles(
     for dp in &all_profiles {
         match dp {
             crate::profile::DiscoveredProfile::Valid { file, profile } => {
-                lines.push(format!("{} — game: {} ({}) v{}", file, profile.game, profile.name, profile.version));
+                lines.push(format!(
+                    "{} — game: {} ({}) v{}",
+                    file, profile.game, profile.name, profile.version
+                ));
                 json_list.push(serde_json::json!({
                     "file": file,
                     "valid": true,
@@ -2429,14 +2938,16 @@ pub fn execute_save_profile(
     ctx: &ClientContext,
     args: ProfileSaveArgs,
 ) -> Result<ToolResult, ToolError> {
-    use std::collections::HashMap;
     use crate::profile::{GameProfile, ProfileCheat};
+    use std::collections::HashMap;
 
     let (game, profile_cheats, setup_steps, profile_meta) = {
         let s = session.lock().map_err(|_| err("session lock poisoned"))?;
         let game = s.game_name().to_string();
         if game.is_empty() {
-            return Err(err("cannot save profile: session has no target game attached"));
+            return Err(err(
+                "cannot save profile: session has no target game attached",
+            ));
         }
 
         // Build a lookup map of address -> marker name so cheats can reference setup steps symbolically
@@ -2452,48 +2963,169 @@ pub fn execute_save_profile(
         let profile_cheats: Vec<ProfileCheat> = cheats
             .iter()
             .map(|c| {
-                let (kind, value_type, address_ref, target_ref, hook, payload, base, fields, orig_bytes) = match &c.kind {
-                    CheatKind::Value { address, value_type, address_expr } => {
-                        let addr_ref = address_expr.clone().or_else(|| addr_to_marker.get(address).cloned()).unwrap_or_else(|| format!("{address:#x}"));
-                        ("value".to_string(), Some(format!("{value_type:?}").to_lowercase()), Some(addr_ref), None, None, None, None, None, None)
+                let (
+                    kind,
+                    value_type,
+                    address_ref,
+                    target_ref,
+                    hook,
+                    payload,
+                    base,
+                    fields,
+                    orig_bytes,
+                ) = match &c.kind {
+                    CheatKind::Value {
+                        address,
+                        value_type,
+                        address_expr,
+                    } => {
+                        let addr_ref = address_expr
+                            .clone()
+                            .or_else(|| addr_to_marker.get(address).cloned())
+                            .unwrap_or_else(|| format!("{address:#x}"));
+                        (
+                            "value".to_string(),
+                            Some(format!("{value_type:?}").to_lowercase()),
+                            Some(addr_ref),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
                     }
-                    CheatKind::Struct { base_address, base_expr, fields } => {
+                    CheatKind::Struct {
+                        base_address,
+                        base_expr,
+                        fields,
+                    } => {
                         let b = if base_expr.is_empty() {
-                            addr_to_marker.get(base_address).cloned().unwrap_or_else(|| format!("{base_address:#x}"))
+                            addr_to_marker
+                                .get(base_address)
+                                .cloned()
+                                .unwrap_or_else(|| format!("{base_address:#x}"))
                         } else {
                             base_expr.clone()
                         };
-                        ("struct".to_string(), None, None, None, None, None, Some(b), Some(fields.clone()), None)
+                        (
+                            "struct".to_string(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(b),
+                            Some(fields.clone()),
+                            None,
+                        )
                     }
-                    CheatKind::Toggle { target, hook, original_bytes, .. } => {
+                    CheatKind::Toggle {
+                        target,
+                        hook,
+                        original_bytes,
+                        ..
+                    } => {
                         let (hk, pl) = match hook {
-                            crate::cave_hook::CaveHook::Trampoline { payload, .. } => {
-                                ("trampoline".to_string(), Some(payload.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
-                            }
-                            crate::cave_hook::CaveHook::Override { payload, .. } => {
-                                ("override".to_string(), Some(payload.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")))
-                            }
+                            crate::cave_hook::CaveHook::Trampoline { payload, .. } => (
+                                "trampoline".to_string(),
+                                Some(
+                                    payload
+                                        .iter()
+                                        .map(|b| format!("{b:02x}"))
+                                        .collect::<Vec<_>>()
+                                        .join(" "),
+                                ),
+                            ),
+                            crate::cave_hook::CaveHook::Override { payload, .. } => (
+                                "override".to_string(),
+                                Some(
+                                    payload
+                                        .iter()
+                                        .map(|b| format!("{b:02x}"))
+                                        .collect::<Vec<_>>()
+                                        .join(" "),
+                                ),
+                            ),
                         };
                         let orig = if !original_bytes.is_empty() {
-                            Some(original_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "))
+                            Some(
+                                original_bytes
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            )
                         } else {
                             None
                         };
-                        let tgt_ref = addr_to_marker.get(target).cloned().unwrap_or_else(|| format!("{target:#x}"));
-                        ("toggle".to_string(), None, None, Some(tgt_ref), Some(hk), pl, None, None, orig)
+                        let tgt_ref = addr_to_marker
+                            .get(target)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{target:#x}"));
+                        (
+                            "toggle".to_string(),
+                            None,
+                            None,
+                            Some(tgt_ref),
+                            Some(hk),
+                            pl,
+                            None,
+                            None,
+                            orig,
+                        )
                     }
-                    CheatKind::Patch { target, patch_bytes, cave_ref, original_bytes, .. } => {
+                    CheatKind::Patch {
+                        target,
+                        patch_bytes,
+                        cave_ref,
+                        original_bytes,
+                        ..
+                    } => {
                         let orig = if !original_bytes.is_empty() {
-                            Some(original_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "))
+                            Some(
+                                original_bytes
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            )
                         } else {
                             None
                         };
-                        let tgt_ref = addr_to_marker.get(target).cloned().unwrap_or_else(|| format!("{target:#x}"));
-                        ("patch".to_string(), None, None, Some(tgt_ref), cave_ref.clone(), Some(patch_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")), None, None, orig)
+                        let tgt_ref = addr_to_marker
+                            .get(target)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{target:#x}"));
+                        (
+                            "patch".to_string(),
+                            None,
+                            None,
+                            Some(tgt_ref),
+                            cave_ref.clone(),
+                            Some(
+                                patch_bytes
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            ),
+                            None,
+                            None,
+                            orig,
+                        )
                     }
-                    CheatKind::Button { .. } => {
-                        ("button".to_string(), None, None, None, None, None, None, None, None)
-                    }
+                    CheatKind::Button { .. } => (
+                        "button".to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
                 };
                 ProfileCheat {
                     id: c.id.to_string(),
@@ -2525,8 +3157,14 @@ pub fn execute_save_profile(
             })
             .collect();
 
-        let profile_name = s.profile_name().map(|n| n.to_string()).unwrap_or_else(|| format!("{game} cheats"));
-        let profile_version = s.profile_version().map(|v| v.to_string()).unwrap_or_else(|| "1.0.0".into());
+        let profile_name = s
+            .profile_name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| format!("{game} cheats"));
+        let profile_version = s
+            .profile_version()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "1.0.0".into());
         let game_version = s.profile_game_version().map(|v| v.to_string());
         let author = s.profile_author().map(|a| a.to_string());
         let date = s.profile_date().map(|d| d.to_string());
@@ -2534,7 +3172,21 @@ pub fn execute_save_profile(
         let profile_render = s.profile_render().cloned();
         let profile_network = s.profile_network().cloned();
 
-        (game, profile_cheats, setup_steps, (profile_name, profile_version, game_version, author, date, init_commands, profile_render, profile_network))
+        (
+            game,
+            profile_cheats,
+            setup_steps,
+            (
+                profile_name,
+                profile_version,
+                game_version,
+                author,
+                date,
+                init_commands,
+                profile_render,
+                profile_network,
+            ),
+        )
     };
 
     let (name, version, game_version, author, date, init_commands, render, network) = profile_meta;
@@ -2557,18 +3209,31 @@ pub fn execute_save_profile(
     };
 
     let yaml = profile.to_yaml().map_err(err)?;
-    let file = args.file.unwrap_or_else(|| format!("{}.yaml", game.replace(".exe", "")));
+    let file = args
+        .file
+        .unwrap_or_else(|| format!("{}.yaml", game.replace(".exe", "")));
     let dir = crate::profile::profiles_dir_path();
     std::fs::create_dir_all(&dir).map_err(|e| err(format!("mkdir {dir:?}: {e}")))?;
     let path = dir.join(&file);
     std::fs::write(&path, yaml).map_err(|e| err(format!("write {path:?}: {e}")))?;
 
     if let Ok(mut s) = session.lock() {
-        s.log_activity(&ctx.id, format!("saved profile to {} ({} cheats)", path.display(), profile_cheats.len()));
+        s.log_activity(
+            &ctx.id,
+            format!(
+                "saved profile to {} ({} cheats)",
+                path.display(),
+                profile_cheats.len()
+            ),
+        );
     }
 
     Ok(ToolResult::with_data(
-        format!("saved profile to {} ({} cheats)", path.display(), profile_cheats.len()),
+        format!(
+            "saved profile to {} ({} cheats)",
+            path.display(),
+            profile_cheats.len()
+        ),
         serde_json::json!({
             "path": path.to_string_lossy(),
             "cheats_count": profile_cheats.len(),
@@ -2603,7 +3268,11 @@ pub fn execute_emit_relative_jump(
         bytes.push(0x90); // NOP padding
     }
 
-    let hex_str = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let hex_str = bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let text = format!(
         "relative jump from {from:#x} to {to:#x} (padded to {pad_len} bytes):\nhex: \"{hex_str}\""
     );
@@ -2642,18 +3311,22 @@ pub fn execute_assemble_asm(
         0
     };
 
-    let assembled = crate::asm::assemble_text(&args.code, origin_rip, &symbols)
-        .map_err(err)?;
+    let assembled = crate::asm::assemble_text(&args.code, origin_rip, &symbols).map_err(err)?;
 
     let disasm_lines = crate::disasm::disassemble(origin_rip, &assembled.bytes, Some(50));
 
     // If origin_rip is non-zero, automatically set markers for defined labels
-    if origin_rip != 0 && !assembled.label_offsets.is_empty() {
-        if let Ok(mut s) = session.lock() {
-            for (lbl_name, offset) in &assembled.label_offsets {
-                let lbl_addr = origin_rip.saturating_add(*offset);
-                let _ = s.set_marker(lbl_name, lbl_addr, Some(&format!("Label from assembly at +{offset:#x}")));
-            }
+    if origin_rip != 0
+        && !assembled.label_offsets.is_empty()
+        && let Ok(mut s) = session.lock()
+    {
+        for (lbl_name, offset) in &assembled.label_offsets {
+            let lbl_addr = origin_rip.saturating_add(*offset);
+            let _ = s.set_marker(
+                lbl_name,
+                lbl_addr,
+                Some(&format!("Label from assembly at +{offset:#x}")),
+            );
         }
     }
 
@@ -2694,9 +3367,7 @@ pub fn execute_list_pending(
     session: &SharedSession,
     ctx: &ClientContext,
 ) -> Result<ToolResult, ToolError> {
-    let s = session
-        .lock()
-        .map_err(|_| err("session lock poisoned"))?;
+    let s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let pending = s.list_pending();
     if pending.is_empty() {
         return Ok(ToolResult::with_data(
@@ -2707,17 +3378,25 @@ pub fn execute_list_pending(
             }),
         ));
     }
-    let mut lines = vec![format!("{} pending mutation(s) awaiting confirmation:", pending.len())];
+    let mut lines = vec![format!(
+        "{} pending mutation(s) awaiting confirmation:",
+        pending.len()
+    )];
     for op in &pending {
         lines.push(format!("  [{}] {}", op.id, op.preview));
     }
     let text = lines.join("\n");
-    let json_items: Vec<_> = pending.iter().map(|p| serde_json::json!({
-        "id": p.id,
-        "address": p.address,
-        "preview": p.preview,
-        "cheat_id": p.cheat_id,
-    })).collect();
+    let json_items: Vec<_> = pending
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "address": p.address,
+                "preview": p.preview,
+                "cheat_id": p.cheat_id,
+            })
+        })
+        .collect();
 
     Ok(ToolResult::with_data(
         text,
@@ -2735,15 +3414,16 @@ pub fn execute_reject_op(
     args: OpConfirmArgs,
 ) -> Result<ToolResult, ToolError> {
     let op = {
-        let mut s = session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
+        let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
         s.take_pending(args.id)
     };
     match op {
         Some(op) => {
             if let Ok(mut s) = session.lock() {
-                s.log_activity(&ctx.id, format!("rejected pending op {} ({})", op.id, op.preview));
+                s.log_activity(
+                    &ctx.id,
+                    format!("rejected pending op {} ({})", op.id, op.preview),
+                );
             }
             Ok(ToolResult::with_data(
                 format!("rejected pending op {} ({})", op.id, op.preview),
@@ -2780,7 +3460,11 @@ pub fn execute_stage_write(
                 "write {} byte(s) at {:#x}: {}",
                 bytes.len(),
                 address,
-                bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+                bytes
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
             (bytes, desc)
         }
@@ -2802,27 +3486,36 @@ pub fn execute_stage_write(
                 val_str,
                 vt_str,
                 address,
-                bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+                bytes
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
             (bytes, desc)
         }
         (Some(_), Some(_)) => {
-            return Err(err("specify either 'data' (raw hex) or 'value' (typed value), but not both"));
+            return Err(err(
+                "specify either 'data' (raw hex) or 'value' (typed value), but not both",
+            ));
         }
         (None, None) => {
-            return Err(err("must specify either 'data' (raw hex) or 'value' (typed value)"));
+            return Err(err(
+                "must specify either 'data' (raw hex) or 'value' (typed value)",
+            ));
         }
     };
 
-    let mut s = session
-        .lock()
-        .map_err(|_| err("session lock poisoned"))?;
-    let id = s.stage_op(
-        address,
-        PendingKind::Write { data: data.clone() },
-        desc,
+    let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
+    let id = s.stage_op(address, PendingKind::Write { data: data.clone() }, desc);
+    s.log_activity(
+        &ctx.id,
+        format!(
+            "staged write (pending id {id}): {} byte(s) at {:#x}",
+            data.len(),
+            address
+        ),
     );
-    s.log_activity(&ctx.id, format!("staged write (pending id {id}): {} byte(s) at {:#x}", data.len(), address));
     drop(s);
 
     Ok(ToolResult::with_data(
@@ -2852,49 +3545,83 @@ pub fn execute_stage_install_cave(
     let target = eval_addr_expr(session, &args.target, mem)?;
 
     if args.asm.is_some() && !args.payload.trim().is_empty() {
-        return Err(err("cannot provide both 'asm' and 'payload' (mutually exclusive)"));
+        return Err(err(
+            "cannot provide both 'asm' and 'payload' (mutually exclusive)",
+        ));
     }
 
     let (payload, label_offsets) = if let Some(asm_src) = &args.asm {
         let symbols: std::collections::HashMap<String, u64> = {
             let s = session.lock().map_err(|_| err("session lock poisoned"))?;
-            s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
+            s.list_markers()
+                .iter()
+                .map(|m| (m.label.clone(), m.address))
+                .collect()
         };
         let block = crate::asm::assemble_text(asm_src, target, &symbols).map_err(err)?;
         (block.bytes, block.label_offsets)
     } else {
-        (crate::expr::parse_hex_bytes(&args.payload).map_err(err)?, std::collections::HashMap::new())
+        (
+            crate::expr::parse_hex_bytes(&args.payload).map_err(err)?,
+            std::collections::HashMap::new(),
+        )
     };
 
     let jump = match args.jump.to_lowercase().as_str() {
         "absolute" => JumpStyle::Absolute,
         "relative" | "short" => JumpStyle::Relative,
-        other => return Err(err(format!("unknown jump style '{other}' (expected 'absolute' or 'relative')"))),
+        other => {
+            return Err(err(format!(
+                "unknown jump style '{other}' (expected 'absolute' or 'relative')"
+            )));
+        }
     };
     let hook = match args.hook.as_str() {
-        "trampoline" => CaveHook::Trampoline { payload: payload.clone(), jump },
-        "override" => CaveHook::Override { payload: payload.clone(), jump },
-        other => return Err(err(format!("unknown hook kind '{other}' (expected 'trampoline' or 'override')"))),
+        "trampoline" => CaveHook::Trampoline {
+            payload: payload.clone(),
+            jump,
+        },
+        "override" => CaveHook::Override {
+            payload: payload.clone(),
+            jump,
+        },
+        other => {
+            return Err(err(format!(
+                "unknown hook kind '{other}' (expected 'trampoline' or 'override')"
+            )));
+        }
     };
     let kind_desc = match &hook {
         CaveHook::Trampoline { .. } => "trampoline",
         CaveHook::Override { .. } => "override",
     };
 
-    let mut s = session
-        .lock()
-        .map_err(|_| err("session lock poisoned"))?;
+    let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let id = s.stage_op(
         target,
-        PendingKind::InstallCave { hook, marker: args.marker.clone(), label_offsets },
+        PendingKind::InstallCave {
+            hook,
+            marker: args.marker.clone(),
+            label_offsets,
+        },
         format!(
             "install {kind_desc} cave at {:#x}, payload={} byte(s){}",
             target,
             payload.len(),
-            if let Some(m) = &args.marker { format!(" (marker: '{m}')") } else { String::new() }
+            if let Some(m) = &args.marker {
+                format!(" (marker: '{m}')")
+            } else {
+                String::new()
+            }
         ),
     );
-    s.log_activity(&ctx.id, format!("staged {kind_desc} cave install (pending id {id}) at {:#x}", target));
+    s.log_activity(
+        &ctx.id,
+        format!(
+            "staged {kind_desc} cave install (pending id {id}) at {:#x}",
+            target
+        ),
+    );
     drop(s);
 
     Ok(ToolResult::with_data(
@@ -2921,9 +3648,7 @@ pub fn execute_stage_undo(
 ) -> Result<ToolResult, ToolError> {
     use crate::session::PendingKind;
     let entry = {
-        let s = session
-            .lock()
-            .map_err(|_| err("session lock poisoned"))?;
+        let s = session.lock().map_err(|_| err("session lock poisoned"))?;
         if args.id != 0 {
             s.get_undo(args.id).cloned()
         } else {
@@ -2934,9 +3659,7 @@ pub fn execute_stage_undo(
         return Err(err("nothing to undo"));
     };
 
-    let mut s = session
-        .lock()
-        .map_err(|_| err("session lock poisoned"))?;
+    let mut s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let id = s.stage_op(
         e.address,
         PendingKind::Undo {
@@ -2950,7 +3673,10 @@ pub fn execute_stage_undo(
             e.original_bytes.len()
         ),
     );
-    s.log_activity(&ctx.id, format!("staged undo (pending id {id}) for undo #{}", e.id));
+    s.log_activity(
+        &ctx.id,
+        format!("staged undo (pending id {id}) for undo #{}", e.id),
+    );
     drop(s);
 
     Ok(ToolResult::with_data(
@@ -2983,21 +3709,43 @@ mod tests {
         drop(binding);
 
         // 1. Test relative jump calculation
-        let jmp_res = execute_emit_relative_jump(&session, &ctx, None, EmitRelativeJumpArgs {
-            from: "0x140000000".into(),
-            to: "0x140001000".into(),
-            pad_to_len: Some(7),
-        }).unwrap();
-        assert!(jmp_res.message.contains("relative jump from 0x140000000 to 0x140001000"));
+        let jmp_res = execute_emit_relative_jump(
+            &session,
+            &ctx,
+            None,
+            EmitRelativeJumpArgs {
+                from: "0x140000000".into(),
+                to: "0x140001000".into(),
+                pad_to_len: Some(7),
+            },
+        )
+        .unwrap();
+        assert!(
+            jmp_res
+                .message
+                .contains("relative jump from 0x140000000 to 0x140001000")
+        );
         assert!(jmp_res.message.contains("padded to 7 bytes"));
 
         // 2. Test assemble asm with named marker and defined labels
-        session.lock().unwrap().set_marker("cave_target", 0x140002000, None).unwrap();
+        session
+            .lock()
+            .unwrap()
+            .set_marker("cave_target", 0x140002000, None)
+            .unwrap();
 
-        let asm_res = execute_assemble_asm(&session, &ctx, None, AssembleAsmArgs {
-            code: "mov rax, 0x1234\nfire_flag:\ndb 01\ncmd_ptr:\ndq 0x12345678\njmp $cave_target".into(),
-            origin: Some("0x140000000".into()),
-        }).unwrap();
+        let asm_res = execute_assemble_asm(
+            &session,
+            &ctx,
+            None,
+            AssembleAsmArgs {
+                code:
+                    "mov rax, 0x1234\nfire_flag:\ndb 01\ncmd_ptr:\ndq 0x12345678\njmp $cave_target"
+                        .into(),
+                origin: Some("0x140000000".into()),
+            },
+        )
+        .unwrap();
         assert!(asm_res.message.contains("assembled"));
         assert!(asm_res.message.contains("disassembled"));
         assert!(asm_res.message.contains("fire_flag"));
@@ -3050,22 +3798,49 @@ mod tests {
         drop(s);
 
         // Test read i32
-        let res_i32 = execute_read(&session, &ctx, &mem, ReadArgs {
-            address: "0x00".into(),
-            len: None,
-            value_type: Some("i32".into()),
-        }).unwrap();
+        let res_i32 = execute_read(
+            &session,
+            &ctx,
+            &mem,
+            ReadArgs {
+                address: "0x00".into(),
+                len: None,
+                value_type: Some("i32".into()),
+            },
+        )
+        .unwrap();
         assert_eq!(res_i32.message, "12345");
 
         // Test dump struct
-        let res_struct = execute_dump_struct(&session, &ctx, &mem, DumpStructArgs {
-            address: "0x00".into(),
-            fields: vec![
-                StructFieldSpec { name: "health".into(), offset: 0, value_type: "i32".into(), len: None },
-                StructFieldSpec { name: "speed".into(), offset: 4, value_type: "f32".into(), len: None },
-                StructFieldSpec { name: "tag".into(), offset: 8, value_type: "cstr".into(), len: Some(16) },
-            ],
-        }).unwrap();
+        let res_struct = execute_dump_struct(
+            &session,
+            &ctx,
+            &mem,
+            DumpStructArgs {
+                address: "0x00".into(),
+                fields: vec![
+                    StructFieldSpec {
+                        name: "health".into(),
+                        offset: 0,
+                        value_type: "i32".into(),
+                        len: None,
+                    },
+                    StructFieldSpec {
+                        name: "speed".into(),
+                        offset: 4,
+                        value_type: "f32".into(),
+                        len: None,
+                    },
+                    StructFieldSpec {
+                        name: "tag".into(),
+                        offset: 8,
+                        value_type: "cstr".into(),
+                        len: Some(16),
+                    },
+                ],
+            },
+        )
+        .unwrap();
         assert!(res_struct.message.contains("health: 12345"));
         assert!(res_struct.message.contains("speed: 2.5"));
         assert!(res_struct.message.contains("tag: \"hi\""));
@@ -3084,7 +3859,11 @@ mod tests {
         }
 
         impl ProcessMemory for ScanMem {
-            fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> {
+            fn read(
+                &self,
+                address: u64,
+                len: usize,
+            ) -> Result<Vec<u8>, crate::memory::MemoryError> {
                 let d = self.data.lock().unwrap();
                 let start = address as usize;
                 let end = (start + len).min(d.len());
@@ -3093,7 +3872,11 @@ mod tests {
                 }
                 Ok(d[start..end].to_vec())
             }
-            fn write(&self, address: u64, data: &[u8]) -> Result<usize, crate::memory::MemoryError> {
+            fn write(
+                &self,
+                address: u64,
+                data: &[u8],
+            ) -> Result<usize, crate::memory::MemoryError> {
                 let mut d = self.data.lock().unwrap();
                 let start = address as usize;
                 if start + data.len() > d.len() {
@@ -3114,20 +3897,28 @@ mod tests {
             }
         }
 
-        let mem = ScanMem { data: std::sync::Mutex::new(data) };
+        let mem = ScanMem {
+            data: std::sync::Mutex::new(data),
+        };
         let session = Arc::new(Mutex::new(SessionState::new()));
         let mut s = session.lock().unwrap();
         let mut ctx = s.create_context("scan-test-client", ClientKind::Gui);
         drop(s);
 
         // 1. scan_start
-        let res1 = execute_scan_start(&session, &mut ctx, &mem, ScanStartArgs {
-            value_type: "i32".into(),
-            value: 100.0,
-            max: None,
-            alignment: Some(4),
-            region: None,
-        }).unwrap();
+        let res1 = execute_scan_start(
+            &session,
+            &mut ctx,
+            &mem,
+            ScanStartArgs {
+                value_type: "i32".into(),
+                value: 100.0,
+                max: None,
+                alignment: Some(4),
+                region: None,
+            },
+        )
+        .unwrap();
         assert!(res1.message.contains("2 match(es)"));
 
         // 2. scan_status
@@ -3135,10 +3926,16 @@ mod tests {
         assert!(res_status.message.contains("2 match(es)"));
 
         // 3. scan_set (batch test-write 999 to both matches)
-        let res_set = execute_scan_set(&session, &ctx, &mem, ScanSetArgs {
-            value: "999".into(),
-            value_type: Some("i32".into()),
-        }).unwrap();
+        let res_set = execute_scan_set(
+            &session,
+            &ctx,
+            &mem,
+            ScanSetArgs {
+                value: "999".into(),
+                value_type: Some("i32".into()),
+            },
+        )
+        .unwrap();
         assert!(res_set.message.contains("wrote '999' to 2 address(es)"));
 
         // Verify values written in memory
@@ -3146,11 +3943,17 @@ mod tests {
         assert_eq!(i32::from_le_bytes(check_val.try_into().unwrap()), 999);
 
         // 4. scan_next (refine exact 999)
-        let res_next = execute_scan_next(&session, &mut ctx, &mem, ScanNextArgs {
-            op: "exact".into(),
-            value: Some(999.0),
-            max: None,
-        }).unwrap();
+        let res_next = execute_scan_next(
+            &session,
+            &mut ctx,
+            &mem,
+            ScanNextArgs {
+                op: "exact".into(),
+                value: Some(999.0),
+                max: None,
+            },
+        )
+        .unwrap();
         assert!(res_next.message.contains("2 match(es)"));
 
         // 5. scan_clear
@@ -3169,7 +3972,11 @@ mod tests {
         }
 
         impl ProcessMemory for MockMem2 {
-            fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> {
+            fn read(
+                &self,
+                address: u64,
+                len: usize,
+            ) -> Result<Vec<u8>, crate::memory::MemoryError> {
                 let d = self.data.lock().unwrap();
                 let start = address as usize;
                 let end = (start + len).min(d.len());
@@ -3178,7 +3985,11 @@ mod tests {
                 }
                 Ok(d[start..end].to_vec())
             }
-            fn write(&self, address: u64, data: &[u8]) -> Result<usize, crate::memory::MemoryError> {
+            fn write(
+                &self,
+                address: u64,
+                data: &[u8],
+            ) -> Result<usize, crate::memory::MemoryError> {
                 let mut d = self.data.lock().unwrap();
                 let start = address as usize;
                 if start + data.len() > d.len() {
@@ -3192,52 +4003,77 @@ mod tests {
             }
         }
 
-        let mem = MockMem2 { data: std::sync::Mutex::new(data) };
+        let mem = MockMem2 {
+            data: std::sync::Mutex::new(data),
+        };
         let session = Arc::new(Mutex::new(SessionState::new()));
         let mut s = session.lock().unwrap();
         let ctx = s.create_context("mcp-client-1", ClientKind::Mcp { agent_name: None });
         drop(s);
 
         // 1. Marker operations
-        let m_set = execute_set_marker(&session, &ctx, Some(&mem), SetMarkerArgs {
-            label: "gold_addr".into(),
-            address: "0x20".into(),
-            size: None,
-            kind: None,
-            struct_type: None,
-            note: Some("gold currency".into()),
-        }).unwrap();
+        let m_set = execute_set_marker(
+            &session,
+            &ctx,
+            Some(&mem),
+            SetMarkerArgs {
+                label: "gold_addr".into(),
+                address: "0x20".into(),
+                size: None,
+                kind: None,
+                struct_type: None,
+                note: Some("gold currency".into()),
+            },
+        )
+        .unwrap();
         assert!(m_set.message.contains("saved marker '$gold_addr' = 0x20"));
 
-        let m_get = execute_get_marker(&session, &ctx, GetMarkerArgs {
-            label: "gold_addr".into(),
-        }).unwrap();
+        let m_get = execute_get_marker(
+            &session,
+            &ctx,
+            GetMarkerArgs {
+                label: "gold_addr".into(),
+            },
+        )
+        .unwrap();
         assert!(m_get.message.contains("gold_addr = 0x0000000000000020"));
 
         let m_list = execute_list_markers(&session, &ctx).unwrap();
         assert!(m_list.message.contains("gold_addr"));
 
         // 2. Cheat operations
-        let c_add = execute_add_cheat(&session, &ctx, Some(&mem), AddCheatArgs {
-            label: "Gold Cheat".into(),
-            kind: "value".into(),
-            address: Some("gold_addr".into()),
-            value_type: Some("i32".into()),
-            group: None,
-            hotkey: None,
-            hidden: None,
-            note: None,
-        }).unwrap();
+        let c_add = execute_add_cheat(
+            &session,
+            &ctx,
+            Some(&mem),
+            AddCheatArgs {
+                label: "Gold Cheat".into(),
+                kind: "value".into(),
+                address: Some("gold_addr".into()),
+                value_type: Some("i32".into()),
+                group: None,
+                hotkey: None,
+                hidden: None,
+                note: None,
+            },
+        )
+        .unwrap();
         assert!(c_add.message.contains("added cheat 'Gold Cheat' (id 0)"));
 
         let c_list = execute_list_cheats(&session, &ctx).unwrap();
         assert!(c_list.message.contains("Gold Cheat"));
 
         // 3. Set cheat value (mutates memory to 777 and creates undo)
-        let c_set = execute_set_cheat_value(&session, &ctx, &mem, SetCheatValueArgs {
-            id: 0,
-            value: "777".into(),
-        }).unwrap();
+        let c_set = execute_set_cheat_value(
+            &session,
+            &ctx,
+            &mem,
+            SetCheatValueArgs {
+                id: 0,
+                value: "777".into(),
+            },
+        )
+        .unwrap();
         assert!(c_set.message.contains("set cheat #0 value to '777'"));
 
         let cur_val = mem.read(0x20, 4).unwrap();
@@ -3258,7 +4094,14 @@ mod tests {
         let c_rem = execute_remove_cheat(&session, &ctx, RemoveCheatArgs { id: 0 }).unwrap();
         assert!(c_rem.message.contains("removed cheat 'Gold Cheat'"));
 
-        let m_rem = execute_remove_marker(&session, &ctx, RemoveMarkerArgs { label: "gold_addr".into() }).unwrap();
+        let m_rem = execute_remove_marker(
+            &session,
+            &ctx,
+            RemoveMarkerArgs {
+                label: "gold_addr".into(),
+            },
+        )
+        .unwrap();
         assert!(m_rem.message.contains("removed marker '$gold_addr'"));
     }
 
@@ -3271,12 +4114,18 @@ mod tests {
         drop(binding);
 
         // 1. Stage a write
-        let s_w = execute_stage_write(&session, &ctx, None, StageWriteArgs {
-            address: "0x140001000".into(),
-            data: Some("90 90 90 90".into()),
-            value: None,
-            value_type: None,
-        }).unwrap();
+        let s_w = execute_stage_write(
+            &session,
+            &ctx,
+            None,
+            StageWriteArgs {
+                address: "0x140001000".into(),
+                data: Some("90 90 90 90".into()),
+                value: None,
+                value_type: None,
+            },
+        )
+        .unwrap();
         assert!(s_w.message.contains("staged write (pending id 0)"));
 
         // 2. List pending
@@ -3308,7 +4157,8 @@ mod tests {
             context: Some("comiss xmm6,[rsi+0x30]; movaps xmm6,[rsp+0x240]; ja +0x1e — research progress compare".into()),
         };
         s.set_setup_steps(vec![setup_step]);
-        s.set_marker("research_hook", 0x140b246b3, Some("research hook marker")).unwrap();
+        s.set_marker("research_hook", 0x140b246b3, Some("research hook marker"))
+            .unwrap();
 
         // Add a toggle cheat referencing research_hook
         let _ = s.add_cheat_group(
@@ -3330,9 +4180,14 @@ mod tests {
         );
         drop(s);
 
-        let res = execute_save_profile(&session, &ctx, ProfileSaveArgs {
-            file: Some("test_sins2_saved.yaml".into()),
-        }).unwrap();
+        let res = execute_save_profile(
+            &session,
+            &ctx,
+            ProfileSaveArgs {
+                file: Some("test_sins2_saved.yaml".into()),
+            },
+        )
+        .unwrap();
         assert!(res.message.contains("saved profile to"));
 
         // Read and parse back the saved YAML
@@ -3344,13 +4199,28 @@ mod tests {
         assert_eq!(loaded.game, "sins2.exe");
         assert_eq!(loaded.setup.len(), 1);
         match &loaded.setup[0] {
-            crate::profile::SetupStep::AobScan { name, pattern, offset, region, original_bytes, context } => {
+            crate::profile::SetupStep::AobScan {
+                name,
+                pattern,
+                offset,
+                region,
+                original_bytes,
+                context,
+            } => {
                 assert_eq!(name, "research_hook");
                 assert_eq!(pattern, "0F 2F 76 ?? 0F 28 B4 24 ?? ?? ?? ?? 77");
                 assert_eq!(*offset, Some(0));
                 assert_eq!(region.as_deref(), Some("sins2.exe"));
-                assert_eq!(original_bytes.as_deref(), Some("0f 2f 76 30 0f 28 b4 24 40 02 00 00 77 1e"));
-                assert!(context.as_deref().unwrap().contains("research progress compare"));
+                assert_eq!(
+                    original_bytes.as_deref(),
+                    Some("0f 2f 76 30 0f 28 b4 24 40 02 00 00 77 1e")
+                );
+                assert!(
+                    context
+                        .as_deref()
+                        .unwrap()
+                        .contains("research progress compare")
+                );
             }
             _ => panic!("wrong setup step kind"),
         }
@@ -3384,13 +4254,23 @@ mod tests {
         );
         drop(s);
 
-        let res = execute_set_cheat_toggle(&session, &ctx, SetCheatToggleArgs {
-            id: cid,
-            enabled: true,
-        });
-        assert!(res.is_err(), "enabling empty override toggle must return an error");
+        let res = execute_set_cheat_toggle(
+            &session,
+            &ctx,
+            SetCheatToggleArgs {
+                id: cid,
+                enabled: true,
+            },
+        );
+        assert!(
+            res.is_err(),
+            "enabling empty override toggle must return an error"
+        );
         let err_msg = res.unwrap_err().message;
-        assert!(err_msg.contains("empty override hook with no payload"), "err_msg: {err_msg}");
+        assert!(
+            err_msg.contains("empty override hook with no payload"),
+            "err_msg: {err_msg}"
+        );
 
         // Verify session state: no pending ops were staged, undo log is empty, and cheat remains disabled
         let s = session.lock().unwrap();
@@ -3420,7 +4300,11 @@ mod tests {
             data: Vec<u8>,
         }
         impl ProcessMemory for RgrepMem {
-            fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> {
+            fn read(
+                &self,
+                address: u64,
+                len: usize,
+            ) -> Result<Vec<u8>, crate::memory::MemoryError> {
                 let start = address as usize;
                 let end = (start + len).min(self.data.len());
                 if start >= self.data.len() {
@@ -3428,7 +4312,11 @@ mod tests {
                 }
                 Ok(self.data[start..end].to_vec())
             }
-            fn write(&self, _address: u64, _data: &[u8]) -> Result<usize, crate::memory::MemoryError> {
+            fn write(
+                &self,
+                _address: u64,
+                _data: &[u8],
+            ) -> Result<usize, crate::memory::MemoryError> {
                 Ok(0)
             }
             fn regions(&self) -> Result<Vec<crate::memory::Region>, crate::memory::MemoryError> {
@@ -3446,13 +4334,19 @@ mod tests {
         let proc = RgrepMem { data };
 
         // Regex scan for "Player_.*"
-        let res = execute_scan_rgrep(&session, &ctx, &proc, ScanRgrepArgs {
-            pattern: "Player_[A-Za-z]+".into(),
-            alignment: Some(4),
-            region: None,
-            marker: Some("player_str".into()),
-            limit: Some(10),
-        }).unwrap();
+        let res = execute_scan_rgrep(
+            &session,
+            &ctx,
+            &proc,
+            ScanRgrepArgs {
+                pattern: "Player_[A-Za-z]+".into(),
+                alignment: Some(4),
+                region: None,
+                marker: Some("player_str".into()),
+                limit: Some(10),
+            },
+        )
+        .unwrap();
 
         assert!(res.message.contains("2 match(es)"));
         assert!(res.message.contains("0x0000000000000100"));
@@ -3467,28 +4361,49 @@ mod tests {
     #[test]
     fn test_execute_allocate_string_with_path() {
         let session = SharedSession::default();
-        let ctx = ClientContext::new("test", ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
+        let ctx = ClientContext::new(
+            "test",
+            ClientKind::Mcp { agent_name: None },
+            session.lock().unwrap().event_bus(),
+        );
 
         struct DummyMem;
         impl ProcessMemory for DummyMem {
-            fn read(&self, _addr: u64, _len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> { Ok(vec![]) }
-            fn write(&self, _addr: u64, _data: &[u8]) -> Result<usize, crate::memory::MemoryError> { Ok(0) }
-            fn regions(&self) -> Result<Vec<crate::memory::Region>, crate::memory::MemoryError> { Ok(vec![]) }
+            fn read(&self, _addr: u64, _len: usize) -> Result<Vec<u8>, crate::memory::MemoryError> {
+                Ok(vec![])
+            }
+            fn write(&self, _addr: u64, _data: &[u8]) -> Result<usize, crate::memory::MemoryError> {
+                Ok(0)
+            }
+            fn regions(&self) -> Result<Vec<crate::memory::Region>, crate::memory::MemoryError> {
+                Ok(vec![])
+            }
         }
 
         let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join(format!("test_alloc_{}.lua", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros()));
+        let test_file = temp_dir.join(format!(
+            "test_alloc_{}.lua",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+        ));
         std::fs::write(&test_file, b"local payload = 1234;").unwrap();
 
         // On non-windows platforms, execute_allocate_string will try to allocate or return "requires Windows target or attached game process"
-        let res = execute_allocate_string(&session, &ctx, &DummyMem, AllocateStringArgs {
-            content: None,
-            path: Some(test_file.to_string_lossy().to_string()),
-            size: None,
-            fill_byte: None,
-            kind: "c".into(),
-            marker: Some("payload_marker".into()),
-        });
+        let res = execute_allocate_string(
+            &session,
+            &ctx,
+            &DummyMem,
+            AllocateStringArgs {
+                content: None,
+                path: Some(test_file.to_string_lossy().to_string()),
+                size: None,
+                fill_byte: None,
+                kind: "c".into(),
+                marker: Some("payload_marker".into()),
+            },
+        );
 
         // Verify the file was read without failing on file reading
         match res {

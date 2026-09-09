@@ -28,25 +28,24 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, EXCEPTION_ACCESS_VIOLATION, EXCEPTION_BREAKPOINT,
-    EXCEPTION_GUARD_PAGE, EXCEPTION_SINGLE_STEP, INVALID_HANDLE_VALUE,
+    CloseHandle, EXCEPTION_ACCESS_VIOLATION, EXCEPTION_BREAKPOINT, EXCEPTION_GUARD_PAGE,
+    EXCEPTION_SINGLE_STEP, GetLastError, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, FlushInstructionCache, GetThreadContext,
-    SetThreadContext, CONTEXT, CONTEXT_CONTROL_AMD64, CONTEXT_DEBUG_REGISTERS_AMD64,
+    AddVectoredExceptionHandler, CONTEXT, CONTEXT_CONTROL_AMD64, CONTEXT_DEBUG_REGISTERS_AMD64,
     CONTEXT_INTEGER_AMD64, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH,
-    EXCEPTION_POINTERS,
+    EXCEPTION_POINTERS, FlushInstructionCache, GetThreadContext, SetThreadContext,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows_sys::Win32::System::Memory::{
-    VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_GUARD,
+    MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_GUARD, VirtualProtect, VirtualQuery,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId, OpenThread,
-    ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
-    THREAD_SET_CONTEXT, THREAD_SUSPEND_RESUME,
+    ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_SET_CONTEXT,
+    THREAD_SUSPEND_RESUME,
 };
 
 const TRAP_FLAG: u32 = 0x100;
@@ -194,7 +193,11 @@ pub fn arm_watch(
             )
         };
         if query_ret == 0 {
-            return Err(format!("VirtualQuery failed for 0x{:x}: {}", address, last_err()));
+            return Err(format!(
+                "VirtualQuery failed for 0x{:x}: {}",
+                address,
+                last_err()
+            ));
         }
 
         let page_base = address & !0xFFFu64;
@@ -237,8 +240,7 @@ pub fn arm_break(address: u64, one_shot: bool) -> Result<(), String> {
     }
 
     let original = read_byte(address);
-    write_byte(address, 0xCC)
-        .map_err(|e| format!("failed to patch code byte with int3: {e}"))?;
+    write_byte(address, 0xCC).map_err(|e| format!("failed to patch code byte with int3: {e}"))?;
 
     *runtime().state.lock().unwrap() = Some(ActiveWatch {
         kind: WatchKind::Code,
@@ -298,7 +300,11 @@ fn clear_internal() {
                 let _ = write_byte(active.address, active.original_byte);
                 add_tombstone(active.address, active.original_byte);
             }
-            WatchKind::PageGuard { page_base, page_size, original_protect } => {
+            WatchKind::PageGuard {
+                page_base,
+                page_size,
+                original_protect,
+            } => {
                 let mut old = 0u32;
                 unsafe {
                     VirtualProtect(
@@ -334,7 +340,10 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
         if ep.is_null() {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        let code = (*ep).ExceptionRecord.as_mut().map_or(0, |r| r.ExceptionCode);
+        let code = (*ep)
+            .ExceptionRecord
+            .as_mut()
+            .map_or(0, |r| r.ExceptionCode);
         let ctx = (*ep).ContextRecord;
         if ctx.is_null() {
             return EXCEPTION_CONTINUE_EXECUTION;
@@ -357,7 +366,10 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                     PendingStep::ReapplyCodeBreak { address } => {
                         let _ = write_byte(address, 0xCC);
                     }
-                    PendingStep::ReapplyPageGuard { page_base, page_size } => {
+                    PendingStep::ReapplyPageGuard {
+                        page_base,
+                        page_size,
+                    } => {
                         let mut old = 0u32;
                         let _ = VirtualProtect(
                             page_base as *mut c_void,
@@ -383,7 +395,11 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
         let mut guard = runtime().state.lock().unwrap();
         if let Some(active) = guard.as_ref() {
             match active.kind {
-                WatchKind::PageGuard { page_base, page_size, original_protect } => {
+                WatchKind::PageGuard {
+                    page_base,
+                    page_size,
+                    original_protect,
+                } => {
                     if code == EXCEPTION_GUARD_PAGE {
                         let r = (*ep).ExceptionRecord.as_ref().unwrap();
                         let access_type = r.ExceptionInformation[0];
@@ -430,7 +446,10 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                         (*ctx).EFlags |= TRAP_FLAG;
                         runtime().pending_steps.lock().unwrap().insert(
                             tid,
-                            PendingStep::ReapplyPageGuard { page_base, page_size },
+                            PendingStep::ReapplyPageGuard {
+                                page_base,
+                                page_size,
+                            },
                         );
 
                         return EXCEPTION_CONTINUE_EXECUTION;
@@ -467,10 +486,11 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                             let dr7_saved = (*ctx).Dr7;
                             (*ctx).Dr7 = 0;
                             (*ctx).EFlags |= TRAP_FLAG;
-                            runtime().pending_steps.lock().unwrap().insert(
-                                tid,
-                                PendingStep::ReapplyHardwareDr { dr7: dr7_saved },
-                            );
+                            runtime()
+                                .pending_steps
+                                .lock()
+                                .unwrap()
+                                .insert(tid, PendingStep::ReapplyHardwareDr { dr7: dr7_saved });
                             return EXCEPTION_CONTINUE_EXECUTION;
                         }
                     }
@@ -515,7 +535,9 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                                 (*ctx).EFlags |= TRAP_FLAG;
                                 runtime().pending_steps.lock().unwrap().insert(
                                     tid,
-                                    PendingStep::ReapplyCodeBreak { address: active.address },
+                                    PendingStep::ReapplyCodeBreak {
+                                        address: active.address,
+                                    },
                                 );
                                 return EXCEPTION_CONTINUE_EXECUTION;
                             }
@@ -576,7 +598,9 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
             let fault_addr = r.ExceptionInformation[1] as u64;
             let page_base = fault_addr & !0xFFFu64;
 
-            if let Some(tombstone) = find_tombstone(fault_addr).or_else(|| find_tombstone(page_base)) {
+            if let Some(tombstone) =
+                find_tombstone(fault_addr).or_else(|| find_tombstone(page_base))
+            {
                 // Page Guard was already disarmed or in teardown: resume instruction safely
                 let mut old = 0u32;
                 VirtualProtect(
@@ -623,7 +647,9 @@ fn write_byte(address: u64, byte: u8) -> Result<(), String> {
     if ok == 0 {
         return Err(last_err());
     }
-    unsafe { *(address as *mut u8) = byte; }
+    unsafe {
+        *(address as *mut u8) = byte;
+    }
     unsafe {
         VirtualProtect(ptr, 1, old, &mut old);
         FlushInstructionCache(GetCurrentProcess(), ptr, 1);
@@ -672,7 +698,9 @@ fn apply_debug_registers_all(dr0: u64, dr7: u64) {
                 GetCurrentThread()
             } else {
                 OpenThread(
-                    THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME
+                    THREAD_GET_CONTEXT
+                        | THREAD_SET_CONTEXT
+                        | THREAD_SUSPEND_RESUME
                         | THREAD_QUERY_INFORMATION,
                     0,
                     tid,

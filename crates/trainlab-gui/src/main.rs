@@ -18,25 +18,29 @@
 //!
 //! This is the "control room" for your training sessions.
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+core::arch::global_asm!(
+    ".symver atan2f, atan2f@GLIBC_2.2.5",
+    ".symver acosf, acosf@GLIBC_2.2.5"
+);
+
 use eframe::egui;
 use trainlab_core::memory::ProcessMemory;
 use trainlab_core::protocol::{Request, Response};
 
-use crate::session::{Cheat, CheatKind, SharedSession, SessionState};
+use crate::session::{Cheat, CheatKind, SessionState, SharedSession};
 
 mod api;
 use trainlab_core::asm;
 mod config;
-mod event;
 mod controller;
+mod event;
 mod hotkeys;
 mod inject;
 mod mcp;
 mod profile;
 mod session;
 mod xinput_poll;
-
-
 
 /// Default port for the MCP server.
 const MCP_DEFAULT_PORT: u16 = 8123;
@@ -145,6 +149,8 @@ struct TrainlabApp {
     markers_live_sync: bool,
     // Whether to auto-scroll/stick to bottom in activity log views
     log_stick_to_bottom: bool,
+    // UI DPI scaling multiplier
+    ui_scale: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -156,8 +162,7 @@ struct EditCheatModal {
     note: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ScanOpMode {
     #[default]
     Exact,
@@ -168,9 +173,7 @@ enum ScanOpMode {
     Decreased,
 }
 
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ActiveTab {
     #[default]
     Cheats,
@@ -184,7 +187,9 @@ enum ActiveTab {
 
 impl Default for TrainlabApp {
     fn default() -> Self {
-        Self::new(std::sync::Arc::new(std::sync::Mutex::new(SessionState::new())))
+        Self::new(std::sync::Arc::new(std::sync::Mutex::new(
+            SessionState::new(),
+        )))
     }
 }
 
@@ -211,7 +216,9 @@ impl TrainlabApp {
             cheat_values_cache: std::collections::HashMap::new(),
             cheat_hotkey_inputs: std::collections::HashMap::new(),
             registered_hotkeys: std::collections::HashMap::new(),
-            button_statuses: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            button_statuses: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             show_cheats: true,
             scan_val: "".into(),
             scan_val_max: "".into(),
@@ -238,6 +245,7 @@ impl TrainlabApp {
             net_stats_last_query: None,
             markers_live_sync: true,
             log_stick_to_bottom: true,
+            ui_scale: config.gui.scale,
         };
         app.auto_match_profile();
         app.sync_registered_hotkeys();
@@ -285,7 +293,11 @@ impl TrainlabApp {
     /// flow remotely. Runs on a background thread so the GUI UI never freezes.
     fn inject_and_connect(&mut self) {
         use std::sync::atomic::Ordering;
-        if self.is_attaching.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        if self
+            .is_attaching
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             // Already an in-flight attach / injection operation running!
             return;
         }
@@ -308,7 +320,10 @@ impl TrainlabApp {
                     if let Ok(mut s) = session.lock() {
                         let attached_pid = s.game_pid();
                         s.record_tracked_app(&game_name, attached_pid, None);
-                        s.log_activity("UI", format!("connected, inject v{version} — initializing DLL via IPC..."));
+                        s.log_activity(
+                            "UI",
+                            format!("connected, inject v{version} — initializing DLL via IPC..."),
+                        );
                     }
 
                     let mut matched_profile = None;
@@ -323,10 +338,12 @@ impl TrainlabApp {
                                     }
                                 }
                                 profile::DiscoveredProfile::Invalid { file, error } => {
-                                    if file.to_lowercase().contains(&game_name.to_lowercase().replace(".exe", "")) {
-                                        if let Ok(mut s) = session.lock() {
-                                            s.log_activity("PROFILE", format!("WARNING: candidate profile '{file}' for '{game_name}' FAILED to parse: {error}"));
-                                        }
+                                    if file
+                                        .to_lowercase()
+                                        .contains(&game_name.to_lowercase().replace(".exe", ""))
+                                        && let Ok(mut s) = session.lock()
+                                    {
+                                        s.log_activity("PROFILE", format!("WARNING: candidate profile '{file}' for '{game_name}' FAILED to parse: {error}"));
                                     }
                                 }
                             }
@@ -353,13 +370,13 @@ impl TrainlabApp {
                             features.input.xinput = render_cfg.xinput_hooks;
                         }
                         if let Some(net_cfg) = &prof.network {
-                            if let Some(en) = net_cfg.enabled {
-                                if !en {
-                                    features.network.winsock = false;
-                                    features.network.winhttp = false;
-                                    features.network.schannel = false;
-                                    features.network.steamworks = false;
-                                }
+                            if let Some(en) = net_cfg.enabled
+                                && !en
+                            {
+                                features.network.winsock = false;
+                                features.network.winhttp = false;
+                                features.network.schannel = false;
+                                features.network.steamworks = false;
                             }
                             if let Some(ws) = net_cfg.winsock {
                                 features.network.winsock = ws;
@@ -398,10 +415,15 @@ impl TrainlabApp {
                     }
 
                     match controller::request(&session, &Request::InitializeSession { features }) {
-                        Ok(Response::SessionReady { capabilities, diagnostics }) => {
+                        Ok(Response::SessionReady {
+                            capabilities,
+                            diagnostics,
+                        }) => {
                             if let Ok(mut s) = session.lock() {
                                 s.set_dll_capabilities(capabilities.clone());
-                                s.set_network_hooks_enabled(capabilities.contains(&"network_capture".to_string()));
+                                s.set_network_hooks_enabled(
+                                    capabilities.contains(&"network_capture".to_string()),
+                                );
                                 s.log_activity("UI", format!(
                                     "DLL session initialized on {} ({}) | Input: {} | Active capabilities: [{}]",
                                     diagnostics.target_os,
@@ -410,10 +432,22 @@ impl TrainlabApp {
                                     capabilities.join(", ")
                                 ));
                                 if !diagnostics.detected_overlays.is_empty() {
-                                    s.log_activity("UI", format!("Detected in-game overlays: {:?}", diagnostics.detected_overlays));
+                                    s.log_activity(
+                                        "UI",
+                                        format!(
+                                            "Detected in-game overlays: {:?}",
+                                            diagnostics.detected_overlays
+                                        ),
+                                    );
                                 }
                                 if !diagnostics.loaded_network_modules.is_empty() {
-                                    s.log_activity("UI", format!("Loaded game network modules: {:?}", diagnostics.loaded_network_modules));
+                                    s.log_activity(
+                                        "UI",
+                                        format!(
+                                            "Loaded game network modules: {:?}",
+                                            diagnostics.loaded_network_modules
+                                        ),
+                                    );
                                 }
                             }
 
@@ -422,15 +456,23 @@ impl TrainlabApp {
                                 if let Ok(mut s) = session.lock() {
                                     s.log_activity("UI", format!("starting sequential profile initialization for '{file}'..."));
                                 }
-                                match mcp::TrainlabMcpServer::with_session(session.clone()).load_profile_by_name(&file, true) {
+                                match mcp::TrainlabMcpServer::with_session(session.clone())
+                                    .load_profile_by_name(&file, true)
+                                {
                                     Ok(detail) => {
                                         if let Ok(mut s) = session.lock() {
-                                            s.log_activity("UI", format!("profile '{file}' loaded: {detail}"));
+                                            s.log_activity(
+                                                "UI",
+                                                format!("profile '{file}' loaded: {detail}"),
+                                            );
                                         }
                                     }
                                     Err(e) => {
                                         if let Ok(mut s) = session.lock() {
-                                            s.log_activity("UI", format!("profile '{file}' load FAILED: {e}"));
+                                            s.log_activity(
+                                                "UI",
+                                                format!("profile '{file}' load FAILED: {e}"),
+                                            );
                                         }
                                     }
                                 }
@@ -438,7 +480,10 @@ impl TrainlabApp {
                         }
                         _ => {
                             if let Ok(mut s) = session.lock() {
-                                s.log_activity("UI", "DLL session initialization completed (default)");
+                                s.log_activity(
+                                    "UI",
+                                    "DLL session initialization completed (default)",
+                                );
                             }
                         }
                     }
@@ -463,9 +508,15 @@ impl TrainlabApp {
         let (markers, undo, pending) = {
             let s = self.session.lock().unwrap();
             (
-                s.list_markers().iter().map(|m| (m.label.clone(), m.address, m.note.clone())).collect::<Vec<_>>(),
+                s.list_markers()
+                    .iter()
+                    .map(|m| (m.label.clone(), m.address, m.note.clone()))
+                    .collect::<Vec<_>>(),
                 s.undo_len(),
-                s.list_pending().iter().map(|p| (p.id, p.address, p.preview.clone())).collect::<Vec<_>>(),
+                s.list_pending()
+                    .iter()
+                    .map(|p| (p.id, p.address, p.preview.clone()))
+                    .collect::<Vec<_>>(),
             )
         };
 
@@ -512,7 +563,9 @@ impl TrainlabApp {
                             if self.markers_live_sync {
                                 self.read_cached(*addr, 8)
                             } else {
-                                self.cheat_values_cache.get(addr).and_then(|(_, v)| v.clone())
+                                self.cheat_values_cache
+                                    .get(addr)
+                                    .and_then(|(_, v)| v.clone())
                             }
                         } else {
                             None
@@ -521,15 +574,27 @@ impl TrainlabApp {
                             Some(data) => {
                                 let i32_val = if data.len() >= 4 {
                                     format!("{}", i32::from_le_bytes(data[..4].try_into().unwrap()))
-                                } else { "-".into() };
+                                } else {
+                                    "-".into()
+                                };
 
                                 let f32_val = if data.len() >= 4 {
-                                    format!("{:.2}", f32::from_le_bytes(data[..4].try_into().unwrap()))
-                                } else { "-".into() };
+                                    format!(
+                                        "{:.2}",
+                                        f32::from_le_bytes(data[..4].try_into().unwrap())
+                                    )
+                                } else {
+                                    "-".into()
+                                };
 
                                 let ptr_val = if data.len() >= 8 {
-                                    format!("{:#x}", u64::from_le_bytes(data[..8].try_into().unwrap()))
-                                } else { "-".into() };
+                                    format!(
+                                        "{:#x}",
+                                        u64::from_le_bytes(data[..8].try_into().unwrap())
+                                    )
+                                } else {
+                                    "-".into()
+                                };
 
                                 ui.label(i32_val);
                                 ui.label(f32_val);
@@ -544,18 +609,34 @@ impl TrainlabApp {
 
                         // Editable input for writing to marker
                         let _marker_edit_key = format!("marker_val_{label}");
-                        let mut edit_val = self.cheat_values.get(&{ *addr }).cloned().unwrap_or_default();
-                        
+                        let mut edit_val = self
+                            .cheat_values
+                            .get(&{ *addr })
+                            .cloned()
+                            .unwrap_or_default();
+
                         ui.horizontal(|ui| {
-                            let text_edit = ui.add(egui::TextEdit::singleline(&mut edit_val).hint_text("new value").desired_width(90.0));
+                            let text_edit = ui.add(
+                                egui::TextEdit::singleline(&mut edit_val)
+                                    .hint_text("new value")
+                                    .desired_width(90.0),
+                            );
                             if text_edit.changed() {
                                 self.cheat_values.insert(*addr, edit_val.clone());
                             }
                             if ui.button("Write i32").clicked() {
-                                write_op = Some((*addr, edit_val.clone(), trainlab_core::scan::ValueType::I32));
+                                write_op = Some((
+                                    *addr,
+                                    edit_val.clone(),
+                                    trainlab_core::scan::ValueType::I32,
+                                ));
                             }
                             if ui.button("Write ptr").clicked() {
-                                write_op = Some((*addr, edit_val.clone(), trainlab_core::scan::ValueType::Ptr));
+                                write_op = Some((
+                                    *addr,
+                                    edit_val.clone(),
+                                    trainlab_core::scan::ValueType::Ptr,
+                                ));
                             }
                         });
                         ui.end_row();
@@ -565,15 +646,21 @@ impl TrainlabApp {
             // Perform write if user clicked Write i32 / Write ptr button
             if let Some((addr, val_str, vt)) = write_op {
                 // Support writing another marker address or value expression
-                let eval_val = match mcp::parse_addr_expr(&self.session, val_str.trim_start_matches('$')) {
-                    Ok(a) => format!("{a:#x}"),
-                    Err(_) => val_str.clone(),
-                };
+                let eval_val =
+                    match mcp::parse_addr_expr(&self.session, val_str.trim_start_matches('$')) {
+                        Ok(a) => format!("{a:#x}"),
+                        Err(_) => val_str.clone(),
+                    };
                 if let Ok(bytes) = mcp::parse_value_bytes(&eval_val, vt) {
-                    let res = self.request(&Request::Write { address: addr, data: bytes });
+                    let res = self.request(&Request::Write {
+                        address: addr,
+                        data: bytes,
+                    });
                     match res {
                         Some(Response::Write { bytes_written }) => {
-                            self.log(format!("wrote '{eval_val}' to marker @ {addr:#x} ({bytes_written} bytes)"));
+                            self.log(format!(
+                                "wrote '{eval_val}' to marker @ {addr:#x} ({bytes_written} bytes)"
+                            ));
                         }
                         _ => self.log(format!("write to marker @ {addr:#x} failed")),
                     }
@@ -634,28 +721,46 @@ impl TrainlabApp {
         use session::PendingKind;
         match op.kind {
             PendingKind::Write { data } => {
-                let r = self.request(&Request::Write { address: op.address, data });
+                let r = self.request(&Request::Write {
+                    address: op.address,
+                    data,
+                });
                 match r {
                     Some(Response::Write { bytes_written }) => {
-                        self.log(format!("confirmed write @ {:#x} ({bytes_written} bytes)", op.address));
+                        self.log(format!(
+                            "confirmed write @ {:#x} ({bytes_written} bytes)",
+                            op.address
+                        ));
                     }
                     _ => self.log(format!("confirmed write @ {:#x} failed", op.address)),
                 }
             }
             PendingKind::InstallCave { hook, .. } => {
-                let r = self.request(&Request::InstallCave { target: op.address, hook });
+                let r = self.request(&Request::InstallCave {
+                    target: op.address,
+                    hook,
+                });
                 match r {
                     Some(Response::CaveInstalled { cave, .. }) => {
-                        self.log(format!("confirmed cave @ {:#x} (cave {cave:#x})", op.address));
+                        self.log(format!(
+                            "confirmed cave @ {:#x} (cave {cave:#x})",
+                            op.address
+                        ));
                     }
                     _ => self.log(format!("confirmed cave @ {:#x} failed", op.address)),
                 }
             }
             PendingKind::Undo { original_bytes } => {
-                let r = self.request(&Request::Write { address: op.address, data: original_bytes });
+                let r = self.request(&Request::Write {
+                    address: op.address,
+                    data: original_bytes,
+                });
                 match r {
                     Some(Response::Write { bytes_written }) => {
-                        self.log(format!("confirmed undo @ {:#x} ({bytes_written} bytes)", op.address));
+                        self.log(format!(
+                            "confirmed undo @ {:#x} ({bytes_written} bytes)",
+                            op.address
+                        ));
                     }
                     _ => self.log(format!("confirmed undo @ {:#x} failed", op.address)),
                 }
@@ -711,7 +816,10 @@ impl TrainlabApp {
                     meta.push(format!("Profile v{}", p.version));
                 }
                 if !meta.is_empty() {
-                    ui.colored_label(egui::Color32::from_rgb(130, 200, 255), format!("({})", meta.join(" | ")));
+                    ui.colored_label(
+                        egui::Color32::from_rgb(130, 200, 255),
+                        format!("({})", meta.join(" | ")),
+                    );
                 }
             }
         });
@@ -761,7 +869,11 @@ impl TrainlabApp {
         // Snapshot the visible cheats to avoid holding the lock across UI.
         let cheats: Vec<Cheat> = {
             let s = self.session.lock().unwrap();
-            s.list_cheats().into_iter().filter(|c| !c.hidden).cloned().collect()
+            s.list_cheats()
+                .into_iter()
+                .filter(|c| !c.hidden)
+                .cloned()
+                .collect()
         };
 
         if cheats.is_empty() {
@@ -770,7 +882,8 @@ impl TrainlabApp {
         }
 
         // Group cheats by category (preserving insertion order of groups).
-        let mut grouped: std::collections::BTreeMap<String, Vec<&Cheat>> = std::collections::BTreeMap::new();
+        let mut grouped: std::collections::BTreeMap<String, Vec<&Cheat>> =
+            std::collections::BTreeMap::new();
         let mut has_ungrouped = false;
         for c in &cheats {
             let grp = c.group.clone().unwrap_or_else(|| {
@@ -804,7 +917,6 @@ impl TrainlabApp {
                                     "? (null ptr)".into()
                                 };
 
-                                let mut label_widget = ui.label(&cheat.label);
                                 let mut tooltip = format!("Type: {:?}\nTarget: {target_addr:#x}", value_type);
                                 if let Some(expr) = address_expr {
                                     tooltip.push_str(&format!("\nExpression: {expr}"));
@@ -812,7 +924,7 @@ impl TrainlabApp {
                                 if let Some(n) = &cheat.note {
                                     tooltip.push_str(&format!("\nNote: {n}"));
                                 }
-                                label_widget = label_widget.on_hover_text(tooltip);
+                                ui.label(&cheat.label).on_hover_text(tooltip);
 
                                 ui.monospace(format!("[{current}]"));
 
@@ -931,10 +1043,7 @@ impl TrainlabApp {
                             }
                             CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
                                 let mut on = *enabled;
-                                let is_stub_override = match hook {
-                                    trainlab_core::cave_hook::CaveHook::Override { payload, .. } if payload.is_empty() => true,
-                                    _ => false,
-                                };
+                                let is_stub_override = matches!(hook, trainlab_core::cave_hook::CaveHook::Override { payload, .. } if payload.is_empty());
                                 if is_stub_override {
                                     let mut dummy_on = false;
                                     ui.add_enabled(false, egui::Checkbox::new(&mut dummy_on, &cheat.label));
@@ -1127,11 +1236,10 @@ impl TrainlabApp {
                                             };
                                             ui.colored_label(egui::Color32::from_rgb(255, 100, 100), badge_text)
                                                 .on_hover_text(format!("Full error: {err_msg}\nConsecutive failures: {count}"));
-                                        } else if let Some(succ_time) = st.last_success_time {
-                                            if succ_time.elapsed().as_secs() < 4 {
+                                        } else if let Some(succ_time) = st.last_success_time
+                                            && succ_time.elapsed().as_secs() < 4 {
                                                 ui.colored_label(egui::Color32::from_rgb(100, 255, 100), "✓ Done");
                                             }
-                                        }
                                     }
                             }
                         }
@@ -1177,7 +1285,8 @@ impl TrainlabApp {
             let raw_hwnd = 0isize; // NULL HWND registers global hotkey for current thread message loop
 
             // Collect active hotkey targets from session cheats.
-            let mut desired: std::collections::HashMap<i32, (u64, hotkeys::HotkeySpec, String)> = std::collections::HashMap::new();
+            let mut desired: std::collections::HashMap<i32, (u64, hotkeys::HotkeySpec, String)> =
+                std::collections::HashMap::new();
             if let Ok(s) = self.session.lock() {
                 for c in s.list_cheats() {
                     if let Some(hk_str) = &c.hotkey {
@@ -1238,7 +1347,13 @@ impl TrainlabApp {
         };
 
         match kind {
-            CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
+            CheatKind::Toggle {
+                target,
+                hook,
+                enabled,
+                original_bytes,
+                ..
+            } => {
                 // T-112: Hotkey/Overlay toggle drives the real cave — install on enable, restore on disable.
                 let new_state = !enabled;
                 if new_state {
@@ -1249,7 +1364,10 @@ impl TrainlabApp {
                     });
                     match r {
                         Some(Response::CaveInstalled { cave, original, .. }) => {
-                            let check_req = Request::Read { address: target, len: 1 };
+                            let check_req = Request::Read {
+                                address: target,
+                                len: 1,
+                            };
                             let verified = match self.request(&check_req) {
                                 Some(Response::Read { data }) => {
                                     matches!(data.first(), Some(0xe9 | 0xff | 0xeb))
@@ -1280,10 +1398,10 @@ impl TrainlabApp {
                             if let Ok(mut s) = self.session.lock() {
                                 s.set_cheat_toggle(cheat_id, false);
                             }
-                            self.log_with_source(source, format!(
-                                "toggle '{}' enable FAILED (cave @ {target:#x})",
-                                label
-                            ));
+                            self.log_with_source(
+                                source,
+                                format!("toggle '{}' enable FAILED (cave @ {target:#x})", label),
+                            );
                         }
                     }
                 } else {
@@ -1303,10 +1421,13 @@ impl TrainlabApp {
                                     label
                                 ));
                             }
-                            _ => self.log_with_source(source, format!(
-                                "toggle '{}' disable FAILED (restore @ {target:#x})",
-                                label
-                            )),
+                            _ => self.log_with_source(
+                                source,
+                                format!(
+                                    "toggle '{}' disable FAILED (restore @ {target:#x})",
+                                    label
+                                ),
+                            ),
                         }
                     } else {
                         self.log_with_source(source, format!(
@@ -1316,10 +1437,20 @@ impl TrainlabApp {
                     }
                 }
             }
-            CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+            CheatKind::Patch {
+                target,
+                patch_bytes,
+                original_bytes,
+                enabled,
+                cave_ref,
+            } => {
                 let new_state = !enabled;
                 let desc = cave_ref.as_deref().unwrap_or("fast patch");
-                let bytes_to_write = if new_state { patch_bytes } else { original_bytes };
+                let bytes_to_write = if new_state {
+                    patch_bytes
+                } else {
+                    original_bytes
+                };
                 if !bytes_to_write.is_empty() {
                     let r = self.request(&Request::Write {
                         address: target,
@@ -1336,16 +1467,26 @@ impl TrainlabApp {
                                 if new_state { "ENABLED" } else { "DISABLED" }
                             ));
                         }
-                        _ => self.log_with_source(source, format!(
-                            "toggle patch '{}' {} FAILED (@ {target:#x})",
-                            label,
-                            if new_state { "enable" } else { "disable" }
-                        )),
+                        _ => self.log_with_source(
+                            source,
+                            format!(
+                                "toggle patch '{}' {} FAILED (@ {target:#x})",
+                                label,
+                                if new_state { "enable" } else { "disable" }
+                            ),
+                        ),
                     }
                 }
             }
             CheatKind::Button { commands } => {
-                self.log_with_source(source, format!("triggered button '{}': running {} command(s)...", label, commands.len()));
+                self.log_with_source(
+                    source,
+                    format!(
+                        "triggered button '{}': running {} command(s)...",
+                        label,
+                        commands.len()
+                    ),
+                );
                 match self.run_cheat_commands(&commands) {
                     Ok(()) => {
                         self.log_with_source(source, format!("button '{}' completed ok", label));
@@ -1367,7 +1508,11 @@ impl TrainlabApp {
                     }
                 }
             }
-            CheatKind::Value { address, value_type, address_expr } => {
+            CheatKind::Value {
+                address,
+                value_type,
+                address_expr,
+            } => {
                 let target_addr = if let Some(expr) = address_expr {
                     mcp::parse_addr_expr(&self.session, &expr).unwrap_or(address)
                 } else {
@@ -1375,26 +1520,41 @@ impl TrainlabApp {
                 };
                 // For value cheats, re-apply the value currently in the edit box if present.
                 if let Some(val_str) = self.cheat_values.get(&cheat_id).cloned()
-                    && let Ok(bytes) = parse_value_bytes(&val_str, value_type) {
-                        let r = self.request(&Request::Write {
-                            address: target_addr,
-                            data: bytes,
-                        });
-                        match r {
-                            Some(Response::Write { bytes_written }) => {
-                                self.log_with_source(source, format!("applied '{}' = {val_str} ({bytes_written} bytes)", label));
-                            }
-                            _ => self.log_with_source(source, format!("apply for '{}' failed", label)),
+                    && let Ok(bytes) = parse_value_bytes(&val_str, value_type)
+                {
+                    let r = self.request(&Request::Write {
+                        address: target_addr,
+                        data: bytes,
+                    });
+                    match r {
+                        Some(Response::Write { bytes_written }) => {
+                            self.log_with_source(
+                                source,
+                                format!("applied '{}' = {val_str} ({bytes_written} bytes)", label),
+                            );
                         }
+                        _ => self.log_with_source(source, format!("apply for '{}' failed", label)),
                     }
+                }
             }
-            CheatKind::Struct { base_address, base_expr, fields } => {
+            CheatKind::Struct {
+                base_address,
+                base_expr,
+                fields,
+            } => {
                 let base_addr = if !base_expr.is_empty() {
                     mcp::parse_addr_expr(&self.session, &base_expr).unwrap_or(base_address)
                 } else {
                     base_address
                 };
-                self.log_with_source(source, format!("triggered struct '{}' (@ {base_addr:#x}): {} field(s)", label, fields.len()));
+                self.log_with_source(
+                    source,
+                    format!(
+                        "triggered struct '{}' (@ {base_addr:#x}): {} field(s)",
+                        label,
+                        fields.len()
+                    ),
+                );
             }
         }
     }
@@ -1439,19 +1599,28 @@ impl TrainlabApp {
     fn allocate_string_in_game(&self, content: &str, kind: &str) -> Result<(u64, usize), String> {
         let mut bytes = content.as_bytes().to_vec();
         let kind_lower = kind.trim().to_lowercase();
-        let is_c_like = matches!(kind_lower.as_str(), "c" | "json" | "yaml" | "xml" | "js" | "config");
+        let is_c_like = matches!(
+            kind_lower.as_str(),
+            "c" | "json" | "yaml" | "xml" | "js" | "config"
+        );
         if is_c_like && !bytes.ends_with(&[0]) {
             bytes.push(0);
         }
         let len = bytes.len();
         let pid = {
-            let s = self.session.lock().map_err(|_| "session lock poisoned".to_string())?;
-            s.game_pid().ok_or_else(|| "no attached game process".to_string())?
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| "session lock poisoned".to_string())?;
+            s.game_pid()
+                .ok_or_else(|| "no attached game process".to_string())?
         };
 
         #[cfg(windows)]
         {
-            use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+            use windows_sys::Win32::System::Memory::{
+                MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx,
+            };
             let proc_handle = unsafe {
                 windows_sys::Win32::System::Threading::OpenProcess(
                     windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION
@@ -1465,16 +1634,25 @@ impl TrainlabApp {
                 return Err("failed to open process for allocation".into());
             }
             let ptr = unsafe {
-                VirtualAllocEx(proc_handle, std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+                VirtualAllocEx(
+                    proc_handle,
+                    std::ptr::null(),
+                    len,
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                )
             };
-            unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(proc_handle);
+            }
             if ptr.is_null() {
                 return Err("VirtualAllocEx failed".into());
             }
             let alloc_addr = ptr as u64;
 
             // Write bytes
-            let proc = trainlab_core::memory::WindowsProcess::open(pid).map_err(|e| e.to_string())?;
+            let proc =
+                trainlab_core::memory::WindowsProcess::open(pid).map_err(|e| e.to_string())?;
             proc.write(alloc_addr, &bytes).map_err(|e| e.to_string())?;
             Ok((alloc_addr, len))
         }
@@ -1777,10 +1955,11 @@ fn main() -> eframe::Result<()> {
     // Check if startup delay is requested via TRAINLAB_STARTUP_DELAY env var
     if let Ok(delay_str) = std::env::var("TRAINLAB_STARTUP_DELAY")
         && let Ok(delay_secs) = delay_str.parse::<u64>()
-            && delay_secs > 0 {
-                tracing::info!("trainlab-gui delaying window startup for {delay_secs} seconds...");
-                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
-            }
+        && delay_secs > 0
+    {
+        tracing::info!("trainlab-gui delaying window startup for {delay_secs} seconds...");
+        std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+    }
 
     // One shared session state across the GUI and the MCP server. The GUI sets
     // `game_pid` when it injects the game; the MCP server reads it to open the
@@ -1793,13 +1972,16 @@ fn main() -> eframe::Result<()> {
         || std::env::var("STEAM_DECK").is_ok()
         || config.gui.fullscreen;
 
-    let win_w = config.gui.width;
-    let win_h = config.gui.height;
-
-    let viewport_builder = egui::ViewportBuilder::default()
+    let mut viewport_builder = egui::ViewportBuilder::default()
         .with_title("trainlab")
-        .with_inner_size([win_w, win_h])
         .with_min_inner_size([800.0, 540.0]);
+
+    if let (Some(w), Some(h)) = (config.gui.width, config.gui.height) {
+        viewport_builder = viewport_builder.with_inner_size([w, h]);
+    } else if !is_gamescope {
+        // Desktop default: comfortable 1080p canvas (1920x1080)
+        viewport_builder = viewport_builder.with_inner_size([1920.0, 1080.0]);
+    }
 
     let viewport_builder = if is_gamescope {
         // Dedicated display / Gamescope mode: expand edge-to-edge without letterboxing
@@ -1869,9 +2051,22 @@ fn main() -> eframe::Result<()> {
 
                             // Forward relevant session mutations as protocol::Event to the DLL
                             match &evt {
-                                trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::CheatUpdated { id, enabled, value, .. }) => {
+                                trainlab_core::event::BusEvent::Session(
+                                    crate::event::SessionEvent::CheatUpdated {
+                                        id,
+                                        enabled,
+                                        value,
+                                        ..
+                                    },
+                                ) => {
                                     if let Some(en) = enabled {
-                                        controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::CheatToggled { id: *id, enabled: *en });
+                                        controller::emit_event_to_dll(
+                                            &event_session,
+                                            trainlab_core::protocol::Event::CheatToggled {
+                                                id: *id,
+                                                enabled: *en,
+                                            },
+                                        );
                                     }
                                     if let Some(val_str) = value {
                                         let bytes = if let Ok(n) = val_str.parse::<i64>() {
@@ -1879,22 +2074,34 @@ fn main() -> eframe::Result<()> {
                                         } else {
                                             None
                                         };
-                                        controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::CheatValueChanged {
-                                            id: *id,
-                                            value_str: val_str.clone(),
-                                            pinned_bytes: bytes,
-                                        });
+                                        controller::emit_event_to_dll(
+                                            &event_session,
+                                            trainlab_core::protocol::Event::CheatValueChanged {
+                                                id: *id,
+                                                value_str: val_str.clone(),
+                                                pinned_bytes: bytes,
+                                            },
+                                        );
                                     }
                                 }
-                                trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::ProfileLoaded { .. }) => {
+                                trainlab_core::event::BusEvent::Session(
+                                    crate::event::SessionEvent::ProfileLoaded { .. },
+                                ) => {
                                     let cheats_dto = if let Ok(s) = event_session.lock() {
                                         s.export_overlay_cheats()
                                     } else {
                                         Vec::new()
                                     };
-                                    controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::SyncCheats { cheats: cheats_dto });
+                                    controller::emit_event_to_dll(
+                                        &event_session,
+                                        trainlab_core::protocol::Event::SyncCheats {
+                                            cheats: cheats_dto,
+                                        },
+                                    );
                                 }
-                                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::NetworkPacket(pkt)) => {
+                                trainlab_core::event::BusEvent::Protocol(
+                                    trainlab_core::protocol::Event::NetworkPacket(pkt),
+                                ) => {
                                     let mut pkt = pkt.clone();
                                     let id = pkt.id;
                                     let staged_ptr = pkt.staged_ptr;
@@ -1902,21 +2109,23 @@ fn main() -> eframe::Result<()> {
 
                                     if let Some(ptr) = staged_ptr {
                                         // Out-of-band shared memory retrieval
-                                        if let Ok(proc) = crate::mcp::game_process(&event_session) {
-                                            use trainlab_core::memory::ProcessMemory;
-                                            if let Ok(full_payload) = proc.read(ptr, payload_len) {
-                                                let _ = std::fs::create_dir_all("captures");
-                                                let filename = format!("captures/packet_{id}.bin");
-                                                if std::fs::write(&filename, full_payload).is_ok() {
-                                                    pkt.artifact_file = Some(filename);
-                                                }
+                                        if let Ok(proc) = crate::mcp::game_process(&event_session)
+                                            && let Ok(full_payload) = proc.read(ptr, payload_len)
+                                        {
+                                            let _ = std::fs::create_dir_all("captures");
+                                            let filename = format!("captures/packet_{id}.bin");
+                                            if std::fs::write(&filename, full_payload).is_ok() {
+                                                pkt.artifact_file = Some(filename);
                                             }
                                         }
                                         // Fast-ACK: tell the injected DLL to free the staging buffer immediately
-                                        controller::emit_event_to_dll(&event_session, trainlab_core::protocol::Event::AcknowledgePacket {
-                                            id,
-                                            discard: false,
-                                        });
+                                        controller::emit_event_to_dll(
+                                            &event_session,
+                                            trainlab_core::protocol::Event::AcknowledgePacket {
+                                                id,
+                                                discard: false,
+                                            },
+                                        );
                                     }
 
                                     // Store updated packet in session ring buffer
@@ -1930,21 +2139,29 @@ fn main() -> eframe::Result<()> {
                             // Handle window visibility directly via Win32 so it works
                             // even when the window is backgrounded / hidden.
                             #[cfg(windows)]
-                            if let trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::WindowVisibility { command }) = &evt {
+                            if let trainlab_core::event::BusEvent::Session(
+                                crate::event::SessionEvent::WindowVisibility { command },
+                            ) = &evt
+                            {
+                                use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
                                 use windows_sys::Win32::UI::WindowsAndMessaging::{
-                                    FindWindowA, SetForegroundWindow, ShowWindow,
-                                    EnumWindows, GetWindowTextA,
-                                    SW_HIDE, SW_RESTORE, SW_SHOW,
+                                    EnumWindows, FindWindowA, GetWindowTextA, SW_HIDE, SW_RESTORE,
+                                    SW_SHOW, SetForegroundWindow, ShowWindow,
                                 };
-                                use windows_sys::Win32::Foundation::{BOOL, LPARAM, HWND};
 
                                 unsafe {
                                     // Helper: Find top-level trainlab window by title
-                                    unsafe extern "system" fn enum_win_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+                                    unsafe extern "system" fn enum_win_proc(
+                                        hwnd: HWND,
+                                        lparam: LPARAM,
+                                    ) -> BOOL {
                                         let mut buf = [0u8; 128];
-                                        let len = unsafe { GetWindowTextA(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+                                        let len = unsafe {
+                                            GetWindowTextA(hwnd, buf.as_mut_ptr(), buf.len() as i32)
+                                        };
                                         if len > 0 {
-                                            let title = String::from_utf8_lossy(&buf[..len as usize]);
+                                            let title =
+                                                String::from_utf8_lossy(&buf[..len as usize]);
                                             if title.to_lowercase().contains("trainlab") {
                                                 unsafe {
                                                     *(lparam as *mut HWND) = hwnd;
@@ -1957,13 +2174,14 @@ fn main() -> eframe::Result<()> {
 
                                     let mut found_hwnd: HWND = std::ptr::null_mut();
                                     // Try FindWindowA with class NULL and title "trainlab" first
-                                    let mut hwnd = FindWindowA(
-                                        std::ptr::null(),
-                                        b"trainlab\0".as_ptr(),
-                                    );
+                                    let mut hwnd =
+                                        FindWindowA(std::ptr::null(), b"trainlab\0".as_ptr());
                                     if hwnd.is_null() {
                                         // Fall back to enumerating top-level windows
-                                        EnumWindows(Some(enum_win_proc), &mut found_hwnd as *mut _ as LPARAM);
+                                        EnumWindows(
+                                            Some(enum_win_proc),
+                                            &mut found_hwnd as *mut _ as LPARAM,
+                                        );
                                         hwnd = found_hwnd;
                                     }
 
@@ -1982,7 +2200,16 @@ fn main() -> eframe::Result<()> {
                     });
 
                     if server_enabled && (mcp_enabled || web_enabled) {
-                        match mcp::serve(&mcp_host, mcp_port, mcp_enabled, web_enabled, mcp_session, Some(ctx)).await {
+                        match mcp::serve(
+                            &mcp_host,
+                            mcp_port,
+                            mcp_enabled,
+                            web_enabled,
+                            mcp_session,
+                            Some(ctx),
+                        )
+                        .await
+                        {
                             Ok((url, ct)) => {
                                 tracing::info!(%url, mcp_enabled, web_enabled, "server ready");
                                 ct.cancelled().await;
@@ -2002,8 +2229,10 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(windows)]
 fn is_trainer_focused() -> Option<bool> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
     unsafe {
         let fg_hwnd = GetForegroundWindow();
         if fg_hwnd.is_null() {
@@ -2029,28 +2258,31 @@ impl eframe::App for TrainlabApp {
         // Check window OS focus state to ensure controller / navigation inputs
         // only affect the GUI when the trainer window is focused.
         // Prefer Win32 foreground PID check if available, falling back to egui viewport focus.
-        let is_focused = is_trainer_focused().unwrap_or_else(|| ctx.input(|i| i.viewport().focused.unwrap_or(true)));
+        let is_focused = is_trainer_focused()
+            .unwrap_or_else(|| ctx.input(|i| i.viewport().focused.unwrap_or(true)));
 
         // Process remote window visibility commands from REST API / MCP / Web Dashboard / Overlay
         if let Ok(mut s) = self.session.lock()
-            && let Some(cmd) = s.take_window_cmd() {
-                if cmd == "show" {
-                    s.log_activity("GUI", "executing remote 'show' window command");
-                    self.window_visible = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                } else if cmd == "hide" {
-                    s.log_activity("GUI", "executing remote 'hide' window command");
-                    self.window_visible = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
+            && let Some(cmd) = s.take_window_cmd()
+        {
+            if cmd == "show" {
+                s.log_activity("GUI", "executing remote 'show' window command");
+                self.window_visible = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            } else if cmd == "hide" {
+                s.log_activity("GUI", "executing remote 'hide' window command");
+                self.window_visible = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
+        }
 
         // Poll Win32 WM_HOTKEY message queue for global hotkeys (works even when window is hidden/unmapped)
         if let Some(hotkey_id) = hotkeys::poll_wm_hotkey() {
-            if hotkey_id == 9999 { // ID 9999 is the global window-toggle key ('J')
+            if hotkey_id == 9999 {
+                // ID 9999 is the global window-toggle key ('J')
                 self.window_visible = !self.window_visible;
                 if self.window_visible {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -2096,6 +2328,21 @@ impl eframe::App for TrainlabApp {
                         ActiveTab::RunApplications => ActiveTab::NetworkTraffic,
                         ActiveTab::ActivityLog => ActiveTab::RunApplications,
                     };
+                } else if (i.modifiers.ctrl || i.modifiers.command)
+                    && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
+                {
+                    self.ui_scale = (self.ui_scale + 0.25).min(4.0);
+                    ctx.set_pixels_per_point(self.ui_scale);
+                } else if (i.modifiers.ctrl || i.modifiers.command)
+                    && i.key_pressed(egui::Key::Minus)
+                {
+                    self.ui_scale = (self.ui_scale - 0.25).max(0.5);
+                    ctx.set_pixels_per_point(self.ui_scale);
+                } else if (i.modifiers.ctrl || i.modifiers.command)
+                    && i.key_pressed(egui::Key::Num0)
+                {
+                    self.ui_scale = 1.0;
+                    ctx.set_pixels_per_point(self.ui_scale);
                 }
             });
         }
@@ -2103,26 +2350,33 @@ impl eframe::App for TrainlabApp {
         // Drain incoming unified events from the session event bus
         while let Ok(evt) = self.bus_rx.try_recv() {
             match evt {
-                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::CheatTriggered { id }) => {
+                trainlab_core::event::BusEvent::Protocol(
+                    trainlab_core::protocol::Event::CheatTriggered { id },
+                ) => {
                     self.trigger_cheat_with_source(id, "OVERLAY");
                 }
-                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::CheatToggled { id, enabled }) => {
+                trainlab_core::event::BusEvent::Protocol(
+                    trainlab_core::protocol::Event::CheatToggled { id, enabled },
+                ) => {
                     let should_toggle = if let Ok(s) = self.session.lock()
-                        && let Some(c) = s.get_cheat(id) {
-                            let cur_enabled = match &c.kind {
-                                CheatKind::Toggle { enabled: e, .. } => *e,
-                                CheatKind::Patch { enabled: e, .. } => *e,
-                                _ => false,
-                            };
-                            cur_enabled != enabled
-                        } else {
-                            false
+                        && let Some(c) = s.get_cheat(id)
+                    {
+                        let cur_enabled = match &c.kind {
+                            CheatKind::Toggle { enabled: e, .. } => *e,
+                            CheatKind::Patch { enabled: e, .. } => *e,
+                            _ => false,
                         };
+                        cur_enabled != enabled
+                    } else {
+                        false
+                    };
                     if should_toggle {
                         self.trigger_cheat_with_source(id, "OVERLAY");
                     }
                 }
-                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::WindowCommand { command }) => {
+                trainlab_core::event::BusEvent::Protocol(
+                    trainlab_core::protocol::Event::WindowCommand { command },
+                ) => {
                     if command == "show" {
                         self.window_visible = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -2134,7 +2388,9 @@ impl eframe::App for TrainlabApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     }
                 }
-                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::NetworkPacket(mut pkt)) => {
+                trainlab_core::event::BusEvent::Protocol(
+                    trainlab_core::protocol::Event::NetworkPacket(mut pkt),
+                ) => {
                     // If payload preview exists, write full payload artifact into captures/ directory for HTTP serving
                     if !pkt.payload_preview.is_empty() {
                         let _ = std::fs::create_dir_all("captures");
@@ -2149,16 +2405,23 @@ impl eframe::App for TrainlabApp {
                     }
                     ctx.request_repaint();
                 }
-                trainlab_core::event::BusEvent::Protocol(trainlab_core::protocol::Event::NetworkHooksInstalled { subsystem, results }) => {
+                trainlab_core::event::BusEvent::Protocol(
+                    trainlab_core::protocol::Event::NetworkHooksInstalled { subsystem, results },
+                ) => {
                     if let Ok(mut s) = self.session.lock() {
-                        s.log_activity("NETWORK", format!("Hooks installed ({}): [{}]", subsystem, results.join(", ")));
+                        s.log_activity(
+                            "NETWORK",
+                            format!("Hooks installed ({}): [{}]", subsystem, results.join(", ")),
+                        );
                     }
                     ctx.request_repaint();
                 }
                 trainlab_core::event::BusEvent::Log(_) => {
                     ctx.request_repaint();
                 }
-                trainlab_core::event::BusEvent::Session(trainlab_core::event::SessionEvent::ConnectionChanged { connected, .. }) => {
+                trainlab_core::event::BusEvent::Session(
+                    trainlab_core::event::SessionEvent::ConnectionChanged { connected, .. },
+                ) => {
                     self.connected = connected;
                 }
                 _ => {}
@@ -2167,19 +2430,21 @@ impl eframe::App for TrainlabApp {
 
         if let Ok(mut s) = self.session.lock() {
             let was_connected = s.connected();
-            if was_connected {
-                if let Some(pid) = s.game_pid() {
-                    if !mcp::is_process_alive(pid) {
-                        let game = s.game_name().to_string();
-                        s.set_connected(false);
-                        s.set_lifecycle(trainlab_core::session::SessionLifecycle::TargetLost {
-                            pid,
-                            exe_name: game.clone(),
-                        });
-                        s.log_activity("GUI", format!("target game '{game}' (pid {pid}) exited; returning to welcome screen"));
-                        self.active_tab = ActiveTab::Cheats;
-                    }
-                }
+            if was_connected
+                && let Some(pid) = s.game_pid()
+                && !mcp::is_process_alive(pid)
+            {
+                let game = s.game_name().to_string();
+                s.set_connected(false);
+                s.set_lifecycle(trainlab_core::session::SessionLifecycle::TargetLost {
+                    pid,
+                    exe_name: game.clone(),
+                });
+                s.log_activity(
+                    "GUI",
+                    format!("target game '{game}' (pid {pid}) exited; returning to welcome screen"),
+                );
+                self.active_tab = ActiveTab::Cheats;
             }
 
             self.connected = s.connected();
@@ -2187,7 +2452,10 @@ impl eframe::App for TrainlabApp {
                 let ver = s.inject_version().unwrap_or("active");
                 let game = s.game_name();
                 self.status = format!("connected to {game} (v{ver})");
-            } else if matches!(s.lifecycle(), trainlab_core::session::SessionLifecycle::TargetLost { .. }) {
+            } else if matches!(
+                s.lifecycle(),
+                trainlab_core::session::SessionLifecycle::TargetLost { .. }
+            ) {
                 self.status = "target game exited (disconnected)".into();
             } else {
                 self.status = "not connected".into();
@@ -2242,6 +2510,18 @@ impl eframe::App for TrainlabApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.monospace(&self.mcp_addr);
                     ui.label("MCP server:");
+
+                    ui.separator();
+                    if ui.button("+").on_hover_text("Zoom In (Ctrl++)").clicked() {
+                        self.ui_scale = (self.ui_scale + 0.25).min(4.0);
+                        ctx.set_pixels_per_point(self.ui_scale);
+                    }
+                    ui.label(format!("{:.0}%", self.ui_scale * 100.0));
+                    if ui.button("-").on_hover_text("Zoom Out (Ctrl+-)").clicked() {
+                        self.ui_scale = (self.ui_scale - 0.25).max(0.5);
+                        ctx.set_pixels_per_point(self.ui_scale);
+                    }
+                    ui.label("Zoom:");
                 });
             });
         });
@@ -2422,12 +2702,36 @@ impl eframe::App for TrainlabApp {
                     ui.heading("Navigation");
                     ui.separator();
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Cheats, "🎮 Cheats");
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::MemoryScan, "🔍 Memory Scanning");
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::TaggedMarkers, "📌 Tagged Markers");
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::PointersInspection, "🎯 Pointers & Inspection");
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::NetworkTraffic, "🌐 Network Traffic");
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::RunApplications, "🚀 Applications");
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::ActivityLog, "📋 Activity Log");
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        ActiveTab::MemoryScan,
+                        "🔍 Memory Scanning",
+                    );
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        ActiveTab::TaggedMarkers,
+                        "📌 Tagged Markers",
+                    );
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        ActiveTab::PointersInspection,
+                        "🎯 Pointers & Inspection",
+                    );
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        ActiveTab::NetworkTraffic,
+                        "🌐 Network Traffic",
+                    );
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        ActiveTab::RunApplications,
+                        "🚀 Applications",
+                    );
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        ActiveTab::ActivityLog,
+                        "📋 Activity Log",
+                    );
                 });
 
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -2750,19 +3054,34 @@ impl eframe::App for TrainlabApp {
                         .spacing([10.0, 8.0])
                         .show(ui, |ui| {
                             ui.label("Display Label:");
-                            ui.add(egui::TextEdit::singleline(&mut edit_modal.label).desired_width(220.0));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut edit_modal.label)
+                                    .desired_width(220.0),
+                            );
                             ui.end_row();
 
                             ui.label("Group / Category:");
-                            ui.add(egui::TextEdit::singleline(&mut edit_modal.group).hint_text("e.g. Player, Weapons, General").desired_width(220.0));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut edit_modal.group)
+                                    .hint_text("e.g. Player, Weapons, General")
+                                    .desired_width(220.0),
+                            );
                             ui.end_row();
 
                             ui.label("Global Hotkey:");
-                            ui.add(egui::TextEdit::singleline(&mut edit_modal.hotkey).hint_text("e.g. Num1, Shift+Alt+K").desired_width(220.0));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut edit_modal.hotkey)
+                                    .hint_text("e.g. Num1, Shift+Alt+K")
+                                    .desired_width(220.0),
+                            );
                             ui.end_row();
 
                             ui.label("Notes / Context:");
-                            ui.add(egui::TextEdit::multiline(&mut edit_modal.note).desired_rows(3).desired_width(220.0));
+                            ui.add(
+                                egui::TextEdit::multiline(&mut edit_modal.note)
+                                    .desired_rows(3)
+                                    .desired_width(220.0),
+                            );
                             ui.end_row();
                         });
 
@@ -2840,7 +3159,11 @@ impl TrainlabApp {
             ui.add_space(5.0);
             if ui.button("🚀 Launch Application").clicked() {
                 let path = self.custom_app_path.trim().to_string();
-                let args: Vec<String> = self.custom_app_args.split_whitespace().map(|s| s.to_string()).collect();
+                let args: Vec<String> = self
+                    .custom_app_args
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
                 if !path.is_empty() {
                     let res = if let Ok(mut s) = self.session.lock() {
                         s.launch_application(&path, &args)
@@ -2861,12 +3184,19 @@ impl TrainlabApp {
 
         ui.add_space(15.0);
 
-        let tracked = self.session.lock().map(|s| s.list_tracked_apps()).unwrap_or_default();
+        let tracked = self
+            .session
+            .lock()
+            .map(|s| s.list_tracked_apps())
+            .unwrap_or_default();
         let profiles = profile::discover_profiles();
 
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.heading(format!("Tracked Session Binaries & Processes ({})", tracked.len()));
+                ui.heading(format!(
+                    "Tracked Session Binaries & Processes ({})",
+                    tracked.len()
+                ));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("🔄 Scan Running Processes").clicked() {
                         self.refresh_game_candidates();
@@ -2884,53 +3214,75 @@ impl TrainlabApp {
                     }
                 });
             } else {
-                egui::ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
-                    for app in &tracked {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("• {}", app.name));
-                            if let Some(pid) = app.pid {
-                                ui.colored_label(egui::Color32::LIGHT_GREEN, format!("(PID {pid})"));
-                            }
-                            if let Some(path) = &app.path {
-                                ui.monospace(path);
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let launch_target = app.path.as_deref().unwrap_or(&app.name).to_string();
-                                if ui.button("▶ Re-Launch").clicked()
-                                    && let Ok(mut s) = self.session.lock() {
-                                        let _ = s.launch_application(&launch_target, &[]);
-                                    }
+                egui::ScrollArea::vertical()
+                    .max_height(250.0)
+                    .show(ui, |ui| {
+                        for app in &tracked {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("• {}", app.name));
+                                if let Some(pid) = app.pid {
+                                    ui.colored_label(
+                                        egui::Color32::LIGHT_GREEN,
+                                        format!("(PID {pid})"),
+                                    );
+                                }
+                                if let Some(path) = &app.path {
+                                    ui.monospace(path);
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let launch_target =
+                                            app.path.as_deref().unwrap_or(&app.name).to_string();
+                                        if ui.button("▶ Re-Launch").clicked()
+                                            && let Ok(mut s) = self.session.lock()
+                                        {
+                                            let _ = s.launch_application(&launch_target, &[]);
+                                        }
+                                    },
+                                );
                             });
-                        });
-                    }
-                });
+                        }
+                    });
             }
         });
 
         if !profiles.is_empty() {
             ui.add_space(15.0);
             ui.group(|ui| {
-                ui.heading(format!("Game Profiles Known to Trainlab ({})", profiles.len()));
+                ui.heading(format!(
+                    "Game Profiles Known to Trainlab ({})",
+                    profiles.len()
+                ));
                 ui.label("Games with configured YAML cheat tables ready to launch & attach:");
                 ui.add_space(5.0);
 
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for (file, prof) in &profiles {
-                        ui.horizontal(|ui| {
-                            ui.label(format!("🎮 {}", prof.name));
-                            ui.colored_label(egui::Color32::LIGHT_BLUE, format!("({})", prof.game));
-                            ui.monospace(file);
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        for (file, prof) in &profiles {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("🎮 {}", prof.name));
+                                ui.colored_label(
+                                    egui::Color32::LIGHT_BLUE,
+                                    format!("({})", prof.game),
+                                );
+                                ui.monospace(file);
 
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let game_exe = prof.game.clone();
-                                if ui.button("🚀 Launch Game").clicked()
-                                    && let Ok(mut s) = self.session.lock() {
-                                        let _ = s.launch_application(&game_exe, &[]);
-                                    }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let game_exe = prof.game.clone();
+                                        if ui.button("🚀 Launch Game").clicked()
+                                            && let Ok(mut s) = self.session.lock()
+                                        {
+                                            let _ = s.launch_application(&game_exe, &[]);
+                                        }
+                                    },
+                                );
                             });
-                        });
-                    }
-                });
+                        }
+                    });
             });
         }
     }
@@ -2942,7 +3294,10 @@ impl TrainlabApp {
         ui.add_space(5.0);
 
         let (has_cap, hooks_enabled) = if let Ok(s) = self.session.lock() {
-            (s.has_capability("network_capture"), s.network_hooks_enabled())
+            (
+                s.has_capability("network_capture"),
+                s.network_hooks_enabled(),
+            )
         } else {
             (false, false)
         };
@@ -2957,13 +3312,20 @@ impl TrainlabApp {
 
         ui.horizontal(|ui| {
             let mut enabled = hooks_enabled;
-            if ui.checkbox(&mut enabled, "Enable In-Game Network Hooking").changed() {
+            if ui
+                .checkbox(&mut enabled, "Enable In-Game Network Hooking")
+                .changed()
+            {
                 if let Ok(mut s) = self.session.lock() {
                     s.set_network_hooks_enabled(enabled);
                 }
                 let (dll_port, mcp_port, ignore_hosts) = {
                     let cfg = config::AppConfig::load();
-                    (cfg.inject.dll_port, cfg.server.mcp_port, cfg.inject_features.network.ignore_hosts)
+                    (
+                        cfg.inject.dll_port,
+                        cfg.server.mcp_port,
+                        cfg.inject_features.network.ignore_hosts,
+                    )
                 };
                 let _ = self.request(&Request::ConfigureNetworkHook {
                     enabled,
@@ -2973,10 +3335,20 @@ impl TrainlabApp {
                 });
             }
 
-            if ui.checkbox(&mut self.net_capture_loopback, "Capture Loopback (127.0.0.1)").changed() {
+            if ui
+                .checkbox(
+                    &mut self.net_capture_loopback,
+                    "Capture Loopback (127.0.0.1)",
+                )
+                .changed()
+            {
                 let (dll_port, mcp_port, ignore_hosts) = {
                     let cfg = config::AppConfig::load();
-                    (cfg.inject.dll_port, cfg.server.mcp_port, cfg.inject_features.network.ignore_hosts)
+                    (
+                        cfg.inject.dll_port,
+                        cfg.server.mcp_port,
+                        cfg.inject_features.network.ignore_hosts,
+                    )
                 };
                 let _ = self.request(&Request::ConfigureNetworkHook {
                     enabled: hooks_enabled,
@@ -3013,11 +3385,11 @@ impl TrainlabApp {
 
             ui.separator();
 
-            if ui.button("🔄 Refresh Stats").clicked() {
-                if let Some(Response::NetworkStatus(st)) = self.request(&Request::GetNetworkStatus) {
-                    self.net_stats = Some(st);
-                    self.net_stats_last_query = Some(std::time::Instant::now());
-                }
+            if ui.button("🔄 Refresh Stats").clicked()
+                && let Some(Response::NetworkStatus(st)) = self.request(&Request::GetNetworkStatus)
+            {
+                self.net_stats = Some(st);
+                self.net_stats_last_query = Some(std::time::Instant::now());
             }
         });
 
@@ -3026,11 +3398,12 @@ impl TrainlabApp {
             None => true,
             Some(last) => last.elapsed() >= std::time::Duration::from_millis(1000),
         };
-        if should_poll && self.connected {
-            if let Some(Response::NetworkStatus(st)) = self.request(&Request::GetNetworkStatus) {
-                self.net_stats = Some(st);
-                self.net_stats_last_query = Some(std::time::Instant::now());
-            }
+        if should_poll
+            && self.connected
+            && let Some(Response::NetworkStatus(st)) = self.request(&Request::GetNetworkStatus)
+        {
+            self.net_stats = Some(st);
+            self.net_stats_last_query = Some(std::time::Instant::now());
         }
 
         // Display real-time traffic statistics header
@@ -3042,22 +3415,40 @@ impl TrainlabApp {
                     ui.separator();
                     ui.colored_label(
                         egui::Color32::from_rgb(100, 200, 255),
-                        format!("UDP: {} IN ({} B) / {} OUT ({} B)", stats.udp.inbound_packets, stats.udp.inbound_bytes, stats.udp.outbound_packets, stats.udp.outbound_bytes)
+                        format!(
+                            "UDP: {} IN ({} B) / {} OUT ({} B)",
+                            stats.udp.inbound_packets,
+                            stats.udp.inbound_bytes,
+                            stats.udp.outbound_packets,
+                            stats.udp.outbound_bytes
+                        ),
                     );
                     ui.separator();
                     ui.colored_label(
                         egui::Color32::from_rgb(140, 220, 140),
-                        format!("TCP: {} IN ({} B) / {} OUT ({} B)", stats.tcp.inbound_packets, stats.tcp.inbound_bytes, stats.tcp.outbound_packets, stats.tcp.outbound_bytes)
+                        format!(
+                            "TCP: {} IN ({} B) / {} OUT ({} B)",
+                            stats.tcp.inbound_packets,
+                            stats.tcp.inbound_bytes,
+                            stats.tcp.outbound_packets,
+                            stats.tcp.outbound_bytes
+                        ),
                     );
                     ui.separator();
                     ui.colored_label(
                         egui::Color32::from_rgb(240, 180, 80),
-                        format!("HTTP/TLS: {} IN / {} OUT", stats.http.inbound_packets, stats.http.outbound_packets)
+                        format!(
+                            "HTTP/TLS: {} IN / {} OUT",
+                            stats.http.inbound_packets, stats.http.outbound_packets
+                        ),
                     );
                     ui.separator();
                     ui.colored_label(
                         egui::Color32::from_rgb(200, 150, 255),
-                        format!("Steam: {} IN / {} OUT", stats.steam.inbound_packets, stats.steam.outbound_packets)
+                        format!(
+                            "Steam: {} IN / {} OUT",
+                            stats.steam.inbound_packets, stats.steam.outbound_packets
+                        ),
                     );
                     ui.separator();
                     ui.label(format!("Dropped by Filter: {}", stats.total_dropped));
@@ -3075,7 +3466,11 @@ impl TrainlabApp {
             _ => None,
         };
         let filter_str = self.net_endpoint_filter.trim();
-        let filter_opt = if filter_str.is_empty() { None } else { Some(filter_str) };
+        let filter_opt = if filter_str.is_empty() {
+            None
+        } else {
+            Some(filter_str)
+        };
 
         let (packets, total) = if let Ok(s) = self.session.lock() {
             s.list_network_packets(Some(100), None, proto, filter_opt)
@@ -3083,7 +3478,11 @@ impl TrainlabApp {
             (Vec::new(), 0)
         };
 
-        ui.label(format!("Showing {} of {} logged packet(s):", packets.len(), total));
+        ui.label(format!(
+            "Showing {} of {} logged packet(s):",
+            packets.len(),
+            total
+        ));
         ui.add_space(5.0);
 
         // Split view: Packet list table on top, selected packet payload preview on bottom
@@ -3117,24 +3516,49 @@ impl TrainlabApp {
                                 trainlab_core::protocol::PacketDirection::Inbound => "IN ⬇",
                                 trainlab_core::protocol::PacketDirection::Outbound => "OUT ⬆",
                             };
-                            let ep = p.url.as_deref().or(p.remote_endpoint.as_deref()).unwrap_or("-");
+                            let ep = p
+                                .url
+                                .as_deref()
+                                .or(p.remote_endpoint.as_deref())
+                                .unwrap_or("-");
 
-                            let preview: String = p.payload_preview.iter()
+                            let preview: String = p
+                                .payload_preview
+                                .iter()
                                 .take(32)
-                                .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                                .map(|&b| {
+                                    if b.is_ascii_graphic() || b == b' ' {
+                                        b as char
+                                    } else {
+                                        '.'
+                                    }
+                                })
                                 .collect();
 
-                            if ui.selectable_label(is_selected, format!("#{:04}", p.id)).clicked() {
+                            if ui
+                                .selectable_label(is_selected, format!("#{:04}", p.id))
+                                .clicked()
+                            {
                                 self.selected_packet_id = Some(p.id);
                             }
                             ui.label(dir_label);
                             ui.label(p.kind.as_str().to_uppercase());
-                            ui.add(egui::Label::new(ep).truncate(true)).on_hover_text(ep);
+                            ui.add(egui::Label::new(ep).truncate(true))
+                                .on_hover_text(ep);
                             ui.label(format!("{} B", p.payload_len));
                             ui.monospace(preview);
 
                             if let Some(file) = &p.artifact_file {
-                                ui.hyperlink_to("💾 Download", format!("http://{}/{}", self.mcp_addr.trim_end_matches("/mcp").trim_start_matches("http://"), file));
+                                ui.hyperlink_to(
+                                    "💾 Download",
+                                    format!(
+                                        "http://{}/{}",
+                                        self.mcp_addr
+                                            .trim_end_matches("/mcp")
+                                            .trim_start_matches("http://"),
+                                        file
+                                    ),
+                                );
                             } else {
                                 ui.label("-");
                             }
@@ -3144,52 +3568,50 @@ impl TrainlabApp {
             });
 
         // Selected packet detail inspector
-        if let Some(sel_id) = self.selected_packet_id {
-            if let Some(pkt) = packets.iter().find(|p| p.id == sel_id) {
-                ui.add_space(8.0);
+        if let Some(sel_id) = self.selected_packet_id
+            && let Some(pkt) = packets.iter().find(|p| p.id == sel_id)
+        {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.heading(format!("Packet #{:04} Details", pkt.id));
+                if ui.small_button("✕ Close Inspector").clicked() {
+                    self.selected_packet_id = None;
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Protocol: {}", pkt.kind.as_str().to_uppercase()));
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.heading(format!("Packet #{:04} Details", pkt.id));
-                    if ui.small_button("✕ Close Inspector").clicked() {
-                        self.selected_packet_id = None;
-                    }
-                });
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("Protocol: {}", pkt.kind.as_str().to_uppercase()));
+                ui.label(format!("Direction: {:?}", pkt.direction));
+                ui.separator();
+                ui.label(format!("Size: {} bytes", pkt.payload_len));
+                if let Some(f) = &pkt.artifact_file {
                     ui.separator();
-                    ui.label(format!("Direction: {:?}", pkt.direction));
-                    ui.separator();
-                    ui.label(format!("Size: {} bytes", pkt.payload_len));
-                    if let Some(f) = &pkt.artifact_file {
-                        ui.separator();
-                        ui.label(format!("Disk File: {f}"));
-                    }
-                });
-
-                if let Some(url) = &pkt.url {
-                    ui.label(format!("URL / Request: {url}"));
+                    ui.label(format!("Disk File: {f}"));
                 }
-                if let Some(hdr) = &pkt.headers {
-                    ui.collapsing("Headers", |ui| {
-                        ui.monospace(hdr);
-                    });
-                }
+            });
 
-                ui.add_space(5.0);
-                ui.heading("Payload Hex / ASCII Preview:");
-                let preview_bytes = &pkt.payload_preview;
-                egui::ScrollArea::both()
-                    .auto_shrink([false, false])
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        ui.monospace(hexdump(preview_bytes));
-                    });
+            if let Some(url) = &pkt.url {
+                ui.label(format!("URL / Request: {url}"));
             }
+            if let Some(hdr) = &pkt.headers {
+                ui.collapsing("Headers", |ui| {
+                    ui.monospace(hdr);
+                });
+            }
+
+            ui.add_space(5.0);
+            ui.heading("Payload Hex / ASCII Preview:");
+            let preview_bytes = &pkt.payload_preview;
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    ui.monospace(hexdump(preview_bytes));
+                });
         }
     }
 }
-
-
 
 /// Resolve the DLL path. If `input` is a bare file name (no separator), join
 /// it with the directory containing this executable so the DLL can be shipped
@@ -3230,13 +3652,41 @@ fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<
     use trainlab_core::scan::ValueType;
     let s = s.trim();
     match vt {
-        ValueType::I32 => Ok(s.parse::<i32>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
-        ValueType::U32 => Ok(s.parse::<u32>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
-        ValueType::F32 => Ok(s.parse::<f32>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
-        ValueType::I64 => Ok(s.parse::<i64>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
-        ValueType::U64 => Ok(s.parse::<u64>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
-        ValueType::F64 => Ok(s.parse::<f64>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
-        ValueType::Ptr => Ok(s.parse::<u64>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
+        ValueType::I32 => Ok(s
+            .parse::<i32>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
+        ValueType::U32 => Ok(s
+            .parse::<u32>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
+        ValueType::F32 => Ok(s
+            .parse::<f32>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
+        ValueType::I64 => Ok(s
+            .parse::<i64>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
+        ValueType::U64 => Ok(s
+            .parse::<u64>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
+        ValueType::F64 => Ok(s
+            .parse::<f64>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
+        ValueType::Ptr => Ok(s
+            .parse::<u64>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
     }
 }
 
@@ -3247,7 +3697,14 @@ fn resolve_dll_path(input: &str) -> String {
     }
     match std::env::current_exe() {
         Ok(exe) => match exe.parent() {
-            Some(dir) => dir.join(input).to_string_lossy().into_owned(),
+            Some(dir) => {
+                // If input is default trainlab_inject.dll, prefer trainlab.dll if present
+                if input == "trainlab_inject.dll" && dir.join("trainlab.dll").exists() {
+                    dir.join("trainlab.dll").to_string_lossy().into_owned()
+                } else {
+                    dir.join(input).to_string_lossy().into_owned()
+                }
+            }
             None => input.to_string(),
         },
         Err(_) => input.to_string(),
@@ -3309,22 +3766,22 @@ fn hexdump(data: &[u8]) -> String {
 fn clean_startup_artifacts() {
     let mut base_dirs = vec![std::path::PathBuf::from(".")];
     if let Ok(exe_path) = std::env::current_exe()
-        && let Some(exe_dir) = exe_path.parent() {
-            if !base_dirs.contains(&exe_dir.to_path_buf()) {
-                base_dirs.push(exe_dir.to_path_buf());
-            }
-        }
+        && let Some(exe_dir) = exe_path.parent()
+        && !base_dirs.contains(&exe_dir.to_path_buf())
+    {
+        base_dirs.push(exe_dir.to_path_buf());
+    }
 
     for base in &base_dirs {
         for sub in &["captures", "snapshots", "scans", "regions"] {
             let target_dir = base.join(sub);
-            if target_dir.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&target_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_file() {
-                            let _ = std::fs::remove_file(path);
-                        }
+            if target_dir.is_dir()
+                && let Ok(entries) = std::fs::read_dir(&target_dir)
+            {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let _ = std::fs::remove_file(path);
                     }
                 }
             }
@@ -3346,14 +3803,14 @@ fn execute_external_pinning_cadence(session: &SharedSession) {
         s.list_pins().to_vec()
     };
 
-    if pins.is_empty() { return };
+    if pins.is_empty() {
+        return;
+    };
 
     let proc = match crate::mcp::game_process(session) {
         Ok(p) => p,
         Err(_) => return,
     };
-
-    use trainlab_core::memory::ProcessMemory;
 
     for pin in &pins {
         if !pin.enabled {
@@ -3364,24 +3821,17 @@ fn execute_external_pinning_cadence(session: &SharedSession) {
             continue;
         }
 
-        let mut abort_pin = false;
         for op in &pin.ops {
-            if abort_pin {
-                break;
-            }
             match op {
                 trainlab_core::protocol::PinOp::AssertNotNull { address } => {
                     if *address == 0 {
-                        abort_pin = true;
                         break;
                     }
                     if let Ok(buf) = proc.read(*address, 8) {
                         if buf.iter().all(|&b| b == 0) {
-                            abort_pin = true;
                             break;
                         }
                     } else {
-                        abort_pin = true;
                         break;
                     }
                 }
@@ -3390,43 +3840,73 @@ fn execute_external_pinning_cadence(session: &SharedSession) {
                         let _ = proc.write(*address, data);
                     }
                 }
-                trainlab_core::protocol::PinOp::CopyValue { src_address, dst_address, value_type, addend, max_only } => {
+                trainlab_core::protocol::PinOp::CopyValue {
+                    src_address,
+                    dst_address,
+                    value_type,
+                    addend,
+                    max_only,
+                } => {
                     if *src_address == 0 || *dst_address == 0 {
-                        abort_pin = true;
-                        continue;
+                        break;
                     }
                     let size = value_type.size();
                     if let Ok(src_bytes) = proc.read(*src_address, size) {
                         let val_f64 = match value_type {
                             trainlab_core::scan::ValueType::I32 => {
                                 if src_bytes.len() >= 4 {
-                                    i32::from_le_bytes(src_bytes[..4].try_into().unwrap_or_default()) as f64
-                                } else { 0.0 }
+                                    i32::from_le_bytes(
+                                        src_bytes[..4].try_into().unwrap_or_default(),
+                                    ) as f64
+                                } else {
+                                    0.0
+                                }
                             }
                             trainlab_core::scan::ValueType::U32 => {
                                 if src_bytes.len() >= 4 {
-                                    u32::from_le_bytes(src_bytes[..4].try_into().unwrap_or_default()) as f64
-                                } else { 0.0 }
+                                    u32::from_le_bytes(
+                                        src_bytes[..4].try_into().unwrap_or_default(),
+                                    ) as f64
+                                } else {
+                                    0.0
+                                }
                             }
                             trainlab_core::scan::ValueType::F32 => {
                                 if src_bytes.len() >= 4 {
-                                    f32::from_le_bytes(src_bytes[..4].try_into().unwrap_or_default()) as f64
-                                } else { 0.0 }
+                                    f32::from_le_bytes(
+                                        src_bytes[..4].try_into().unwrap_or_default(),
+                                    ) as f64
+                                } else {
+                                    0.0
+                                }
                             }
                             trainlab_core::scan::ValueType::I64 => {
                                 if src_bytes.len() >= 8 {
-                                    i64::from_le_bytes(src_bytes[..8].try_into().unwrap_or_default()) as f64
-                                } else { 0.0 }
+                                    i64::from_le_bytes(
+                                        src_bytes[..8].try_into().unwrap_or_default(),
+                                    ) as f64
+                                } else {
+                                    0.0
+                                }
                             }
-                            trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => {
+                            trainlab_core::scan::ValueType::U64
+                            | trainlab_core::scan::ValueType::Ptr => {
                                 if src_bytes.len() >= 8 {
-                                    u64::from_le_bytes(src_bytes[..8].try_into().unwrap_or_default()) as f64
-                                } else { 0.0 }
+                                    u64::from_le_bytes(
+                                        src_bytes[..8].try_into().unwrap_or_default(),
+                                    ) as f64
+                                } else {
+                                    0.0
+                                }
                             }
                             trainlab_core::scan::ValueType::F64 => {
                                 if src_bytes.len() >= 8 {
-                                    f64::from_le_bytes(src_bytes[..8].try_into().unwrap_or_default())
-                                } else { 0.0 }
+                                    f64::from_le_bytes(
+                                        src_bytes[..8].try_into().unwrap_or_default(),
+                                    )
+                                } else {
+                                    0.0
+                                }
                             }
                         };
 
@@ -3436,33 +3916,60 @@ fn execute_external_pinning_cadence(session: &SharedSession) {
                             val_f64
                         };
 
-                        if *max_only {
-                            if let Ok(dst_bytes) = proc.read(*dst_address, size) {
-                                let cur_dst = match value_type {
-                                    trainlab_core::scan::ValueType::I32 => i32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
-                                    trainlab_core::scan::ValueType::U32 => u32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
-                                    trainlab_core::scan::ValueType::F32 => f32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
-                                    trainlab_core::scan::ValueType::I64 => i64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()) as f64,
-                                    trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => u64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()) as f64,
-                                    trainlab_core::scan::ValueType::F64 => f64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()),
-                                };
-                                if cur_dst >= final_val {
-                                    continue;
-                                }
+                        if *max_only && let Ok(dst_bytes) = proc.read(*dst_address, size) {
+                            let cur_dst = match value_type {
+                                trainlab_core::scan::ValueType::I32 => i32::from_le_bytes(
+                                    dst_bytes[..4].try_into().unwrap_or_default(),
+                                )
+                                    as f64,
+                                trainlab_core::scan::ValueType::U32 => u32::from_le_bytes(
+                                    dst_bytes[..4].try_into().unwrap_or_default(),
+                                )
+                                    as f64,
+                                trainlab_core::scan::ValueType::F32 => f32::from_le_bytes(
+                                    dst_bytes[..4].try_into().unwrap_or_default(),
+                                )
+                                    as f64,
+                                trainlab_core::scan::ValueType::I64 => i64::from_le_bytes(
+                                    dst_bytes[..8].try_into().unwrap_or_default(),
+                                )
+                                    as f64,
+                                trainlab_core::scan::ValueType::U64
+                                | trainlab_core::scan::ValueType::Ptr => u64::from_le_bytes(
+                                    dst_bytes[..8].try_into().unwrap_or_default(),
+                                )
+                                    as f64,
+                                trainlab_core::scan::ValueType::F64 => f64::from_le_bytes(
+                                    dst_bytes[..8].try_into().unwrap_or_default(),
+                                ),
+                            };
+                            if cur_dst >= final_val {
+                                continue;
                             }
                         }
 
                         let write_bytes = match value_type {
-                            trainlab_core::scan::ValueType::I32 => (final_val as i32).to_le_bytes().to_vec(),
-                            trainlab_core::scan::ValueType::U32 => (final_val as u32).to_le_bytes().to_vec(),
-                            trainlab_core::scan::ValueType::F32 => (final_val as f32).to_le_bytes().to_vec(),
-                            trainlab_core::scan::ValueType::I64 => (final_val as i64).to_le_bytes().to_vec(),
-                            trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => (final_val as u64).to_le_bytes().to_vec(),
+                            trainlab_core::scan::ValueType::I32 => {
+                                (final_val as i32).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::U32 => {
+                                (final_val as u32).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::F32 => {
+                                (final_val as f32).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::I64 => {
+                                (final_val as i64).to_le_bytes().to_vec()
+                            }
+                            trainlab_core::scan::ValueType::U64
+                            | trainlab_core::scan::ValueType::Ptr => {
+                                (final_val as u64).to_le_bytes().to_vec()
+                            }
                             trainlab_core::scan::ValueType::F64 => final_val.to_le_bytes().to_vec(),
                         };
                         let _ = proc.write(*dst_address, &write_bytes);
                     } else {
-                        abort_pin = true;
+                        break;
                     }
                 }
             }
@@ -3485,15 +3992,13 @@ mod tests {
             s.add_cheat(
                 "test_broken_button",
                 CheatKind::Button {
-                    commands: vec![
-                        profile::ProfileCommand::Assert {
-                            address_ref: Some("0x0".to_string()),
-                            address: None,
-                            expected: "123".to_string(),
-                            value_type: Some("i32".to_string()),
-                            note: None,
-                        }
-                    ],
+                    commands: vec![profile::ProfileCommand::Assert {
+                        address_ref: Some("0x0".to_string()),
+                        address: None,
+                        expected: "123".to_string(),
+                        value_type: Some("i32".to_string()),
+                        note: None,
+                    }],
                 },
                 None,
                 None,
@@ -3522,4 +4027,3 @@ mod tests {
         }
     }
 }
-

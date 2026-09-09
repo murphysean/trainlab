@@ -8,8 +8,8 @@
 //! uninstall.
 
 use trainlab_core::capture::{
-    self, encode_gate_const, CaptureRegSpec, GateCmp, Register, ValueType, ENTRY_STRIDE,
-    RING_CONST_A_OFF, RING_CONST_B_OFF,
+    self, CaptureRegSpec, ENTRY_STRIDE, GateCmp, RING_CONST_A_OFF, RING_CONST_B_OFF, Register,
+    ValueType, encode_gate_const,
 };
 use trainlab_core::protocol::{CaptureEntry, Response};
 
@@ -65,8 +65,8 @@ where
 {
     // Allocate the data ring first (non-executable), then emit the capture
     // payload referencing it. The ring must exist before the payload runs.
-    let ring_base = allocate(capture::ring_size(capacity), false)
-        .map_err(|e| format!("allocate ring: {e}"))?;
+    let ring_base =
+        allocate(capture::ring_size(capacity), false).map_err(|e| format!("allocate ring: {e}"))?;
 
     // Initialize the ring header (offset 0, total, seq 0, disarmed 0) and the
     // gate constants, before any capture can fire. The entries region stays
@@ -209,8 +209,11 @@ pub fn read_disarmed<R>(scratch: u64, read: R) -> Result<bool, String>
 where
     R: Fn(u64, usize) -> Result<Vec<u8>, String>,
 {
-    let buf = read(scratch + trainlab_core::capture::RING_DISARMED_OFF as u64, 4)
-        .map_err(|e| format!("read disarm flag: {e}"))?;
+    let buf = read(
+        scratch + trainlab_core::capture::RING_DISARMED_OFF as u64,
+        4,
+    )
+    .map_err(|e| format!("read disarm flag: {e}"))?;
     let v = u32::from_le_bytes(buf[0..4].try_into().unwrap());
     Ok(v != 0)
 }
@@ -360,7 +363,11 @@ mod tests {
         let allocate = |_size: usize, _exec: bool| -> Result<u64, String> {
             let i = *alloc_i.borrow();
             *alloc_i.borrow_mut() += 1;
-            allocs.borrow().get(i).copied().ok_or("no more allocs".into())
+            allocs
+                .borrow()
+                .get(i)
+                .copied()
+                .ok_or("no more allocs".into())
         };
         // Seed the target site with instructions: mov eax,1 (5) ; nop (1) ; ret (1)
         let target = 0x4000u64;
@@ -952,7 +959,11 @@ mod tests {
             );
         }
         let (entries, _) = read_with_flag(ring as u64, 4, ValueType::F64, read);
-        assert_eq!(entries.len(), 0, "gate value 0.0 (below min=1) must be rejected");
+        assert_eq!(
+            entries.len(),
+            0,
+            "gate value 0.0 (below min=1) must be rejected"
+        );
 
         // RSI = 50.0 (in [1,100000]) must capture.
         let v50 = 50.0f64.to_bits();
@@ -969,9 +980,16 @@ mod tests {
             );
         }
         let (entries2, _) = read_with_flag(ring as u64, 4, ValueType::F64, read);
-        assert_eq!(entries2.len(), 1, "gate value 50.0 (in range) must be captured");
+        assert_eq!(
+            entries2.len(),
+            1,
+            "gate value 50.0 (in range) must be captured"
+        );
         assert_eq!(entries2[0].raw, 0x2222);
-        assert_eq!(entries2[0].gate_value, 50.0, "gate_value must decode as f64");
+        assert_eq!(
+            entries2[0].gate_value, 50.0,
+            "gate_value must decode as f64"
+        );
 
         unsafe {
             libc::munmap(ring, ring_size);
@@ -992,21 +1010,29 @@ mod tests {
             let m = arena.borrow();
             let s = addr as usize;
             let e = s + len;
-            if e > m.len() { return Err("OOB".into()); }
+            if e > m.len() {
+                return Err("OOB".into());
+            }
             Ok(m[s..e].to_vec())
         };
         let write = |addr: u64, data: &[u8]| -> Result<usize, String> {
             let mut m = arena.borrow_mut();
             let s = addr as usize;
             let e = s + data.len();
-            if e > m.len() { return Err("OOB".into()); }
+            if e > m.len() {
+                return Err("OOB".into());
+            }
             m[s..e].copy_from_slice(data);
             Ok(data.len())
         };
         let allocate = |_size: usize, _exec: bool| -> Result<u64, String> {
             let i = *alloc_i.borrow();
             *alloc_i.borrow_mut() += 1;
-            allocs.borrow().get(i).copied().ok_or("no more allocs".into())
+            allocs
+                .borrow()
+                .get(i)
+                .copied()
+                .ok_or("no more allocs".into())
         };
         let target = 0x4000u64;
         write(target, &[0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0xC3]).unwrap();
@@ -1017,10 +1043,26 @@ mod tests {
         let cap = install_capture(target, spec, 2, false, read, write, allocate).unwrap();
         // Read const_a (offset 24) and const_b (offset 32) from the ring header.
         let hdr = read(cap.scratch, 48).unwrap();
-        let a_bits = u64::from_le_bytes(hdr[RING_CONST_A_OFF..RING_CONST_A_OFF + 8].try_into().unwrap());
-        let b_bits = u64::from_le_bytes(hdr[RING_CONST_B_OFF..RING_CONST_B_OFF + 8].try_into().unwrap());
-        assert_eq!(f64::from_bits(a_bits), 1.0, "const_a must be the gate min (1.0), not 0.0");
-        assert_eq!(f64::from_bits(b_bits), 100000.0, "const_b must be the gate max");
+        let a_bits = u64::from_le_bytes(
+            hdr[RING_CONST_A_OFF..RING_CONST_A_OFF + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let b_bits = u64::from_le_bytes(
+            hdr[RING_CONST_B_OFF..RING_CONST_B_OFF + 8]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            f64::from_bits(a_bits),
+            1.0,
+            "const_a must be the gate min (1.0), not 0.0"
+        );
+        assert_eq!(
+            f64::from_bits(b_bits),
+            100000.0,
+            "const_b must be the gate max"
+        );
     }
 
     /// Repro for the "exact-value gate does not filter" bug: an `eq` gate with
@@ -1101,7 +1143,11 @@ mod tests {
             );
         }
         let (entries, _) = read_with_flag(ring as u64, 4, ValueType::F64, read);
-        assert_eq!(entries.len(), 0, "gate value 2.0 (not equal to 1.0) must be rejected");
+        assert_eq!(
+            entries.len(),
+            0,
+            "gate value 2.0 (not equal to 1.0) must be rejected"
+        );
 
         // rsi = 1.0 (equal) must capture, and gate_value must decode to 1.0.
         let v1 = 1.0f64.to_bits();
@@ -1120,7 +1166,10 @@ mod tests {
         let (entries2, _) = read_with_flag(ring as u64, 4, ValueType::F64, read);
         assert_eq!(entries2.len(), 1, "gate value 1.0 (equal) must be captured");
         assert_eq!(entries2[0].raw, 0x2222);
-        assert_eq!(entries2[0].gate_value, 1.0, "gate_value must decode to 1.0, not NaN");
+        assert_eq!(
+            entries2[0].gate_value, 1.0,
+            "gate_value must decode to 1.0, not NaN"
+        );
 
         unsafe {
             libc::munmap(ring, ring_size);
@@ -1205,7 +1254,8 @@ mod tests {
                 out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("rsi") _,
             );
         }
-        let (entries, _) = read_with_flag_gate(ring as u64, 4, ValueType::Ptr, ValueType::F64, read);
+        let (entries, _) =
+            read_with_flag_gate(ring as u64, 4, ValueType::Ptr, ValueType::F64, read);
         assert_eq!(entries.len(), 0, "gate value 2.0 must be rejected");
 
         // rsi = 1.0 (equal) must capture; gate_value decodes as f64 = 1.0.
@@ -1222,10 +1272,14 @@ mod tests {
                 out("r10") _, out("r11") _, out("r12") _, out("r13") _, out("rsi") _,
             );
         }
-        let (entries2, _) = read_with_flag_gate(ring as u64, 4, ValueType::Ptr, ValueType::F64, read);
+        let (entries2, _) =
+            read_with_flag_gate(ring as u64, 4, ValueType::Ptr, ValueType::F64, read);
         assert_eq!(entries2.len(), 1, "gate value 1.0 must be captured");
         assert_eq!(entries2[0].raw, 0x2222);
-        assert_eq!(entries2[0].gate_value, 1.0, "gate_value must decode to 1.0, not NaN");
+        assert_eq!(
+            entries2[0].gate_value, 1.0,
+            "gate_value must decode to 1.0, not NaN"
+        );
 
         unsafe {
             libc::munmap(ring, ring_size);
@@ -1311,7 +1365,11 @@ mod tests {
             );
         }
         let (entries, _) = read_with_flag(ring as u64, 4, ValueType::F64, read);
-        assert_eq!(entries.len(), 0, "NaN gate value must be rejected by an eq gate");
+        assert_eq!(
+            entries.len(),
+            0,
+            "NaN gate value must be rejected by an eq gate"
+        );
 
         // rsi = 1.0 must still capture.
         let v1 = 1.0f64.to_bits();

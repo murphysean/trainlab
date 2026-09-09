@@ -34,10 +34,12 @@ struct Registry {
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
 
 fn registry() -> &'static Mutex<Registry> {
-    REGISTRY.get_or_init(|| Mutex::new(Registry {
-        next_id: 1,
-        captures: HashMap::new(),
-    }))
+    REGISTRY.get_or_init(|| {
+        Mutex::new(Registry {
+            next_id: 1,
+            captures: HashMap::new(),
+        })
+    })
 }
 
 /// Install a passive register capture at `target`. Returns the capture id and
@@ -60,17 +62,13 @@ pub fn install(
     };
 
     let cap = trainlab_cave::capture::install_capture(
-        target,
-        spec,
-        capacity,
-        disarm,
-        read,
-        write,
-        alloc,
+        target, spec, capacity, disarm, read, write, alloc,
     )?;
     let original = cap.original.clone();
 
-    let mut reg = registry().lock().map_err(|_| "capture registry poisoned".to_string())?;
+    let mut reg = registry()
+        .lock()
+        .map_err(|_| "capture registry poisoned".to_string())?;
     let id = reg.next_id;
     reg.next_id += 1;
     reg.captures.insert(
@@ -89,10 +87,10 @@ pub fn install(
 }
 
 /// Read back the recorded entries + the ring's disarmed flag for a capture.
-pub fn read(
-    id: u64,
-) -> Result<(Vec<trainlab_core::protocol::CaptureEntry>, bool), String> {
-    let reg = registry().lock().map_err(|_| "capture registry poisoned".to_string())?;
+pub fn read(id: u64) -> Result<(Vec<trainlab_core::protocol::CaptureEntry>, bool), String> {
+    let reg = registry()
+        .lock()
+        .map_err(|_| "capture registry poisoned".to_string())?;
     let c = reg
         .captures
         .get(&id)
@@ -113,7 +111,9 @@ pub fn read(
 /// Uninstall a capture: restore original bytes at its target, wait a brief grace
 /// period for any in-flight thread to exit the trampoline cave, and then free memory.
 pub fn uninstall(id: u64) -> Result<(), String> {
-    let mut reg = registry().lock().map_err(|_| "capture registry poisoned".to_string())?;
+    let mut reg = registry()
+        .lock()
+        .map_err(|_| "capture registry poisoned".to_string())?;
     let c = reg
         .captures
         .remove(&id)

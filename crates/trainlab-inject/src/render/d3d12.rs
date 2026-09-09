@@ -7,15 +7,15 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;
 
-use windows::core::{Interface, IUnknown, PCSTR};
 use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Direct3D11on12::*;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R8G8B8A8_UNORM,
+    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32_FLOAT,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, IDXGISwapChain3};
+use windows::core::{IUnknown, Interface, PCSTR};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
 type FnD3DCompile = unsafe extern "system" fn(
@@ -235,8 +235,16 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
             }
         };
 
-        let width = if desc.BufferDesc.Width > 0 { desc.BufferDesc.Width as f32 } else { 1280.0 };
-        let height = if desc.BufferDesc.Height > 0 { desc.BufferDesc.Height as f32 } else { 800.0 };
+        let width = if desc.BufferDesc.Width > 0 {
+            desc.BufferDesc.Width as f32
+        } else {
+            1280.0
+        };
+        let height = if desc.BufferDesc.Height > 0 {
+            desc.BufferDesc.Height as f32
+        } else {
+            800.0
+        };
 
         let buffer_count = desc.BufferCount.max(1);
         let mut wrapped_buffers = Vec::with_capacity(buffer_count as usize);
@@ -266,9 +274,13 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                 &mut wrapped_res,
             );
 
-            if hr_wrap.is_ok() && let Some(wrap) = wrapped_res {
+            if hr_wrap.is_ok()
+                && let Some(wrap) = wrapped_res
+            {
                 let mut rtv = None;
-                if d11_device.CreateRenderTargetView(&wrap, None, Some(&mut rtv)).is_ok()
+                if d11_device
+                    .CreateRenderTargetView(&wrap, None, Some(&mut rtv))
+                    .is_ok()
                     && let Some(rtv_view) = rtv
                 {
                     wrapped_buffers.push(WrappedBackBuffer {
@@ -392,22 +404,36 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                     std::mem::transmute(*vs_vt.add(3));
                 let get_vs_size: unsafe extern "system" fn(*mut c_void) -> usize =
                     std::mem::transmute(*vs_vt.add(4));
-                let vs_bytecode = std::slice::from_raw_parts(get_vs_buf(vs_blob) as *const u8, get_vs_size(vs_blob));
+                let vs_bytecode = std::slice::from_raw_parts(
+                    get_vs_buf(vs_blob) as *const u8,
+                    get_vs_size(vs_blob),
+                );
 
                 let ps_vt = *(ps_blob as *mut *mut usize);
                 let get_ps_buf: unsafe extern "system" fn(*mut c_void) -> *const c_void =
                     std::mem::transmute(*ps_vt.add(3));
                 let get_ps_size: unsafe extern "system" fn(*mut c_void) -> usize =
                     std::mem::transmute(*ps_vt.add(4));
-                let ps_bytecode = std::slice::from_raw_parts(get_ps_buf(ps_blob) as *const u8, get_ps_size(ps_blob));
+                let ps_bytecode = std::slice::from_raw_parts(
+                    get_ps_buf(ps_blob) as *const u8,
+                    get_ps_size(ps_blob),
+                );
 
                 let mut vs = None;
-                if state.d11_device.CreateVertexShader(vs_bytecode, None, Some(&mut vs)).is_ok() {
+                if state
+                    .d11_device
+                    .CreateVertexShader(vs_bytecode, None, Some(&mut vs))
+                    .is_ok()
+                {
                     state.vertex_shader = vs;
                 }
 
                 let mut ps = None;
-                if state.d11_device.CreatePixelShader(ps_bytecode, None, Some(&mut ps)).is_ok() {
+                if state
+                    .d11_device
+                    .CreatePixelShader(ps_bytecode, None, Some(&mut ps))
+                    .is_ok()
+                {
                     state.pixel_shader = ps;
                 }
 
@@ -442,12 +468,18 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                 ];
 
                 let mut il = None;
-                if state.d11_device.CreateInputLayout(&input_elements, vs_bytecode, Some(&mut il)).is_ok() {
+                if state
+                    .d11_device
+                    .CreateInputLayout(&input_elements, vs_bytecode, Some(&mut il))
+                    .is_ok()
+                {
                     state.input_layout = il;
                 }
 
-                let rel_vs: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vs_vt.add(2));
-                let rel_ps: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*ps_vt.add(2));
+                let rel_vs: unsafe extern "system" fn(*mut c_void) -> u32 =
+                    std::mem::transmute(*vs_vt.add(2));
+                let rel_ps: unsafe extern "system" fn(*mut c_void) -> u32 =
+                    std::mem::transmute(*ps_vt.add(2));
                 rel_vs(vs_blob);
                 rel_ps(ps_blob);
             }
@@ -465,7 +497,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
             StructureByteStride: 0,
         };
         let mut cb = None;
-        if state.d11_device.CreateBuffer(&cb_desc, None, Some(&mut cb)).is_ok() {
+        if state
+            .d11_device
+            .CreateBuffer(&cb_desc, None, Some(&mut cb))
+            .is_ok()
+        {
             state.constant_buffer = cb;
         }
     }
@@ -478,14 +514,30 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
         let t = 0.0f32;
         let b = h;
         let proj_matrix: [f32; 16] = [
-            2.0 / (r - l), 0.0,           0.0, 0.0,
-            0.0,           2.0 / (t - b), 0.0, 0.0,
-            0.0,           0.0,           0.5, 0.0,
-            (r + l) / (l - r), (t + b) / (b - t), 0.5, 1.0,
+            2.0 / (r - l),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            2.0 / (t - b),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.5,
+            0.0,
+            (r + l) / (l - r),
+            (t + b) / (b - t),
+            0.5,
+            1.0,
         ];
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        if state.d11_context.Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)).is_ok() {
+        if state
+            .d11_context
+            .Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+            .is_ok()
+        {
             std::ptr::copy_nonoverlapping(proj_matrix.as_ptr() as *const c_void, mapped.pData, 64);
             state.d11_context.Unmap(cb, 0);
         }
@@ -505,7 +557,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
             RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
         };
         let mut bs = None;
-        if state.d11_device.CreateBlendState(&blend_desc, Some(&mut bs)).is_ok() {
+        if state
+            .d11_device
+            .CreateBlendState(&blend_desc, Some(&mut bs))
+            .is_ok()
+        {
             state.blend_state = bs;
         }
     }
@@ -519,7 +575,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
             ..Default::default()
         };
         let mut rs = None;
-        if state.d11_device.CreateRasterizerState(&rast_desc, Some(&mut rs)).is_ok() {
+        if state
+            .d11_device
+            .CreateRasterizerState(&rast_desc, Some(&mut rs))
+            .is_ok()
+        {
             state.rasterizer_state = rs;
         }
     }
@@ -528,7 +588,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
         let mut ds_desc = D3D11_DEPTH_STENCIL_DESC::default();
         ds_desc.DepthEnable = false.into();
         let mut ds = None;
-        if state.d11_device.CreateDepthStencilState(&ds_desc, Some(&mut ds)).is_ok() {
+        if state
+            .d11_device
+            .CreateDepthStencilState(&ds_desc, Some(&mut ds))
+            .is_ok()
+        {
             state.depth_stencil_state = ds;
         }
     }
@@ -545,7 +609,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
             ..Default::default()
         };
         let mut ss = None;
-        if state.d11_device.CreateSamplerState(&sampler_desc, Some(&mut ss)).is_ok() {
+        if state
+            .d11_device
+            .CreateSamplerState(&sampler_desc, Some(&mut ss))
+            .is_ok()
+        {
             state.sampler_state = ss;
         }
     }
@@ -565,7 +633,9 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
     state.d11_context.RSSetViewports(Some(&vp));
 
     if let Some(bs) = state.blend_state.as_ref() {
-        state.d11_context.OMSetBlendState(bs, Some(&[0.0; 4]), 0xFFFFFFFF);
+        state
+            .d11_context
+            .OMSetBlendState(bs, Some(&[0.0; 4]), 0xFFFFFFFF);
     }
     if let Some(rs) = state.rasterizer_state.as_ref() {
         state.d11_context.RSSetState(rs);
@@ -606,10 +676,7 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                     (rgba, c.width() as u32, c.height() as u32)
                 }
                 egui::ImageData::Font(f) => {
-                    let rgba: Vec<u8> = f
-                        .srgba_pixels(None)
-                        .flat_map(|p| p.to_array())
-                        .collect();
+                    let rgba: Vec<u8> = f.srgba_pixels(None).flat_map(|p| p.to_array()).collect();
                     (rgba, f.width() as u32, f.height() as u32)
                 }
             };
@@ -657,11 +724,17 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                 };
 
                 let mut texture = None;
-                if state.d11_device.CreateTexture2D(&tex_desc, Some(&subresource), Some(&mut texture)).is_ok()
+                if state
+                    .d11_device
+                    .CreateTexture2D(&tex_desc, Some(&subresource), Some(&mut texture))
+                    .is_ok()
                     && let Some(tex) = texture
                 {
                     let mut srv = None;
-                    if state.d11_device.CreateShaderResourceView(&tex, None, Some(&mut srv)).is_ok()
+                    if state
+                        .d11_device
+                        .CreateShaderResourceView(&tex, None, Some(&mut srv))
+                        .is_ok()
                         && let Some(srv_view) = srv
                     {
                         state.textures.insert(
@@ -689,7 +762,8 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                     state.d11_context.PSSetShaderResources(0, Some(&srv_opt));
                 }
 
-                let vb_byte_size = mesh.vertices.len() * std::mem::size_of::<egui::epaint::Vertex>();
+                let vb_byte_size =
+                    mesh.vertices.len() * std::mem::size_of::<egui::epaint::Vertex>();
                 let ib_byte_size = mesh.indices.len() * std::mem::size_of::<u32>();
 
                 if state.vertex_buffer.is_none() || state.vertex_buffer_cap < vb_byte_size {
@@ -702,7 +776,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                         StructureByteStride: 0,
                     };
                     let mut vb = None;
-                    if state.d11_device.CreateBuffer(&vb_desc, None, Some(&mut vb)).is_ok() {
+                    if state
+                        .d11_device
+                        .CreateBuffer(&vb_desc, None, Some(&mut vb))
+                        .is_ok()
+                    {
                         state.vertex_buffer = vb;
                         state.vertex_buffer_cap = vb_desc.ByteWidth as usize;
                     }
@@ -718,7 +796,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                         StructureByteStride: 0,
                     };
                     let mut ib = None;
-                    if state.d11_device.CreateBuffer(&ib_desc, None, Some(&mut ib)).is_ok() {
+                    if state
+                        .d11_device
+                        .CreateBuffer(&ib_desc, None, Some(&mut ib))
+                        .is_ok()
+                    {
                         state.index_buffer = ib;
                         state.index_buffer_cap = ib_desc.ByteWidth as usize;
                     }
@@ -726,7 +808,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
 
                 if let Some(vb) = state.vertex_buffer.as_ref() {
                     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                    if state.d11_context.Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)).is_ok() {
+                    if state
+                        .d11_context
+                        .Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                        .is_ok()
+                    {
                         std::ptr::copy_nonoverlapping(
                             mesh.vertices.as_ptr() as *const c_void,
                             mapped.pData,
@@ -738,7 +824,11 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
 
                 if let Some(ib) = state.index_buffer.as_ref() {
                     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                    if state.d11_context.Map(ib, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)).is_ok() {
+                    if state
+                        .d11_context
+                        .Map(ib, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                        .is_ok()
+                    {
                         std::ptr::copy_nonoverlapping(
                             mesh.indices.as_ptr() as *const c_void,
                             mapped.pData,
@@ -748,14 +838,28 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
                     }
                 }
 
-                if let (Some(vb), Some(ib)) = (state.vertex_buffer.as_ref(), state.index_buffer.as_ref()) {
+                if let (Some(vb), Some(ib)) =
+                    (state.vertex_buffer.as_ref(), state.index_buffer.as_ref())
+                {
                     let stride = [std::mem::size_of::<egui::epaint::Vertex>() as u32];
                     let offset = [0u32];
                     let vb_opt = [Some(vb.clone())];
-                    state.d11_context.IASetVertexBuffers(0, 1, Some(vb_opt.as_ptr()), Some(stride.as_ptr()), Some(offset.as_ptr()));
-                    state.d11_context.IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
-                    state.d11_context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-                    state.d11_context.DrawIndexed(mesh.indices.len() as u32, 0, 0);
+                    state.d11_context.IASetVertexBuffers(
+                        0,
+                        1,
+                        Some(vb_opt.as_ptr()),
+                        Some(stride.as_ptr()),
+                        Some(offset.as_ptr()),
+                    );
+                    state
+                        .d11_context
+                        .IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
+                    state
+                        .d11_context
+                        .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                    state
+                        .d11_context
+                        .DrawIndexed(mesh.indices.len() as u32, 0, 0);
                 }
             }
         }

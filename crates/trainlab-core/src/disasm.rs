@@ -5,7 +5,9 @@
 //! supplies the raw bytes (e.g. from [`crate::memory::ProcessMemory::read`])
 //! and we decode them.
 
-use iced_x86::{BlockEncoder, Decoder, DecoderOptions, FlowControl, Formatter, Instruction, NasmFormatter};
+use iced_x86::{
+    BlockEncoder, Decoder, DecoderOptions, FlowControl, Formatter, Instruction, NasmFormatter,
+};
 
 /// The relocated output of a stolen-instruction block: the position-correct
 /// bytes that can run at a new address, plus whether the block terminates flow
@@ -249,11 +251,12 @@ pub fn relocate(bytes: &[u8], orig_ip: u64, new_ip: u64) -> Option<RelocatedBloc
     let result = BlockEncoder::encode(64, block, 0).ok()?;
     let ends_in_branch = instrs
         .last()
-        .map(|i| matches!(
-            i.flow_control(),
-            FlowControl::UnconditionalBranch
-                | FlowControl::Return
-        ))
+        .map(|i| {
+            matches!(
+                i.flow_control(),
+                FlowControl::UnconditionalBranch | FlowControl::Return
+            )
+        })
         .unwrap_or(false);
 
     Some(RelocatedBlock {
@@ -332,7 +335,10 @@ mod tests {
         // mov eax,1 ; mov edx,2 — no branch, ends_in_branch = false.
         let bytes = [0xb8, 0x01, 0x00, 0x00, 0x00, 0xba, 0x02, 0x00, 0x00, 0x00];
         let r = relocate(&bytes, 0x5000, 0x6000).expect("relocate");
-        assert!(!r.ends_in_branch, "fallthrough block should not end in branch");
+        assert!(
+            !r.ends_in_branch,
+            "fallthrough block should not end in branch"
+        );
         assert_eq!(r.bytes.len(), 10);
     }
 
@@ -352,7 +358,10 @@ mod tests {
         let after_new = 0x7000 + 1 + 5;
         let expect_rel = orig_dst as i64 - after_new as i64;
         let rel32 = i32::from_le_bytes(r.bytes[2..6].try_into().unwrap()) as i64;
-        assert_eq!(rel32, expect_rel, "jmp retargeted to same absolute destination");
+        assert_eq!(
+            rel32, expect_rel,
+            "jmp retargeted to same absolute destination"
+        );
     }
 
     #[test]
@@ -366,7 +375,10 @@ mod tests {
 
         // Conditional branch has a fallthrough path, so ends_in_branch must be FALSE
         // so that the trampoline appends a jump-back to return_to.
-        assert!(!r.ends_in_branch, "conditional branch block must not be marked ends_in_branch (needs fallthrough jumpback)");
+        assert!(
+            !r.ends_in_branch,
+            "conditional branch block must not be marked ends_in_branch (needs fallthrough jumpback)"
+        );
         // iced-x86 expands jne rel8 (75 7D) into a jne rel32 (0F 85 ...) if target is far,
         // which correctly targets the original destination!
         assert!(!r.bytes.is_empty());
@@ -381,11 +393,8 @@ mod tests {
         // +12/13: 4c 8d 4c 24 20   lea r9, [rsp+0x20]     (5 bytes)
         // +17/18: 44 88 44 24 20   mov [rsp+0x20], r8b    (5 bytes)
         let bytes = [
-            0x8b, 0x1c, 0x19,
-            0x03, 0x9f, 0x98, 0x02, 0x00, 0x00,
-            0x48, 0x8b, 0x0f,
-            0x4c, 0x8d, 0x4c, 0x24, 0x20,
-            0x44, 0x88, 0x44, 0x24, 0x20,
+            0x8b, 0x1c, 0x19, 0x03, 0x9f, 0x98, 0x02, 0x00, 0x00, 0x48, 0x8b, 0x0f, 0x4c, 0x8d,
+            0x4c, 0x24, 0x20, 0x44, 0x88, 0x44, 0x24, 0x20,
         ];
         // min_len 14 (absolute jump size):
         // 3 + 6 = 9 (< 14)
@@ -417,10 +426,7 @@ mod tests {
     fn test_verify_instruction_boundary_catches_mid_instruction() {
         // 0x141380020: 41 c7 46 18 a4 70 7d 3f (mov dword [r14+0x18],0x3f7d70a4) - 8 bytes
         // 0x141380028: 58 (pop rax) - 1 byte
-        let bytes = [
-            0x41, 0xc7, 0x46, 0x18, 0xa4, 0x70, 0x7d, 0x3f,
-            0x58,
-        ];
+        let bytes = [0x41, 0xc7, 0x46, 0x18, 0xa4, 0x70, 0x7d, 0x3f, 0x58];
         let base = 0x141380020u64;
 
         // Exact start boundary is valid
@@ -449,10 +455,10 @@ mod tests {
         // If steal window is at 0x1006 of length 5:
         // branch at 0x1000 jumps to 0x1008 (offset +2 within steal window 0x1006..0x100b) -> must fail!
         let code = [
-            0x75, 0x06,                         // 0x1000: jne 0x1008
-            0x90, 0x90, 0x90, 0x90,             // 0x1002..0x1006: nops
-            0xB8, 0x01, 0x00, 0x00, 0x00,       // 0x1006: mov eax, 1 (ends at 0x100b)
-            0xC3,                               // 0x100b: ret
+            0x75, 0x06, // 0x1000: jne 0x1008
+            0x90, 0x90, 0x90, 0x90, // 0x1002..0x1006: nops
+            0xB8, 0x01, 0x00, 0x00, 0x00, // 0x1006: mov eax, 1 (ends at 0x100b)
+            0xC3, // 0x100b: ret
         ];
         let base = 0x1000u64;
         let steal_target = 0x1006u64;
@@ -468,21 +474,23 @@ mod tests {
         // Now test branch targeting exact head (0x1006): should be ALLOWED
         // 0x1000: jne 0x1006 (75 04)
         let code_head = [
-            0x75, 0x04,                         // 0x1000: jne 0x1006
-            0x90, 0x90, 0x90, 0x90,             // 0x1002..0x1006: nops
-            0xB8, 0x01, 0x00, 0x00, 0x00,       // 0x1006: mov eax, 1
-            0xC3,                               // 0x100b: ret
+            0x75, 0x04, // 0x1000: jne 0x1006
+            0x90, 0x90, 0x90, 0x90, // 0x1002..0x1006: nops
+            0xB8, 0x01, 0x00, 0x00, 0x00, // 0x1006: mov eax, 1
+            0xC3, // 0x100b: ret
         ];
-        assert!(verify_steal_window_branch_targets(base, &code_head, steal_target, steal_len).is_ok());
+        assert!(
+            verify_steal_window_branch_targets(base, &code_head, steal_target, steal_len).is_ok()
+        );
 
         // Test branch targeting after steal window (0x100b): should be ALLOWED
         // 0x1000: jne 0x100b (75 09)
         let code_past = [
-            0x75, 0x09,                         // 0x1000: jne 0x100b
-            0x90, 0x90, 0x90, 0x90,
-            0xB8, 0x01, 0x00, 0x00, 0x00,
-            0xC3,
+            0x75, 0x09, // 0x1000: jne 0x100b
+            0x90, 0x90, 0x90, 0x90, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3,
         ];
-        assert!(verify_steal_window_branch_targets(base, &code_past, steal_target, steal_len).is_ok());
+        assert!(
+            verify_steal_window_branch_targets(base, &code_past, steal_target, steal_len).is_ok()
+        );
     }
 }

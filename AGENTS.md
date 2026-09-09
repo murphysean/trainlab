@@ -1,65 +1,55 @@
-# Agent Workflow: Windows Release Build & SteamOS Device Deployment
+# Agent Workflow: Unified Release Build & Device Deployment
 
-This guide documents the procedures for compiling `trainlab` Windows release binaries (`trainlab-gui.exe` and `trainlab_inject.dll`) and deploying them to target SteamOS devices (Steam Deck & Steam Machine) over SSH/SCP.
-
-> [!NOTE]
-> **Local Environment Overrides**: If `AGENTS.local.md` exists in the repository root, agents should inspect it for user-specific device IPs, target SSH hosts, and local configuration paths.
+This guide documents the procedures for compiling `trainlab` release binaries, packaging them with standardized names into `target/release-dist/`, and deploying them to target SteamOS devices (Steam Deck & Steam Machine) over SSH/SCP.
 
 ---
 
-## 1. Building Windows Release Binaries
+## 1. Unified Naming Convention
 
-To build release-optimized PE binaries (`.exe` and `.dll`) targeting 64-bit Windows (for execution under Wine/Proton):
+All release artifacts share the clean, unified `trainlab` naming scheme:
 
+| Artifact Name | Platform | Description |
+| :--- | :--- | :--- |
+| **`trainlab`** | Linux | Native ELF GUI & Memory Control Process |
+| **`trainlab.exe`** | Windows | PE32+ GUI executable (executed under Wine/Proton) |
+| **`trainlab.dll`** | Windows | PE32+ dynamic library injected into Windows games |
+| **`trainlab.so`** | Linux | ELF shared object injected via `LD_PRELOAD` into Linux games |
+
+---
+
+## 2. Preparing Releases & Deploying
+
+We provide automated cargo commands via `.cargo/config.toml` that compile both native Linux and Windows targets, stage them into `target/release-dist/`, sync the local mirror, and deploy over SSH:
+
+### A. Build & Package Release Directory:
 ```bash
-cargo build --release --target x86_64-pc-windows-gnu --package trainlab-gui --package trainlab-inject
+cargo prep-release
+# or: cargo dist
+```
+This compiles all targets, stages them in `target/release-dist/`, and synchronizes the local mirror at `~/Documents/Trainers/Trainlab/`.
+
+### B. Build, Package & Deploy to Devices:
+```bash
+cargo deploy
+```
+This performs the full compilation, packages the clean release directory, syncs the local mirror, and uses `scp` to push `trainlab`, `trainlab.exe`, `trainlab.dll`, `trainlab.so`, and `launch.sh` directly to the Steam Deck (`192.168.254.27`) and Steam Machine (`192.168.254.143`).
+
+### C. Package/Deploy without Rebuilding:
+```bash
+cargo prep-release -- --skip-build
+cargo prep-release -- --skip-build --deploy
 ```
 
-### Build Artifact Locations
-- **GUI Application**: `target/x86_64-pc-windows-gnu/release/trainlab-gui.exe`
-- **Injected DLL**: `target/x86_64-pc-windows-gnu/release/trainlab_inject.dll`
-
-> [!IMPORTANT]
-> **Build Synchronicity Rule**: ALWAYS wait for `cargo build --release` to completely finish execution before invoking `scp` to deploy binaries. Never launch `scp` while a background build task is still running.
-
 ---
 
-## 1b. Deploying Locally (this machine) — mirror directory
+## 3. Local Mirror Directory (`~/Documents/Trainers/Trainlab/`)
 
-The target directory structure is mirrored **locally** on this workstation at
-`~/Documents/Trainers/Trainlab/` (the same layout as on target devices). Keep
-this local copy in sync with the release artifacts — it is the canonical
-reference and the fallback whenever a remote device is unreachable:
+The target directory structure is mirrored locally at `~/Documents/Trainers/Trainlab/`.
+The release tool automatically maintains this mirror:
 
 ```bash
-mkdir -p ~/Documents/Trainers/Trainlab
-cp target/x86_64-pc-windows-gnu/release/trainlab-gui.exe \
-    target/x86_64-pc-windows-gnu/release/trainlab_inject.dll \
-    ~/Documents/Trainers/Trainlab/
-chmod +x ~/Documents/Trainers/Trainlab/trainlab-gui.exe
-# verify MD5s match between the mirror and the build artifacts
-```
-
----
-
-## 2. Deploying to Steam Deck / SteamOS Devices via SCP
-
-### Target Connection Configuration
-Set target environment variables or configure your SSH alias:
-- **Default User**: `deck` (or `$TARGET_USER`)
-- **Device IP / Host**: `<STEAM_DECK_IP>` / `deck@steamdeck.local`
-- **Target Directory**: `~/Documents/Trainers/Trainlab/`
-
-### Copying Binaries & Launch Scripts
-
-Use `scp` to transfer the release artifacts and launcher script to the target device:
-
-```bash
-scp target/x86_64-pc-windows-gnu/release/trainlab-gui.exe \
-    target/x86_64-pc-windows-gnu/release/trainlab_inject.dll \
-    scripts/launch.sh \
-    deck@<DEVICE_IP>:~/Documents/Trainers/Trainlab/
-ssh deck@<DEVICE_IP> "chmod +x ~/Documents/Trainers/Trainlab/launch.sh"
+ls -la ~/Documents/Trainers/Trainlab/
+# trainlab, trainlab.exe, trainlab.dll, trainlab.so, launch.sh, config.yaml
 ```
 
 ---

@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_INSERT;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcA, DefWindowProcA, SetWindowLongPtrA, GWLP_WNDPROC,
-    WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallWindowProcA, DefWindowProcA, GWLP_WNDPROC, SetWindowLongPtrA, WM_CHAR, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 static ORIGINAL_WNDPROC: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -29,11 +29,20 @@ pub unsafe extern "system" fn hooked_wndproc(
 ) -> LRESULT {
     // 1. Check for Overlay Toggle Hotkey (INSERT key, F11, or Select/Back raw scan)
     if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-        if wparam == VK_INSERT as usize || wparam == 0x7A /* VK_F11 */ {
+        if wparam == VK_INSERT as usize || wparam == 0x7A
+        /* VK_F11 */
+        {
             super::toggle_overlay();
-            let count = super::STATE.combo_press_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let count = super::STATE
+                .combo_press_count
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
             let visible = super::STATE.overlay_visible.load(Ordering::Relaxed);
-            tracing::info!("Overlay visibility toggled by key 0x{:X} (#{count}): {}", wparam, visible);
+            tracing::info!(
+                "Overlay visibility toggled by key 0x{:X} (#{count}): {}",
+                wparam,
+                visible
+            );
             return 0; // Consume the keypress
         }
     }
@@ -105,11 +114,7 @@ pub fn install_wndproc_hook(hwnd: HWND) -> bool {
     }
 
     unsafe {
-        let prev = SetWindowLongPtrA(
-            hwnd,
-            GWLP_WNDPROC,
-            hooked_wndproc as *const () as isize,
-        );
+        let prev = SetWindowLongPtrA(hwnd, GWLP_WNDPROC, hooked_wndproc as *const () as isize);
 
         if prev != 0 {
             ORIGINAL_WNDPROC.store(prev as *mut std::ffi::c_void, Ordering::SeqCst);

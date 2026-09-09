@@ -3,21 +3,21 @@
 //! Provides a lock-free or mutex-guarded ring buffer for captured packets
 //! and manages Winsock and WinHTTP detour hooks.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use trainlab_core::protocol::{
     Event, NetworkPacketDto, NetworkStatsDto, PacketDirection, PacketKind,
     ProtocolDirectionStatsDto,
 };
 
 #[cfg(windows)]
-pub mod winsock;
-#[cfg(windows)]
-pub mod winhttp;
-#[cfg(windows)]
 pub mod schannel;
 #[cfg(windows)]
 pub mod steamworks;
+#[cfg(windows)]
+pub mod winhttp;
+#[cfg(windows)]
+pub mod winsock;
 
 /// Global network hook configuration and captured packet ring buffer.
 static NETWORK_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -54,7 +54,6 @@ static STATS_STEAM_OUT_BYTES: AtomicU64 = AtomicU64::new(0);
 static STATS_TOTAL_LOGGED: AtomicU64 = AtomicU64::new(0);
 static STATS_TOTAL_DROPPED: AtomicU64 = AtomicU64::new(0);
 
-
 /// Maximum packets retained in the in-memory push queue.
 const MAX_QUEUED_PACKETS: usize = 2000;
 
@@ -73,7 +72,8 @@ unsafe impl Send for StagedBuffer {}
 unsafe impl Sync for StagedBuffer {}
 
 /// Out-of-band staged packet buffer pool (packet_id -> StagedBuffer).
-static STAGED_PACKETS: Mutex<std::collections::BTreeMap<u64, StagedBuffer>> = Mutex::new(std::collections::BTreeMap::new());
+static STAGED_PACKETS: Mutex<std::collections::BTreeMap<u64, StagedBuffer>> =
+    Mutex::new(std::collections::BTreeMap::new());
 
 /// Outbound queue of captured network packet events awaiting transmission over IPC.
 static CAPTURED_PACKETS: Mutex<Vec<NetworkPacketDto>> = Mutex::new(Vec::new());
@@ -196,7 +196,12 @@ pub fn configure_hooks(winsock: bool, winhttp: bool, schannel: bool, steamworks:
 }
 
 /// Configure network capture filter: enable flag, ignored ports, loopback toggle, and ignored hostnames/domains.
-pub fn configure(enabled: bool, ignore_ports: &[u16], capture_loopback: bool, ignore_hosts: &[String]) {
+pub fn configure(
+    enabled: bool,
+    ignore_ports: &[u16],
+    capture_loopback: bool,
+    ignore_hosts: &[String],
+) {
     NETWORK_ENABLED.store(enabled, Ordering::SeqCst);
     CAPTURE_LOOPBACK.store(capture_loopback, Ordering::SeqCst);
     WINSOCK_ENABLED.store(true, Ordering::SeqCst);
@@ -207,7 +212,11 @@ pub fn configure(enabled: bool, ignore_ports: &[u16], capture_loopback: bool, ig
         *ports = ignore_ports.to_vec();
     }
     if let Ok(mut hosts) = IGNORE_HOSTS.lock() {
-        *hosts = ignore_hosts.iter().map(|h| h.trim().to_lowercase()).filter(|h| !h.is_empty()).collect();
+        *hosts = ignore_hosts
+            .iter()
+            .map(|h| h.trim().to_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
     }
 }
 
@@ -248,7 +257,10 @@ pub fn record_packet(
             }
         }
         PacketKind::Http => {
-            let is_schannel = url.as_deref().map(|u| u.contains("SChannel")).unwrap_or(false);
+            let is_schannel = url
+                .as_deref()
+                .map(|u| u.contains("SChannel"))
+                .unwrap_or(false);
             if is_schannel {
                 if !SCHANNEL_ENABLED.load(Ordering::Relaxed) {
                     STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -272,73 +284,90 @@ pub fn record_packet(
     let remote_port = remote_endpoint.as_deref().and_then(extract_port);
 
     if let Ok(ignored) = IGNORE_PORTS.lock() {
-        if let Some(lp) = local_port {
-            if ignored.contains(&lp) {
-                STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
+        if let Some(lp) = local_port
+            && ignored.contains(&lp)
+        {
+            STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
         }
-        if let Some(rp) = remote_port {
-            if ignored.contains(&rp) {
-                STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
+        if let Some(rp) = remote_port
+            && ignored.contains(&rp)
+        {
+            STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
         }
     }
 
     // Check if any ignored host/domain matches URL, endpoints, or headers
-    if let Ok(ignored_hosts) = IGNORE_HOSTS.lock() {
-        if !ignored_hosts.is_empty() {
-            let matches_host = |target: &str| -> bool {
-                let target_lower = target.to_lowercase();
-                ignored_hosts.iter().any(|h| target_lower.contains(h))
-            };
+    if let Ok(ignored_hosts) = IGNORE_HOSTS.lock()
+        && !ignored_hosts.is_empty()
+    {
+        let matches_host = |target: &str| -> bool {
+            let target_lower = target.to_lowercase();
+            ignored_hosts.iter().any(|h| target_lower.contains(h))
+        };
 
-            if let Some(u) = url.as_deref() {
-                if matches_host(u) {
-                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            }
-            if let Some(re) = remote_endpoint.as_deref() {
-                if matches_host(re) {
-                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            }
-            if let Some(le) = local_endpoint.as_deref() {
-                if matches_host(le) {
-                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            }
-            if let Some(hdr) = headers.as_deref() {
-                if matches_host(hdr) {
-                    STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            }
-            // If plaintext payload looks like HTTP (starts with method or HTTP/), check for Host: header
-            if payload.len() >= 4 && (payload.starts_with(b"GET ") || payload.starts_with(b"POST") || payload.starts_with(b"PUT ") || payload.starts_with(b"HEAD") || payload.starts_with(b"HTTP/")) {
-                let check_len = payload.len().min(1024);
-                if let Ok(text) = std::str::from_utf8(&payload[..check_len]) {
-                    if matches_host(text) {
-                        STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                }
+        if let Some(u) = url.as_deref()
+            && matches_host(u)
+        {
+            STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if let Some(re) = remote_endpoint.as_deref()
+            && matches_host(re)
+        {
+            STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if let Some(le) = local_endpoint.as_deref()
+            && matches_host(le)
+        {
+            STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if let Some(hdr) = headers.as_deref()
+            && matches_host(hdr)
+        {
+            STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        // If plaintext payload looks like HTTP (starts with method or HTTP/), check for Host: header
+        if payload.len() >= 4
+            && (payload.starts_with(b"GET ")
+                || payload.starts_with(b"POST")
+                || payload.starts_with(b"PUT ")
+                || payload.starts_with(b"HEAD")
+                || payload.starts_with(b"HTTP/"))
+        {
+            let check_len = payload.len().min(1024);
+            if let Ok(text) = std::str::from_utf8(&payload[..check_len])
+                && matches_host(text)
+            {
+                STATS_TOTAL_DROPPED.fetch_add(1, Ordering::Relaxed);
+                return;
             }
         }
     }
 
     // Default: Ignore loopback / localhost traffic unless explicitly configured
     if !CAPTURE_LOOPBACK.load(Ordering::Relaxed) {
-        let local_is_loopback = local_endpoint.as_deref().map(is_loopback_endpoint).unwrap_or(false);
-        let remote_is_loopback = remote_endpoint.as_deref().map(is_loopback_endpoint).unwrap_or(false);
-        let url_is_loopback = url.as_deref().map(|u| {
-            let u_lower = u.to_lowercase();
-            u_lower.contains("://127.") || u_lower.contains("://localhost") || u_lower.contains("://[::1]")
-        }).unwrap_or(false);
+        let local_is_loopback = local_endpoint
+            .as_deref()
+            .map(is_loopback_endpoint)
+            .unwrap_or(false);
+        let remote_is_loopback = remote_endpoint
+            .as_deref()
+            .map(is_loopback_endpoint)
+            .unwrap_or(false);
+        let url_is_loopback = url
+            .as_deref()
+            .map(|u| {
+                let u_lower = u.to_lowercase();
+                u_lower.contains("://127.")
+                    || u_lower.contains("://localhost")
+                    || u_lower.contains("://[::1]")
+            })
+            .unwrap_or(false);
 
         if (local_is_loopback && remote_is_loopback)
             || (remote_endpoint.is_none() && local_is_loopback)
@@ -362,29 +391,31 @@ pub fn record_packet(
 
     // Out-of-band staging: If payload exceeds preview threshold, allocate a staging buffer in game process memory
     let mut staged_ptr = None;
-    if payload.len() > 256 {
-        if let Ok(layout) = std::alloc::Layout::from_size_align(payload.len(), 8) {
-            unsafe {
-                let ptr = std::alloc::alloc(layout);
-                if !ptr.is_null() {
-                    std::ptr::copy_nonoverlapping(payload.as_ptr(), ptr, payload.len());
-                    staged_ptr = Some(ptr as u64);
+    if payload.len() > 256
+        && let Ok(layout) = std::alloc::Layout::from_size_align(payload.len(), 8)
+    {
+        unsafe {
+            let ptr = std::alloc::alloc(layout);
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(payload.as_ptr(), ptr, payload.len());
+                staged_ptr = Some(ptr as u64);
 
-                    if let Ok(mut staged) = STAGED_PACKETS.lock() {
-                        // Keep pool bounded: evict oldest if at capacity limit
-                        if staged.len() >= MAX_STAGED_BUFFERS {
-                            if let Some((&oldest_id, _)) = staged.iter().next() {
-                                if let Some(evicted) = staged.remove(&oldest_id) {
-                                    std::alloc::dealloc(evicted.ptr, evicted.layout);
-                                }
-                            }
-                        }
-                        staged.insert(id, StagedBuffer {
+                if let Ok(mut staged) = STAGED_PACKETS.lock() {
+                    // Keep pool bounded: evict oldest if at capacity limit
+                    if staged.len() >= MAX_STAGED_BUFFERS
+                        && let Some((&oldest_id, _)) = staged.iter().next()
+                        && let Some(evicted) = staged.remove(&oldest_id)
+                    {
+                        std::alloc::dealloc(evicted.ptr, evicted.layout);
+                    }
+                    staged.insert(
+                        id,
+                        StagedBuffer {
                             ptr,
                             layout,
                             created_at: std::time::Instant::now(),
-                        });
-                    }
+                        },
+                    );
                 }
             }
         }
@@ -416,11 +447,11 @@ pub fn record_packet(
 
 /// Acknowledge packet receipt from GUI, freeing any staged payload buffer immediately.
 pub fn acknowledge_packet(id: u64) {
-    if let Ok(mut staged) = STAGED_PACKETS.lock() {
-        if let Some(buf) = staged.remove(&id) {
-            unsafe {
-                std::alloc::dealloc(buf.ptr, buf.layout);
-            }
+    if let Ok(mut staged) = STAGED_PACKETS.lock()
+        && let Some(buf) = staged.remove(&id)
+    {
+        unsafe {
+            std::alloc::dealloc(buf.ptr, buf.layout);
         }
     }
 }
@@ -454,9 +485,7 @@ pub fn drain_network_events() -> Vec<Event> {
         if lock.is_empty() {
             Vec::new()
         } else {
-            lock.drain(..)
-                .map(Event::NetworkPacket)
-                .collect()
+            lock.drain(..).map(Event::NetworkPacket).collect()
         }
     } else {
         Vec::new()
@@ -489,7 +518,9 @@ pub fn init_with_config(winsock: bool, winhttp: bool, schannel: bool, steamworks
     #[cfg(not(windows))]
     {
         let _ = (winsock, winhttp, schannel, steamworks);
-        tracing::info!("network traffic hooking is not supported on non-Windows platforms (stubbed)");
+        tracing::info!(
+            "network traffic hooking is not supported on non-Windows platforms (stubbed)"
+        );
     }
 }
 
@@ -633,7 +664,10 @@ mod tests {
     #[test]
     fn test_ignore_hosts_filtering() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        let ignored_hosts = vec!["api.helldivers.com".to_string(), "telemetry.arrowhead.com".to_string()];
+        let ignored_hosts = vec![
+            "api.helldivers.com".to_string(),
+            "telemetry.arrowhead.com".to_string(),
+        ];
         configure(true, &[], false, &ignored_hosts);
         let _ = drain_network_events();
 
@@ -708,7 +742,10 @@ mod tests {
             assert_eq!(p.kind, PacketKind::Http);
             assert_eq!(p.direction, PacketDirection::Outbound);
             assert_eq!(p.url.as_deref(), Some("POST /api/v1/auth"));
-            assert_eq!(p.headers.as_deref(), Some("Authorization: Bearer secret\r\nContent-Type: application/json"));
+            assert_eq!(
+                p.headers.as_deref(),
+                Some("Authorization: Bearer secret\r\nContent-Type: application/json")
+            );
             assert_eq!(&p.payload_preview, br#"{"username":"player1"}"#);
         } else {
             panic!("expected NetworkPacket event");
@@ -780,7 +817,10 @@ mod tests {
         if let Event::NetworkPacket(p) = &events[0] {
             assert_eq!(p.kind, PacketKind::Steam);
             assert_eq!(p.direction, PacketDirection::Outbound);
-            assert_eq!(p.remote_endpoint.as_deref(), Some("steam:76561198012345678"));
+            assert_eq!(
+                p.remote_endpoint.as_deref(),
+                Some("steam:76561198012345678")
+            );
             assert_eq!(p.url.as_deref(), Some("P2P Send (ch:0, type:2)"));
             assert_eq!(&p.payload_preview, b"PLAYER_POSITION_UPDATE");
         } else {
@@ -810,7 +850,10 @@ mod tests {
             assert_eq!(p.kind, PacketKind::Steam);
             assert_eq!(p.direction, PacketDirection::Inbound);
             assert_eq!(p.local_endpoint.as_deref(), Some("steam:conn:1337"));
-            assert_eq!(p.url.as_deref(), Some("SteamSockets Recv (conn:1337, ch:0, lane:0)"));
+            assert_eq!(
+                p.url.as_deref(),
+                Some("SteamSockets Recv (conn:1337, ch:0, lane:0)")
+            );
             assert_eq!(&p.payload_preview, b"PEER_SYNC_RPC");
         } else {
             panic!("expected NetworkPacket event");
@@ -852,7 +895,10 @@ mod tests {
             assert_eq!(p_out.kind, PacketKind::Udp);
             assert_eq!(p_out.direction, PacketDirection::Outbound);
             assert_eq!(p_out.local_endpoint.as_deref(), Some("192.168.1.100:41968"));
-            assert_eq!(p_out.remote_endpoint.as_deref(), Some("198.51.100.42:27015"));
+            assert_eq!(
+                p_out.remote_endpoint.as_deref(),
+                Some("198.51.100.42:27015")
+            );
             assert_eq!(&p_out.payload_preview, b"HELLDIVERS_PEER_DATAGRAM_OUT");
         } else {
             panic!("expected NetworkPacket event");
@@ -866,6 +912,26 @@ mod tests {
             assert_eq!(&p_in.payload_preview, b"HELLDIVERS_PEER_DATAGRAM_IN");
         } else {
             panic!("expected NetworkPacket event");
+        }
+
+        // Test UDP socket bound to 0.0.0.0 (INADDR_ANY) is NOT dropped by loopback filter
+        record_packet(
+            PacketKind::Udp,
+            PacketDirection::Inbound,
+            Some("0.0.0.0:27015".into()),
+            Some("198.51.100.42:54321".into()),
+            None,
+            None,
+            b"INADDR_ANY_UDP_PACKET",
+        );
+        let events = drain_network_events();
+        assert_eq!(events.len(), 1);
+        if let Event::NetworkPacket(p_any) = &events[0] {
+            assert_eq!(p_any.kind, PacketKind::Udp);
+            assert_eq!(p_any.local_endpoint.as_deref(), Some("0.0.0.0:27015"));
+            assert_eq!(&p_any.payload_preview, b"INADDR_ANY_UDP_PACKET");
+        } else {
+            panic!("expected NetworkPacket event for INADDR_ANY UDP packet");
         }
     }
 
@@ -888,7 +954,7 @@ mod tests {
             Some("198.51.100.20:27015".into()),
             None,
             None,
-            &vec![0xAA; 64],
+            &[0xAA; 64],
         );
         record_packet(
             PacketKind::Tcp,
@@ -897,7 +963,7 @@ mod tests {
             Some("1.1.1.1:443".into()), // ignored port
             None,
             None,
-            &vec![0xBB; 64],
+            &[0xBB; 64],
         );
 
         let stats = get_stats();
@@ -913,4 +979,3 @@ mod tests {
         assert_eq!(stats.total_bytes(), 128 + 256 + 512);
     }
 }
-

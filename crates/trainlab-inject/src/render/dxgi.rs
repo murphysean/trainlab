@@ -58,18 +58,18 @@ pub struct DXGI_SWAP_CHAIN_DESC {
 type FnPresent = unsafe extern "system" fn(*mut c_void, u32, u32) -> i32;
 
 type FnD3D11CreateDeviceAndSwapChain = unsafe extern "system" fn(
-    *mut c_void,        // pAdapter
-    u32,                // DriverType (D3D_DRIVER_TYPE_HARDWARE = 1)
-    *mut c_void,        // Software
-    u32,                // Flags
-    *const u32,         // pFeatureLevels
-    u32,                // FeatureLevels
-    u32,                // SDKVersion (7)
+    *mut c_void, // pAdapter
+    u32,         // DriverType (D3D_DRIVER_TYPE_HARDWARE = 1)
+    *mut c_void, // Software
+    u32,         // Flags
+    *const u32,  // pFeatureLevels
+    u32,         // FeatureLevels
+    u32,         // SDKVersion (7)
     *const DXGI_SWAP_CHAIN_DESC,
-    *mut *mut c_void,   // ppSwapChain
-    *mut *mut c_void,   // ppDevice
-    *mut u32,           // pFeatureLevel
-    *mut *mut c_void,   // ppImmediateContext
+    *mut *mut c_void, // ppSwapChain
+    *mut *mut c_void, // ppDevice
+    *mut u32,         // pFeatureLevel
+    *mut *mut c_void, // ppImmediateContext
 ) -> i32;
 
 static ORIGINAL_PRESENT: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -93,10 +93,14 @@ pub unsafe extern "system" fn hooked_present(
             // GetDesc is VMT index 12 on IDXGISwapChain
             let get_desc_fn_ptr = *vtable_ptr.add(12);
             if get_desc_fn_ptr != 0 {
-                let get_desc_fn: unsafe extern "system" fn(*mut c_void, *mut DXGI_SWAP_CHAIN_DESC) -> i32 =
-                    std::mem::transmute(get_desc_fn_ptr);
+                let get_desc_fn: unsafe extern "system" fn(
+                    *mut c_void,
+                    *mut DXGI_SWAP_CHAIN_DESC,
+                ) -> i32 = std::mem::transmute(get_desc_fn_ptr);
 
-                if get_desc_fn(swapchain, &mut desc) == 0 && desc.output_window != std::ptr::null_mut() {
+                if get_desc_fn(swapchain, &mut desc) == 0
+                    && desc.output_window != std::ptr::null_mut()
+                {
                     super::input::install_wndproc_hook(desc.output_window);
                     HWND_INITIALIZED.store(true, Ordering::Relaxed);
                 }
@@ -285,13 +289,7 @@ pub fn init_dxgi_hook() {
                         crate::allocate(size, exec)
                     };
 
-                    match trainlab_cave::cave::install(
-                        target_u64,
-                        hook,
-                        read,
-                        write,
-                        allocate,
-                    ) {
+                    match trainlab_cave::cave::install(target_u64, hook, read, write, allocate) {
                         Ok(installed) => {
                             // Point original present to the trampoline return path
                             // (installed.cave_addr + payload.len() is where relocated stolen instructions & jump-back live)
@@ -320,7 +318,11 @@ pub fn init_dxgi_hook() {
                             break;
                         }
                         Err(err) => {
-                            tracing::warn!("Failed to install Present hook at 0x{:X}: {:?}", target_u64, err);
+                            tracing::warn!(
+                                "Failed to install Present hook at 0x{:X}: {:?}",
+                                target_u64,
+                                err
+                            );
                         }
                     }
                 }

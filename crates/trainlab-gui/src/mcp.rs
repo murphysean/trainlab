@@ -12,10 +12,10 @@
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
-use rmcp::{tool, tool_router, ErrorData};
+use rmcp::{ErrorData, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use trainlab_core::protocol::{self, Request, Response};
+use trainlab_core::protocol::{Request, Response};
 
 use std::collections::HashMap;
 
@@ -39,15 +39,19 @@ fn last_error() -> String {
 pub(crate) fn is_process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::Threading::{OpenProcess, GetExitCodeProcess, PROCESS_QUERY_LIMITED_INFORMATION};
         use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if handle.is_null() {
             return false;
         }
         let mut exit_code: u32 = 0;
         let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-        unsafe { CloseHandle(handle); }
+        unsafe {
+            CloseHandle(handle);
+        }
         ok != 0 && exit_code == 259 // STILL_ACTIVE == 259
     }
     #[cfg(unix)]
@@ -97,15 +101,21 @@ pub(crate) fn game_process(
                             exe_name: game_name.clone(),
                         });
                     }
-                    err(format!("game process '{game_name}' (pid {pid}) died (game_alive: false)"))
+                    err(format!(
+                        "game process '{game_name}' (pid {pid}) died (game_alive: false)"
+                    ))
                 } else {
-                    err(format!("failed to open game process '{game_name}' (pid {pid}) externally: {e}"))
+                    err(format!(
+                        "failed to open game process '{game_name}' (pid {pid}) externally: {e}"
+                    ))
                 }
             })
     }
     #[cfg(unix)]
     {
-        Ok(Box::new(trainlab_core::memory::unix::LinuxProcess::new(pid as i32)))
+        Ok(Box::new(trainlab_core::memory::unix::LinuxProcess::new(
+            pid as i32,
+        )))
     }
     #[cfg(not(any(windows, unix)))]
     {
@@ -113,20 +123,6 @@ pub(crate) fn game_process(
         Err(err("external scan is not supported on this platform"))
     }
 }
-
-/// Send a request to the injected DLL over the single persistent multiplexed
-/// IPC connection managed by [`crate::controller`].
-///
-/// # Deprecated
-/// This wrapper exists only for call-site compatibility while MCP tools are
-/// migrated. Prefer calling [`crate::controller::request`] directly. Do not
-/// add new call sites.
-#[deprecated(note = "use crate::controller::request directly")]
-#[allow(deprecated)]
-fn call_dll(session: &SharedSession, req: &Request) -> Result<Response, String> {
-    crate::controller::request(session, req)
-}
-
 
 /// The MCP server handler for trainlab-gui.
 ///
@@ -140,11 +136,17 @@ pub struct TrainlabMcpServer {
 impl TrainlabMcpServer {
     /// Create a handler sharing the given session state.
     pub fn with_session(session: SharedSession) -> Self {
-        Self { session, egui_ctx: None }
+        Self {
+            session,
+            egui_ctx: None,
+        }
     }
 
     /// Create a handler sharing the given session state and egui context for repaint notifications.
-    pub fn with_session_and_ctx(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -> Self {
+    pub fn with_session_and_ctx(
+        session: SharedSession,
+        egui_ctx: Option<eframe::egui::Context>,
+    ) -> Self {
         Self { session, egui_ctx }
     }
 
@@ -284,7 +286,6 @@ pub struct ClearNetworkLogArgs {}
 /// Arguments for [`get_network_status`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GetNetworkStatusArgs {}
-
 
 /// Arguments for [`configure_network`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -546,7 +547,9 @@ where
             } else if let Ok(n) = s.parse::<i64>() {
                 Ok(n as u64)
             } else {
-                Err(serde::de::Error::custom(format!("invalid offset string: '{s}'")))
+                Err(serde::de::Error::custom(format!(
+                    "invalid offset string: '{s}'"
+                )))
             }
         }
     }
@@ -824,7 +827,9 @@ where
             if s_trimmed.is_empty() || s_trimmed == "null" {
                 Ok(None)
             } else {
-                serde_json::from_str(&s).map(Some).map_err(serde::de::Error::custom)
+                serde_json::from_str(&s)
+                    .map(Some)
+                    .map_err(serde::de::Error::custom)
             }
         }
         Some(GateOrString::None) | None => Ok(None),
@@ -1092,14 +1097,16 @@ impl TrainlabMcpServer {
     /// Simple connectivity check.
     #[tool(description = "Ping the trainlab MCP server; returns 'pong'.")]
     fn ping(&self) -> Result<CallToolResult, ErrorData> {
-        Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-            "pong",
-        )]))
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("pong"),
+        ]))
     }
 
     /// Enumerate processes likely to be games, so the agent can pick a target
     /// to attach to (e.g. find the game exe for `attach_game`).
-    #[tool(description = "List likely game processes (name + pid) so you can pick one to attach to with 'attach_game'.")]
+    #[tool(
+        description = "List likely game processes (name + pid) so you can pick one to attach to with 'attach_game'."
+    )]
     fn find_games(&self) -> Result<CallToolResult, ErrorData> {
         let candidates = crate::inject::find_game_candidates();
         let lines: Vec<String> = candidates
@@ -1117,7 +1124,9 @@ impl TrainlabMcpServer {
     /// connect to its listener, and report the connection. This is the remote
     /// setup loop — an agent can bring up the whole trainer on a Steam
     /// Deck/Steam machine without touching the GUI.
-    #[tool(description = "Attach to a game by name: find the process, inject the DLL, connect to its listener, and report status. Set game to the exe name (e.g. 'Unrailed2.exe').")]
+    #[tool(
+        description = "Attach to a game by name: find the process, inject the DLL, connect to its listener, and report status. Set game to the exe name (e.g. 'Unrailed2.exe')."
+    )]
     fn attach_game(
         &self,
         Parameters(args): Parameters<AttachGameArgs>,
@@ -1166,8 +1175,13 @@ impl TrainlabMcpServer {
                         .session
                         .lock()
                         .map_err(|_| err("session lock poisoned"))?;
-                    s.log_activity("MCP", format!("attached to '{}', version {version}", args.game));
-                    s.game_pid().map(|p| p.to_string()).unwrap_or_else(|| "unknown".into())
+                    s.log_activity(
+                        "MCP",
+                        format!("attached to '{}', version {version}", args.game),
+                    );
+                    s.game_pid()
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "unknown".into())
                 };
                 self.request_repaint();
                 Ok(CallToolResult::success(vec![
@@ -1188,7 +1202,9 @@ impl TrainlabMcpServer {
     }
 
     /// Report the current trainer / connection status.
-    #[tool(description = "Report trainer status: MCP reachable, whether we're connected to a DLL, whether target game process is alive, the game pid, game name, DLL version, lifecycle state, and configured host/port.")]
+    #[tool(
+        description = "Report trainer status: MCP reachable, whether we're connected to a DLL, whether target game process is alive, the game pid, game name, DLL version, lifecycle state, and configured host/port."
+    )]
     fn connection_status(&self) -> Result<CallToolResult, ErrorData> {
         let mut s = self
             .session
@@ -1227,7 +1243,9 @@ impl TrainlabMcpServer {
 
     /// Set the DLL fast-channel host/port (e.g. for a remote DLL, though the
     /// DLL runs locally on the trainer).
-    #[tool(description = "Set the DLL fast-channel host and/or port. Usually 127.0.0.1:31337; only change if you've moved the DLL listener.")]
+    #[tool(
+        description = "Set the DLL fast-channel host and/or port. Usually 127.0.0.1:31337; only change if you've moved the DLL listener."
+    )]
     fn set_connection(
         &self,
         Parameters(args): Parameters<SetConnectionArgs>,
@@ -1253,22 +1271,34 @@ impl TrainlabMcpServer {
     }
 
     /// Add a user-facing adjustable game option ("cheat") to the session.
-    #[tool(description = "Add a cheat (adjustable game option) to the session. kind='value' for a typed value at an address; kind='toggle' for a code-cave hook (e.g. god mode). It appears in the GUI Cheats panel.")]
+    #[tool(
+        description = "Add a cheat (adjustable game option) to the session. kind='value' for a typed value at an address; kind='toggle' for a code-cave hook (e.g. god mode). It appears in the GUI Cheats panel."
+    )]
     fn add_cheat(
         &self,
         Parameters(args): Parameters<AddCheatArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_add_cheat(&self.session, &ctx, None, trainlab_core::tools::AddCheatArgs {
-            label: args.label,
-            kind: args.kind,
-            address: args.address,
-            value_type: args.value_type,
-            group: args.group,
-            hotkey: args.hotkey,
-            hidden: args.hidden,
-            note: args.note,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_add_cheat(
+            &self.session,
+            &ctx,
+            None,
+            trainlab_core::tools::AddCheatArgs {
+                label: args.label,
+                kind: args.kind,
+                address: args.address,
+                value_type: args.value_type,
+                group: args.group,
+                hotkey: args.hotkey,
+                hidden: args.hidden,
+                note: args.note,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
         Ok(CallToolResult::success(vec![
@@ -1277,10 +1307,17 @@ impl TrainlabMcpServer {
     }
 
     /// List all cheats in the session.
-    #[tool(description = "List all cheats (adjustable game options) in the session, with their ids, kinds, and addresses.")]
+    #[tool(
+        description = "List all cheats (adjustable game options) in the session, with their ids, kinds, and addresses."
+    )]
     fn list_cheats(&self) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_list_cheats(&self.session, &ctx).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_list_cheats(&self.session, &ctx)
+            .map_err(|e| err(e.message))?;
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
         ]))
@@ -1292,10 +1329,17 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<CheatIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_remove_cheat(&self.session, &ctx, trainlab_core::tools::RemoveCheatArgs {
-            id: args.id,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_remove_cheat(
+            &self.session,
+            &ctx,
+            trainlab_core::tools::RemoveCheatArgs { id: args.id },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
         Ok(CallToolResult::success(vec![
@@ -1310,11 +1354,21 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<SetCheatValueArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_set_cheat_value(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::SetCheatValueArgs {
-            id: args.id,
-            value: args.value,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_set_cheat_value(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::SetCheatValueArgs {
+                id: args.id,
+                value: args.value,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
         Ok(CallToolResult::success(vec![
@@ -1323,19 +1377,32 @@ impl TrainlabMcpServer {
     }
 
     /// Enable/disable a toggle cheat (installs/removes the cave hook).
-    #[tool(description = "Enable or disable a toggle cheat (e.g. god mode). Enabling immediately installs the cave hook; disabling removes it (restores original bytes).")]
+    #[tool(
+        description = "Enable or disable a toggle cheat (e.g. god mode). Enabling immediately installs the cave hook; disabling removes it (restores original bytes)."
+    )]
     pub(crate) fn set_cheat_toggle(
         &self,
         Parameters(args): Parameters<SetCheatToggleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let (kind, label) = {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
-            let c = s.get_cheat(args.id).ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
+            let c = s
+                .get_cheat(args.id)
+                .ok_or_else(|| err(format!("no cheat with id {}", args.id)))?;
             (c.kind.clone(), c.label.clone())
         };
 
         match kind {
-            CheatKind::Toggle { target, hook, enabled, original_bytes, .. } => {
+            CheatKind::Toggle {
+                target,
+                hook,
+                enabled,
+                original_bytes,
+                ..
+            } => {
                 if enabled == args.enabled {
                     return Ok(CallToolResult::success(vec![
                         rmcp::model::ContentBlock::text(format!(
@@ -1348,19 +1415,20 @@ impl TrainlabMcpServer {
                 }
 
                 if args.enabled {
-                    if let trainlab_core::cave_hook::CaveHook::Override { payload, .. } = &hook {
-                        if payload.is_empty() {
-                            return Err(err(format!(
-                                "toggle cheat #{} ('{}') has an empty override hook with no payload; cannot enable stub toggle",
-                                args.id, label
-                            )));
-                        }
+                    if let trainlab_core::cave_hook::CaveHook::Override { payload, .. } = &hook
+                        && payload.is_empty()
+                    {
+                        return Err(err(format!(
+                            "toggle cheat #{} ('{}') has an empty override hook with no payload; cannot enable stub toggle",
+                            args.id, label
+                        )));
                     }
 
-                    let resp = call_dll(&self.session, &Request::InstallCave {
-                        target,
-                        hook,
-                    }).map_err(err)?;
+                    let resp = crate::controller::request(
+                        &self.session,
+                        &Request::InstallCave { target, hook },
+                    )
+                    .map_err(err)?;
 
                     match resp {
                         Response::CaveInstalled { cave, original, .. } => {
@@ -1376,40 +1444,65 @@ impl TrainlabMcpServer {
                                 )));
                             }
 
-                            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                            let mut s = self
+                                .session
+                                .lock()
+                                .map_err(|_| err("session lock poisoned"))?;
                             s.set_toggle_cave_info(args.id, original.clone(), cave);
-                            s.record_undo(target, original.clone(), format!("toggle cheat #{} ('{}')", args.id, label));
+                            s.record_undo(
+                                target,
+                                original.clone(),
+                                format!("toggle cheat #{} ('{}')", args.id, label),
+                            );
                             s.set_cheat_toggle(args.id, true);
                             s.log_activity("MCP", format!("toggle cheat #{} ('{}') enabled @ {target:#x} -> cave @ {cave:#x}", args.id, label));
 
-                            let msg = format!("toggle cheat #{} ('{}') enabled: cave installed @ {cave:#x} (target {target:#x} verified)", args.id, label);
+                            let msg = format!(
+                                "toggle cheat #{} ('{}') enabled: cave installed @ {cave:#x} (target {target:#x} verified)",
+                                args.id, label
+                            );
 
                             Ok(CallToolResult::success(vec![
                                 rmcp::model::ContentBlock::text(msg),
                             ]))
                         }
-                        Response::Error { message } => Err(err(format!("failed to install cave: {message}"))),
+                        Response::Error { message } => {
+                            Err(err(format!("failed to install cave: {message}")))
+                        }
                         _ => Err(err("unexpected response from DLL during cave install")),
                     }
                 } else {
                     let restore_bytes = if !original_bytes.is_empty() {
                         Some(original_bytes)
                     } else {
-                        self.session.lock().ok().and_then(|s| s.find_undo_for_target(target))
+                        self.session
+                            .lock()
+                            .ok()
+                            .and_then(|s| s.find_undo_for_target(target))
                     };
 
                     let data = restore_bytes.ok_or_else(|| {
-                        err(format!("toggle cheat #{} ('{}') has no stored original bytes; cannot restore", args.id, label))
+                        err(format!(
+                            "toggle cheat #{} ('{}') has no stored original bytes; cannot restore",
+                            args.id, label
+                        ))
                     })?;
 
-                    let resp = call_dll(&self.session, &Request::Write {
-                        address: target,
-                        data,
-                    }).map_err(err)?;
+                    let resp = crate::controller::request(
+                        &self.session,
+                        &Request::Write {
+                            address: target,
+                            data,
+                        },
+                    )
+                    .map_err(err)?;
 
                     match resp {
                         Response::Write { bytes_written } => {
-                            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                            let mut s = self
+                                .session
+                                .lock()
+                                .map_err(|_| err("session lock poisoned"))?;
                             s.set_cheat_toggle(args.id, false);
                             s.remove_undo_for_target(target);
                             s.log_activity("MCP", format!("toggle cheat #{} ('{}') disabled (restored {bytes_written} bytes @ {target:#x})", args.id, label));
@@ -1421,12 +1514,20 @@ impl TrainlabMcpServer {
                                 )),
                             ]))
                         }
-                        Response::Error { message } => Err(err(format!("failed to restore original bytes: {message}"))),
+                        Response::Error { message } => {
+                            Err(err(format!("failed to restore original bytes: {message}")))
+                        }
                         _ => Err(err("unexpected response from DLL during write")),
                     }
                 }
             }
-            CheatKind::Patch { target, patch_bytes, original_bytes, enabled, cave_ref } => {
+            CheatKind::Patch {
+                target,
+                patch_bytes,
+                original_bytes,
+                enabled,
+                cave_ref,
+            } => {
                 if enabled == args.enabled {
                     return Ok(CallToolResult::success(vec![
                         rmcp::model::ContentBlock::text(format!(
@@ -1438,26 +1539,39 @@ impl TrainlabMcpServer {
                     ]));
                 }
                 if args.enabled && patch_bytes.is_empty() {
-                    return Err(err(format!("patch cheat #{} ('{}') has empty patch_bytes; cannot enable", args.id, label)));
+                    return Err(err(format!(
+                        "patch cheat #{} ('{}') has empty patch_bytes; cannot enable",
+                        args.id, label
+                    )));
                 }
 
                 let data = if args.enabled {
                     patch_bytes
                 } else {
                     if original_bytes.is_empty() {
-                        return Err(err(format!("patch cheat #{} ('{}') has no original bytes recorded; cannot disable", args.id, label)));
+                        return Err(err(format!(
+                            "patch cheat #{} ('{}') has no original bytes recorded; cannot disable",
+                            args.id, label
+                        )));
                     }
                     original_bytes
                 };
 
-                let resp = call_dll(&self.session, &Request::Write {
-                    address: target,
-                    data,
-                }).map_err(err)?;
+                let resp = crate::controller::request(
+                    &self.session,
+                    &Request::Write {
+                        address: target,
+                        data,
+                    },
+                )
+                .map_err(err)?;
 
                 match resp {
                     Response::Write { bytes_written } => {
-                        let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                        let mut s = self
+                            .session
+                            .lock()
+                            .map_err(|_| err("session lock poisoned"))?;
                         s.set_cheat_toggle(args.id, args.enabled);
                         let action_str = if args.enabled { "enabled" } else { "disabled" };
                         let desc = cave_ref.as_deref().unwrap_or("patch");
@@ -1470,18 +1584,26 @@ impl TrainlabMcpServer {
                             )),
                         ]))
                     }
-                    Response::Error { message } => Err(err(format!("failed to write patch bytes: {message}"))),
+                    Response::Error { message } => {
+                        Err(err(format!("failed to write patch bytes: {message}")))
+                    }
                     _ => Err(err("unexpected response from DLL during patch write")),
                 }
             }
-            _ => Err(err(format!("cheat #{} ('{}') is not a toggle or patch cheat", args.id, label))),
+            _ => Err(err(format!(
+                "cheat #{} ('{}') is not a toggle or patch cheat",
+                args.id, label
+            ))),
         }
     }
 
     /// List cheat profiles discovered in the `cheats/` directory.
-    #[tool(description = "Query in-game graphics API detection, DXGI frame presentation hook, and input capture status.")]
+    #[tool(
+        description = "Query in-game graphics API detection, DXGI frame presentation hook, and input capture status."
+    )]
     fn get_render_status(&self) -> Result<CallToolResult, ErrorData> {
-        let resp = crate::controller::request(&self.session, &Request::GetRenderStatus).map_err(err)?;
+        let resp =
+            crate::controller::request(&self.session, &Request::GetRenderStatus).map_err(err)?;
         match resp {
             Response::RenderStatus {
                 api,
@@ -1522,12 +1644,16 @@ impl TrainlabMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let resp = crate::controller::request(
             &self.session,
-            &Request::SetOverlayVisible { visible: args.visible },
+            &Request::SetOverlayVisible {
+                visible: args.visible,
+            },
         )
         .map_err(err)?;
         match resp {
             Response::OverlayVisibilitySet { visible } => Ok(CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(format!("in-game overlay visibility set to {visible}")),
+                rmcp::model::ContentBlock::text(format!(
+                    "in-game overlay visibility set to {visible}"
+                )),
             ])),
             Response::Error { message } => Err(err(message)),
             other => Err(err(format!("unexpected response: {other:?}"))),
@@ -1535,33 +1661,55 @@ impl TrainlabMcpServer {
     }
 
     /// List cheat profiles discovered in the `cheats/` directory.
-    #[tool(description = "List cheat profiles (portable YAML cheat tables) discovered in the cheats/ directory next to the GUI, with their target game.")]
+    #[tool(
+        description = "List cheat profiles (portable YAML cheat tables) discovered in the cheats/ directory next to the GUI, with their target game."
+    )]
     fn list_profiles(&self) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_list_profiles(&self.session, &ctx).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_list_profiles(&self.session, &ctx)
+            .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
         ]))
     }
 
-    pub(crate) fn load_profile_by_name(&self, profile_name: &str, run_setup: bool) -> Result<String, String> {
-        let args = LoadProfileArgs { profile: profile_name.into(), run_setup };
+    pub(crate) fn load_profile_by_name(
+        &self,
+        profile_name: &str,
+        run_setup: bool,
+    ) -> Result<String, String> {
+        let args = LoadProfileArgs {
+            profile: profile_name.into(),
+            run_setup,
+        };
         // T-143: Return the detailed result text (resolved addresses, counts)
         // instead of the constant "profile loaded".
-        self.load_profile(Parameters(args)).map_err(|e| e.message.to_string()).and_then(|result| {
-            // Extract the text content from the CallToolResult.
-            result.content.into_iter().find_map(|block| match block {
-                rmcp::model::ContentBlock::Text(t) => Some(t.text),
-                _ => None,
-            }).ok_or_else(|| "profile loaded (no detail)".to_string())
-        })
+        self.load_profile(Parameters(args))
+            .map_err(|e| e.message.to_string())
+            .and_then(|result| {
+                // Extract the text content from the CallToolResult.
+                result
+                    .content
+                    .into_iter()
+                    .find_map(|block| match block {
+                        rmcp::model::ContentBlock::Text(t) => Some(t.text),
+                        _ => None,
+                    })
+                    .ok_or_else(|| "profile loaded (no detail)".to_string())
+            })
     }
 
     /// Load a cheat profile: run its setup steps to resolve base addresses,
     /// then materialize its cheats into the session (populating known values,
     /// but NOT enabling any cheats).
-    #[tool(description = "Load a cheat profile by file name or game exe. Runs setup steps (AOB scans, pointer chains, addresses) to resolve base addresses, then materializes the profile's cheats into the session. Does NOT enable any cheats.")]
+    #[tool(
+        description = "Load a cheat profile by file name or game exe. Runs setup steps (AOB scans, pointer chains, addresses) to resolve base addresses, then materializes the profile's cheats into the session. Does NOT enable any cheats."
+    )]
     fn load_profile(
         &self,
         Parameters(args): Parameters<LoadProfileArgs>,
@@ -1571,7 +1719,10 @@ impl TrainlabMcpServer {
         // enabled cheats, unreverted undo entries, or unfreed memory allocations,
         // or if another operation/init/load is in progress.
         {
-            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let mut s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             let dirty = s.check_dirty();
             if dirty.is_dirty() {
                 let err_msg = format!(
@@ -1585,7 +1736,9 @@ impl TrainlabMcpServer {
         }
 
         // RAII guard to ensure operation_in_progress is cleared even if load_profile errors out early.
-        struct LoadGuard<'a>(&'a std::sync::Arc<std::sync::Mutex<trainlab_core::session::SessionState>>);
+        struct LoadGuard<'a>(
+            &'a std::sync::Arc<std::sync::Mutex<trainlab_core::session::SessionState>>,
+        );
         impl<'a> Drop for LoadGuard<'a> {
             fn drop(&mut self) {
                 if let Ok(mut s) = self.0.lock() {
@@ -1610,7 +1763,9 @@ impl TrainlabMcpServer {
                     }
                 }
                 crate::profile::DiscoveredProfile::Invalid { file, error } => {
-                    if file.to_lowercase() == target || target.contains(file.to_lowercase().trim_end_matches(".yaml")) {
+                    if file.to_lowercase() == target
+                        || target.contains(file.to_lowercase().trim_end_matches(".yaml"))
+                    {
                         found_invalid = Some((file, error));
                     }
                 }
@@ -1622,13 +1777,13 @@ impl TrainlabMcpServer {
             (None, Some((f, err_msg))) => {
                 return Err(err(format!(
                     "profile '{f}' found in cheats/ but FAILED to parse: {err_msg}"
-                )))
+                )));
             }
             (None, None) => {
                 return Err(err(format!(
                     "no profile found for '{}' (looked in cheats/)",
                     args.profile
-                )))
+                )));
             }
         };
         let profile = profile.clone();
@@ -1641,15 +1796,27 @@ impl TrainlabMcpServer {
         // If inject_dll is true and we don't have a game_pid yet (or not connected to this game),
         // automatically attach to the target game process first.
         let needs_attach = {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
-            !s.connected() || s.game_pid().is_none() || !s.game_name().eq_ignore_ascii_case(&profile.game)
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
+            !s.connected()
+                || s.game_pid().is_none()
+                || !s.game_name().eq_ignore_ascii_case(&profile.game)
         };
 
         if needs_attach && profile.inject_dll {
-            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let mut s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             s.set_game_name(profile.game.clone());
             let current_dll = s.dll_path().to_string();
-            let raw_dll = if current_dll.is_empty() { "trainlab_inject.dll" } else { &current_dll };
+            let raw_dll = if current_dll.is_empty() {
+                "trainlab_inject.dll"
+            } else {
+                &current_dll
+            };
             let resolved_dll = if raw_dll.contains('/') || raw_dll.contains('\\') {
                 raw_dll.to_string()
             } else if let Ok(exe) = std::env::current_exe() {
@@ -1672,7 +1839,10 @@ impl TrainlabMcpServer {
             match attach_res {
                 Ok(version) => {
                     if let Ok(mut s) = self.session.lock() {
-                        s.log_activity("PROFILE", format!("attached to '{}' (inject v{version})", profile.game));
+                        s.log_activity(
+                            "PROFILE",
+                            format!("attached to '{}' (inject v{version})", profile.game),
+                        );
                     }
                 }
                 Err(e) => {
@@ -1687,11 +1857,14 @@ impl TrainlabMcpServer {
 
         // Configure DLL render hooks via IPC based on profile render config (defaults to enabled if not specified)
         let render_cfg = profile.render.clone().unwrap_or_default();
-        let _ = crate::controller::request(&self.session, &Request::ConfigureRender {
-            overlay: render_cfg.overlay,
-            hook_wndproc: render_cfg.hook_wndproc,
-            xinput_hooks: render_cfg.xinput_hooks,
-        });
+        let _ = crate::controller::request(
+            &self.session,
+            &Request::ConfigureRender {
+                overlay: render_cfg.overlay,
+                hook_wndproc: render_cfg.hook_wndproc,
+                xinput_hooks: render_cfg.xinput_hooks,
+            },
+        );
 
         // Configure DLL network hooks and filtering via IPC if specified in profile
         if let Some(net_cfg) = &profile.network {
@@ -1708,15 +1881,20 @@ impl TrainlabMcpServer {
                     ignore_hosts.push(h.clone());
                 }
             }
-            let capture_loopback = net_cfg.capture_loopback.unwrap_or(app_cfg.inject_features.network.capture_loopback);
+            let capture_loopback = net_cfg
+                .capture_loopback
+                .unwrap_or(app_cfg.inject_features.network.capture_loopback);
             let enabled = net_cfg.enabled.unwrap_or(true);
 
-            let _ = crate::controller::request(&self.session, &Request::ConfigureNetworkHook {
-                enabled,
-                ignore_ports,
-                capture_loopback,
-                ignore_hosts,
-            });
+            let _ = crate::controller::request(
+                &self.session,
+                &Request::ConfigureNetworkHook {
+                    enabled,
+                    ignore_ports,
+                    capture_loopback,
+                    ignore_hosts,
+                },
+            );
         }
 
         // Run setup steps or init_commands to resolve base addresses and create markers.
@@ -1743,27 +1921,53 @@ impl TrainlabMcpServer {
         // can resolve it via session markers. Previously this happened after, which made
         // any init_command referencing a setup step fail to resolve its marker.
         {
-            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let mut s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             for (name, addr) in &resolved {
-                let _ = s.set_marker(name, *addr, Some(&format!("Resolved base address for profile '{}'", profile.game)));
-                s.log_activity("PROFILE", format!("resolved setup marker '${name}' = {addr:#x}"));
+                let _ = s.set_marker(
+                    name,
+                    *addr,
+                    Some(&format!(
+                        "Resolved base address for profile '{}'",
+                        profile.game
+                    )),
+                );
+                s.log_activity(
+                    "PROFILE",
+                    format!("resolved setup marker '${name}' = {addr:#x}"),
+                );
             }
             // Load struct type definitions from the profile into the session type catalog.
             for def in &profile.structs {
                 s.register_struct_def(def.clone());
-                s.log_activity("PROFILE", format!("registered struct type '{}' ({} field(s))", def.name, def.fields.len()));
+                s.log_activity(
+                    "PROFILE",
+                    format!(
+                        "registered struct type '{}' ({} field(s))",
+                        def.name,
+                        def.fields.len()
+                    ),
+                );
             }
         }
 
         // Track starting undo ID to automatically rollback any init mutations if load_profile fails mid-way.
         let init_undo_start_id = {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             s.undo_log().last().map(|u| u.id + 1).unwrap_or(1)
         };
 
         let rollback_init_mutations = |session: &SharedSession, reason: &str| {
             let undos_to_revert = if let Ok(mut s) = session.lock() {
-                s.log_activity("PROFILE", format!("rolling back init mutations due to error: {reason}"));
+                s.log_activity(
+                    "PROFILE",
+                    format!("rolling back init mutations due to error: {reason}"),
+                );
                 s.drain_undos_since(init_undo_start_id)
             } else {
                 Vec::new()
@@ -1773,23 +1977,44 @@ impl TrainlabMcpServer {
                 if entry.original_bytes.is_empty() {
                     continue;
                 }
-                match call_dll(session, &Request::Write {
-                    address: entry.address,
-                    data: entry.original_bytes.clone(),
-                }) {
+                match crate::controller::request(
+                    session,
+                    &Request::Write {
+                        address: entry.address,
+                        data: entry.original_bytes.clone(),
+                    },
+                ) {
                     Ok(Response::Write { bytes_written }) => {
                         if let Ok(mut s) = session.lock() {
-                            s.log_activity("PROFILE", format!("auto-reverted init mutation at {:#x} (restored {} bytes)", entry.address, bytes_written));
+                            s.log_activity(
+                                "PROFILE",
+                                format!(
+                                    "auto-reverted init mutation at {:#x} (restored {} bytes)",
+                                    entry.address, bytes_written
+                                ),
+                            );
                         }
                     }
                     Ok(Response::Error { message }) => {
                         if let Ok(mut s) = session.lock() {
-                            s.log_activity("PROFILE", format!("failed to auto-revert init mutation at {:#x}: {message}", entry.address));
+                            s.log_activity(
+                                "PROFILE",
+                                format!(
+                                    "failed to auto-revert init mutation at {:#x}: {message}",
+                                    entry.address
+                                ),
+                            );
                         }
                     }
                     Err(e) => {
                         if let Ok(mut s) = session.lock() {
-                            s.log_activity("PROFILE", format!("failed to send auto-revert write at {:#x}: {e}", entry.address));
+                            s.log_activity(
+                                "PROFILE",
+                                format!(
+                                    "failed to send auto-revert write at {:#x}: {e}",
+                                    entry.address
+                                ),
+                            );
                         }
                     }
                     _ => {}
@@ -1799,19 +2024,23 @@ impl TrainlabMcpServer {
 
         // Execute profile init_commands if defined so memory markers and allocations are established
         if let Some(init_cmds) = &profile.init_commands
-            && !init_cmds.is_empty() {
-                if let Ok(mut s) = self.session.lock() {
-                    s.log_activity("PROFILE", format!("executing {} profile init_command(s)...", init_cmds.len()));
-                }
-                if let Err(e) = execute_profile_commands(&self.session, init_cmds) {
-                    let err_msg = format!("profile init_commands failed: {e}");
-                    rollback_init_mutations(&self.session, &err_msg);
-                    if let Ok(mut s) = self.session.lock() {
-                        s.log_activity("PROFILE", &err_msg);
-                    }
-                    return Err(err(err_msg));
-                }
+            && !init_cmds.is_empty()
+        {
+            if let Ok(mut s) = self.session.lock() {
+                s.log_activity(
+                    "PROFILE",
+                    format!("executing {} profile init_command(s)...", init_cmds.len()),
+                );
             }
+            if let Err(e) = execute_profile_commands(&self.session, init_cmds) {
+                let err_msg = format!("profile init_commands failed: {e}");
+                rollback_init_mutations(&self.session, &err_msg);
+                if let Ok(mut s) = self.session.lock() {
+                    s.log_activity("PROFILE", &err_msg);
+                }
+                return Err(err(err_msg));
+            }
+        }
 
         // Materialize cheats and setup markers into the session.
         let mut s = self
@@ -1821,12 +2050,25 @@ impl TrainlabMcpServer {
         // Set the game name and active profile metadata in session so save_profile preserves setup steps.
         s.set_game_name(profile.game.clone());
         s.set_active_profile(&profile);
-        s.log_activity("PROFILE", format!("loading profile '{}' ({})...", file, profile.game));
+        s.log_activity(
+            "PROFILE",
+            format!("loading profile '{}' ({})...", file, profile.game),
+        );
         s.clear_cheats();
 
         for (name, addr) in &resolved {
-            let _ = s.set_marker(name, *addr, Some(&format!("Resolved base address for profile '{}'", profile.game)));
-            s.log_activity("PROFILE", format!("resolved setup marker '${name}' = {addr:#x}"));
+            let _ = s.set_marker(
+                name,
+                *addr,
+                Some(&format!(
+                    "Resolved base address for profile '{}'",
+                    profile.game
+                )),
+            );
+            s.log_activity(
+                "PROFILE",
+                format!("resolved setup marker '${name}' = {addr:#x}"),
+            );
         }
         let mut materialized = 0usize;
         for pc in &profile.cheats {
@@ -1855,7 +2097,11 @@ impl TrainlabMcpServer {
                     }
                 }
                 "struct" => {
-                    let base_expr = pc.base.clone().or_else(|| pc.address_ref.clone()).unwrap_or_default();
+                    let base_expr = pc
+                        .base
+                        .clone()
+                        .or_else(|| pc.address_ref.clone())
+                        .unwrap_or_default();
                     let base_address = resolve_cheat_address(&resolved, pc).unwrap_or(0);
                     let fields = pc.fields.clone().unwrap_or_default();
                     crate::session::CheatKind::Struct {
@@ -1877,9 +2123,14 @@ impl TrainlabMcpServer {
                     // (origin = target, since the cave payload is emitted relative to it for
                     // the RIP-relative constant slots) to produce the shellcode payload bytes.
                     let payload = if let Some(asm_src) = &pc.asm {
-                        if let Err(e) = trainlab_core::asm::check_position_dependent_external_refs(asm_src) {
+                        if let Err(e) =
+                            trainlab_core::asm::check_position_dependent_external_refs(asm_src)
+                        {
                             drop(s);
-                            let err_msg = format!("asm for cheat '{}' failed position-independence check: {e}", pc.id);
+                            let err_msg = format!(
+                                "asm for cheat '{}' failed position-independence check: {e}",
+                                pc.id
+                            );
                             rollback_init_mutations(&self.session, &err_msg);
                             return Err(err(err_msg));
                         }
@@ -1898,7 +2149,14 @@ impl TrainlabMcpServer {
                                 return Err(err(err_msg));
                             }
                         };
-                        s.log_activity("PROFILE", format!("cheat '{}' assembled {} byte(s) from asm", pc.id, block.bytes.len()));
+                        s.log_activity(
+                            "PROFILE",
+                            format!(
+                                "cheat '{}' assembled {} byte(s) from asm",
+                                pc.id,
+                                block.bytes.len()
+                            ),
+                        );
                         block.bytes
                     } else {
                         match parse_hex_bytes(pc.payload.as_deref().unwrap_or("")) {
@@ -1915,8 +2173,14 @@ impl TrainlabMcpServer {
                         _ => trainlab_core::cave_hook::JumpStyle::Absolute,
                     };
                     let hook = match pc.hook.as_deref().unwrap_or("trampoline") {
-                        "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline { payload, jump: jump_style },
-                        "override" => trainlab_core::cave_hook::CaveHook::Override { payload, jump: jump_style },
+                        "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline {
+                            payload,
+                            jump: jump_style,
+                        },
+                        "override" => trainlab_core::cave_hook::CaveHook::Override {
+                            payload,
+                            jump: jump_style,
+                        },
                         other => {
                             drop(s);
                             let err_msg = format!("unknown hook '{other}'");
@@ -1934,7 +2198,15 @@ impl TrainlabMcpServer {
                             trainlab_core::cave_hook::JumpStyle::Relative => 5,
                             trainlab_core::cave_hook::JumpStyle::Absolute => 14,
                         };
-                        match crate::controller::request_at(&host, port, &Request::Read { address: target, len: sample_len }, Some(&self.session)) {
+                        match crate::controller::request_at(
+                            &host,
+                            port,
+                            &Request::Read {
+                                address: target,
+                                len: sample_len,
+                            },
+                            Some(&self.session),
+                        ) {
                             Ok(Response::Read { data }) => data,
                             _ => Vec::new(),
                         }
@@ -1969,7 +2241,15 @@ impl TrainlabMcpServer {
                     let original_bytes = if let Some(orig_hex) = &pc.original_bytes {
                         parse_hex_bytes(orig_hex).unwrap_or_default()
                     } else {
-                        match crate::controller::request_at(&host, port, &Request::Read { address: target, len: patch_bytes.len() }, Some(&self.session)) {
+                        match crate::controller::request_at(
+                            &host,
+                            port,
+                            &Request::Read {
+                                address: target,
+                                len: patch_bytes.len(),
+                            },
+                            Some(&self.session),
+                        ) {
                             Ok(Response::Read { data }) => data,
                             _ => Vec::new(),
                         }
@@ -1994,19 +2274,34 @@ impl TrainlabMcpServer {
                 }
             };
             let is_hidden = pc.hidden.unwrap_or(false);
-            s.add_cheat_group(&pc.label, kind, pc.group.as_deref(), pc.hotkey.as_deref(), is_hidden, pc.note.as_deref());
+            s.add_cheat_group(
+                &pc.label,
+                kind,
+                pc.group.as_deref(),
+                pc.hotkey.as_deref(),
+                is_hidden,
+                pc.note.as_deref(),
+            );
             materialized += 1;
         }
         // T-142: Only set connected=true if we actually attached/injected.
         // The attach flow above (find_inject_connect) already sets connected
         // on success; don't override it here if attach was skipped or failed.
-        let completion_msg = format!("successfully loaded profile '{}' ({}): {} setup step(s) resolved, {} cheat(s) materialized", file, profile.game, resolved.len(), materialized);
+        let completion_msg = format!(
+            "successfully loaded profile '{}' ({}): {} setup step(s) resolved, {} cheat(s) materialized",
+            file,
+            profile.game,
+            resolved.len(),
+            materialized
+        );
         s.log_activity("PROFILE", &completion_msg);
-        s.publish_event(trainlab_core::event::BusEvent::Session(crate::event::SessionEvent::ProfileLoaded {
-            name: file.clone(),
-            game: profile.game.clone(),
-            cheats_count: materialized,
-        }));
+        s.publish_event(trainlab_core::event::BusEvent::Session(
+            crate::event::SessionEvent::ProfileLoaded {
+                name: file.clone(),
+                game: profile.game.clone(),
+                cheats_count: materialized,
+            },
+        ));
         drop(s);
         self.request_repaint();
 
@@ -2017,7 +2312,12 @@ impl TrainlabMcpServer {
             Vec::new()
         };
         if !overlay_cheats.is_empty() {
-            let _ = crate::controller::request(&self.session, &Request::SyncCheats { cheats: overlay_cheats });
+            let _ = crate::controller::request(
+                &self.session,
+                &Request::SyncCheats {
+                    cheats: overlay_cheats,
+                },
+            );
         }
 
         // If the profile defines network configuration, configure DLL network interception accordingly
@@ -2069,10 +2369,15 @@ impl TrainlabMcpServer {
     }
 
     /// Audit and verify code sites against their original_bytes in memory.
-    #[tool(description = "Audit and verify all code hook sites in the active profile against their expected original bytes in game memory. Reports which sites are clean, patched, or unknown.")]
+    #[tool(
+        description = "Audit and verify all code hook sites in the active profile against their expected original bytes in game memory. Reports which sites are clean, patched, or unknown."
+    )]
     fn verify_sites(&self) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        let s = self
+            .session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
         let cheats = s.list_cheats();
         if cheats.is_empty() {
             return Ok(CallToolResult::success(vec![
@@ -2085,7 +2390,12 @@ impl TrainlabMcpServer {
 
         for c in cheats {
             match &c.kind {
-                CheatKind::Toggle { target, original_bytes, enabled, .. } => {
+                CheatKind::Toggle {
+                    target,
+                    original_bytes,
+                    enabled,
+                    ..
+                } => {
                     let orig: Option<Vec<u8>> = if !original_bytes.is_empty() {
                         Some(original_bytes.clone())
                     } else {
@@ -2095,19 +2405,29 @@ impl TrainlabMcpServer {
                     let sample_len = orig.as_ref().map(|b| b.len().max(5)).unwrap_or(5);
                     match proc.read(*target, sample_len) {
                         Ok(live) => {
-                            let live_hex = live.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                            let live_hex = live
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
                             if let Some(expected) = orig {
                                 let is_original = live.starts_with(&expected);
                                 let status = if is_original {
                                     "CLEAN (original bytes present)"
-                                } else if live.starts_with(&[0xff, 0x25]) || live.starts_with(&[0xe9]) || live.starts_with(&[0xeb]) {
+                                } else if live.starts_with(&[0xff, 0x25])
+                                    || live.starts_with(&[0xe9])
+                                    || live.starts_with(&[0xeb])
+                                {
                                     "PATCHED (live jump hook present)"
                                 } else {
                                     "DIRTY / MODIFIED"
                                 };
                                 lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
                             } else {
-                                let status = if live.starts_with(&[0xff, 0x25]) || live.starts_with(&[0xe9]) || live.starts_with(&[0xeb]) {
+                                let status = if live.starts_with(&[0xff, 0x25])
+                                    || live.starts_with(&[0xe9])
+                                    || live.starts_with(&[0xeb])
+                                {
                                     "PATCHED (live jump hook present, baseline unrecorded)"
                                 } else {
                                     "UNKNOWN (no original bytes recorded)"
@@ -2120,17 +2440,30 @@ impl TrainlabMcpServer {
                         }
                     }
                 }
-                CheatKind::Patch { target, original_bytes, patch_bytes, enabled, .. } => {
+                CheatKind::Patch {
+                    target,
+                    original_bytes,
+                    patch_bytes,
+                    enabled,
+                    ..
+                } => {
                     let orig: Option<Vec<u8>> = if !original_bytes.is_empty() {
                         Some(original_bytes.clone())
                     } else {
                         s.find_undo_for_target(*target)
                     };
 
-                    let sample_len = orig.as_ref().map(|b| b.len()).unwrap_or_else(|| patch_bytes.len().max(5));
+                    let sample_len = orig
+                        .as_ref()
+                        .map(|b| b.len())
+                        .unwrap_or_else(|| patch_bytes.len().max(5));
                     match proc.read(*target, sample_len) {
                         Ok(live) => {
-                            let live_hex = live.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                            let live_hex = live
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
                             if let Some(expected) = orig {
                                 let status = if live.starts_with(&expected) {
                                     "CLEAN (original bytes present)"
@@ -2141,11 +2474,12 @@ impl TrainlabMcpServer {
                                 };
                                 lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
                             } else {
-                                let status = if !patch_bytes.is_empty() && live.starts_with(patch_bytes) {
-                                    "PATCHED (patch bytes present)"
-                                } else {
-                                    "UNKNOWN (no original bytes recorded)"
-                                };
+                                let status =
+                                    if !patch_bytes.is_empty() && live.starts_with(patch_bytes) {
+                                        "PATCHED (patch bytes present)"
+                                    } else {
+                                        "UNKNOWN (no original bytes recorded)"
+                                    };
                                 lines.push(format!("  • #{} '{}' @ {target:#x}: {status} [live: {live_hex}] (session enabled: {enabled})", c.id, c.label));
                             }
                         }
@@ -2167,31 +2501,48 @@ impl TrainlabMcpServer {
     }
 
     /// Launch an application binary or executable by path.
-    #[tool(description = "Launch an application binary, helper process, or game executable by path with optional arguments.")]
+    #[tool(
+        description = "Launch an application binary, helper process, or game executable by path with optional arguments."
+    )]
     fn launch_app(
         &self,
         Parameters(args): Parameters<LaunchAppArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let app_args = args.args.unwrap_or_default();
-        let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        let mut s = self
+            .session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
         let pid = s.launch_application(&args.path, &app_args).map_err(err)?;
         drop(s);
         self.request_repaint();
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!("successfully launched '{}' (PID {pid})", args.path)),
+            rmcp::model::ContentBlock::text(format!(
+                "successfully launched '{}' (PID {pid})",
+                args.path
+            )),
         ]))
     }
 
     /// Save the current cheats in the session as a portable cheat profile YAML file.
-    #[tool(description = "Save the cheats currently in the session to a YAML profile in the cheats/ directory for reuse across sessions.")]
+    #[tool(
+        description = "Save the cheats currently in the session to a YAML profile in the cheats/ directory for reuse across sessions."
+    )]
     fn save_profile(
         &self,
         Parameters(args): Parameters<SaveProfileArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_save_profile(&self.session, &ctx, trainlab_core::tools::ProfileSaveArgs {
-            file: args.file,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_save_profile(
+            &self.session,
+            &ctx,
+            trainlab_core::tools::ProfileSaveArgs { file: args.file },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
         Ok(CallToolResult::success(vec![
@@ -2202,7 +2553,9 @@ impl TrainlabMcpServer {
     /// Validate a cheat profile without touching game memory (dry-run).
     /// Parses the profile, resolves address refs against setup step names,
     /// parses every payload/value/hex, and reports errors.
-    #[tool(description = "Validate a cheat profile by file name or game exe without touching game memory. Checks that setup steps are parseable, address refs resolve, payloads are valid hex, and value types are known. Reports all errors found.")]
+    #[tool(
+        description = "Validate a cheat profile by file name or game exe without touching game memory. Checks that setup steps are parseable, address refs resolve, payloads are valid hex, and value types are known. Reports all errors found."
+    )]
     fn validate_profile(
         &self,
         Parameters(args): Parameters<LoadProfileArgs>,
@@ -2221,7 +2574,9 @@ impl TrainlabMcpServer {
                     }
                 }
                 crate::profile::DiscoveredProfile::Invalid { file, error } => {
-                    if file.to_lowercase() == target || target.contains(file.to_lowercase().trim_end_matches(".yaml")) {
+                    if file.to_lowercase() == target
+                        || target.contains(file.to_lowercase().trim_end_matches(".yaml"))
+                    {
                         found_invalid = Some((file, error));
                     }
                 }
@@ -2233,13 +2588,13 @@ impl TrainlabMcpServer {
             (None, Some((f, err_msg))) => {
                 return Err(err(format!(
                     "profile '{f}' found in cheats/ but FAILED to parse: {err_msg}"
-                )))
+                )));
             }
             (None, None) => {
                 return Err(err(format!(
                     "no profile found for '{}' (looked in cheats/)",
                     args.profile
-                )))
+                )));
             }
         };
 
@@ -2249,7 +2604,7 @@ impl TrainlabMcpServer {
         // Check setup step names are unique and parseable.
         let setup_names: Vec<String> = profile.setup.iter().map(|s| s.name().to_string()).collect();
         for (i, name) in setup_names.iter().enumerate() {
-            if setup_names[i+1..].contains(name) {
+            if setup_names[i + 1..].contains(name) {
                 errors.push(format!("setup step name '{}' is not unique", name));
             }
         }
@@ -2270,44 +2625,66 @@ impl TrainlabMcpServer {
             }
             // Validate value_type if present.
             if let Some(vt) = &pc.value_type
-                && parse_value_type(vt).is_err() {
-                    errors.push(format!("cheat '{}': unknown value_type '{}'", pc.label, vt));
-                }
+                && parse_value_type(vt).is_err()
+            {
+                errors.push(format!("cheat '{}': unknown value_type '{}'", pc.label, vt));
+            }
             // Validate payload hex if present.
             if let Some(payload) = &pc.payload
                 && !payload.is_empty()
-                    && parse_hex_bytes(payload).is_err() {
-                        errors.push(format!("cheat '{}': invalid payload hex '{}'", pc.label, payload));
-                    }
+                && parse_hex_bytes(payload).is_err()
+            {
+                errors.push(format!(
+                    "cheat '{}': invalid payload hex '{}'",
+                    pc.label, payload
+                ));
+            }
             // Validate hook kind if present (for toggle, must be trampoline/override; for patch, it's a cave marker ref).
             if let Some(h) = &pc.hook
                 && pc.kind.eq_ignore_ascii_case("toggle")
-                    && h != "trampoline" && h != "override" {
-                        errors.push(format!("cheat '{}': unknown hook '{}' (expected 'trampoline' or 'override')", pc.label, h));
-                    }
+                && h != "trampoline"
+                && h != "override"
+            {
+                errors.push(format!(
+                    "cheat '{}': unknown hook '{}' (expected 'trampoline' or 'override')",
+                    pc.label, h
+                ));
+            }
             // Validate jump style if present.
             if let Some(j) = &pc.jump
-                && j != "absolute" && j != "relative" && j != "short" {
-                    warnings.push(format!("cheat '{}': unknown jump '{}' (expected 'absolute' or 'relative')", pc.label, j));
-                }
+                && j != "absolute"
+                && j != "relative"
+                && j != "short"
+            {
+                warnings.push(format!(
+                    "cheat '{}': unknown jump '{}' (expected 'absolute' or 'relative')",
+                    pc.label, j
+                ));
+            }
         }
 
         // Validate init_commands payloads if present.
         if let Some(init_cmds) = &profile.init_commands {
             for (i, cmd) in init_cmds.iter().enumerate() {
                 match cmd {
-                    crate::profile::ProfileCommand::Write { value, value_type, .. } => {
+                    crate::profile::ProfileCommand::Write {
+                        value, value_type, ..
+                    } => {
                         if let Some(vt) = value_type
-                            && parse_value_type(vt).is_err() {
-                                errors.push(format!("init_cmd {i}: unknown value_type '{vt}'"));
-                            }
+                            && parse_value_type(vt).is_err()
+                        {
+                            errors.push(format!("init_cmd {i}: unknown value_type '{vt}'"));
+                        }
                         // Value is hard to validate without session markers, but check non-empty.
                         if value.trim().is_empty() {
                             errors.push(format!("init_cmd {i}: write value is empty"));
                         }
                     }
-                    crate::profile::ProfileCommand::InstallCave { payload, asm, hook, .. } => {
-                        if asm.is_none() && !payload.is_empty() && parse_hex_bytes(payload).is_err() {
+                    crate::profile::ProfileCommand::InstallCave {
+                        payload, asm, hook, ..
+                    } => {
+                        if asm.is_none() && !payload.is_empty() && parse_hex_bytes(payload).is_err()
+                        {
                             errors.push(format!("init_cmd {i}: invalid cave payload hex"));
                         }
                         if hook != "trampoline" && hook != "override" {
@@ -2321,7 +2698,11 @@ impl TrainlabMcpServer {
 
         if errors.is_empty() {
             let mut text = format!("✅ profile '{}' ({}) is valid\n", file, profile.game);
-            text.push_str(&format!("  {} setup step(s), {} cheat(s)", profile.setup.len(), profile.cheats.len()));
+            text.push_str(&format!(
+                "  {} setup step(s), {} cheat(s)",
+                profile.setup.len(),
+                profile.cheats.len()
+            ));
             if let Some(ic) = &profile.init_commands {
                 text.push_str(&format!(", {} init_command(s)", ic.len()));
             }
@@ -2335,7 +2716,12 @@ impl TrainlabMcpServer {
                 rmcp::model::ContentBlock::text(text),
             ]))
         } else {
-            let mut text = format!("❌ profile '{}' ({}) has {} error(s):\n", file, profile.game, errors.len());
+            let mut text = format!(
+                "❌ profile '{}' ({}) has {} error(s):\n",
+                file,
+                profile.game,
+                errors.len()
+            );
             for e in &errors {
                 text.push_str(&format!("  • {e}\n"));
             }
@@ -2350,12 +2736,24 @@ impl TrainlabMcpServer {
             ]))
         }
     }
-    #[tool(description = "List readable memory regions of the game process, read externally. Returns top regions (default 50) and saves the full dump to a snapshot file if it exceeds the limit.")]
-    fn list_regions(&self, Parameters(args): Parameters<ListRegionsArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "List readable memory regions of the game process, read externally. Returns top regions (default 50) and saves the full dump to a snapshot file if it exceeds the limit."
+    )]
+    fn list_regions(
+        &self,
+        Parameters(args): Parameters<ListRegionsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let mut regions = proc.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        let mut regions = proc
+            .regions()
+            .map_err(|e| err(format!("regions failed: {e}")))?;
         if args.named_only.unwrap_or(false) {
-            regions.retain(|r| r.name.as_ref().map(|n| !n.trim().is_empty()).unwrap_or(false));
+            regions.retain(|r| {
+                r.name
+                    .as_ref()
+                    .map(|n| !n.trim().is_empty())
+                    .unwrap_or(false)
+            });
         }
 
         let total = regions.len();
@@ -2379,7 +2777,13 @@ impl TrainlabMcpServer {
         text.push_str(&lines.join("\n"));
 
         if total > limit {
-            let s_file = format!("regions_{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+            let s_file = format!(
+                "regions_{}.txt",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            );
             let mut buf = Vec::new();
             use std::io::Write;
             for r in &regions {
@@ -2393,8 +2797,13 @@ impl TrainlabMcpServer {
                     r.name.as_deref().unwrap_or("")
                 );
             }
-            if let Ok(rel_path) = trainlab_core::tools::write_output_artifact("regions", &s_file, &buf) {
-                text.push_str(&format!("\n... and {} more [full regions list saved to {rel_path}]", total - limit));
+            if let Ok(rel_path) =
+                trainlab_core::tools::write_output_artifact("regions", &s_file, &buf)
+            {
+                text.push_str(&format!(
+                    "\n... and {} more [full regions list saved to {rel_path}]",
+                    total - limit
+                ));
             } else {
                 text.push_str(&format!("\n... and {} more", total - limit));
             }
@@ -2406,15 +2815,30 @@ impl TrainlabMcpServer {
     }
 
     /// Read memory from the game process (raw bytes or typed value).
-    #[tool(description = "Read memory from the game process. Supports raw hex bytes (default) OR typed values (value_type='ptr'|'i32'|'u32'|'f32'|'i64'|'u64'|'f64'|'cstr'). Supports expressions (e.g. 'game.exe+0x123', 'wood_ptr+0x10').")]
-    pub(crate) fn read(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Read memory from the game process. Supports raw hex bytes (default) OR typed values (value_type='ptr'|'i32'|'u32'|'f32'|'i64'|'u64'|'f64'|'cstr'). Supports expressions (e.g. 'game.exe+0x123', 'wood_ptr+0x10')."
+    )]
+    pub(crate) fn read(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_read(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ReadArgs {
-            address: args.address,
-            len: args.len,
-            value_type: args.value_type,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_read(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::ReadArgs {
+                address: args.address,
+                len: args.len,
+                value_type: args.value_type,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -2425,19 +2849,23 @@ impl TrainlabMcpServer {
     /// itself, so you can tell whether the game runs elevated (admin) and
     /// whether the trainer matches. Levels: 0x1000=Untrusted, 0x2000=Low,
     /// 0x3000=Medium, 0x4000=High (elevated/admin), 0x5000=System.
-    #[tool(description = "Report the Windows integrity level of the game process and the trainer itself (e.g. Medium vs High/elevated). Use to diagnose access-denied (error 5) when reading game memory.")]
+    #[tool(
+        description = "Report the Windows integrity level of the game process and the trainer itself (e.g. Medium vs High/elevated). Use to diagnose access-denied (error 5) when reading game memory."
+    )]
     fn check_integrity(&self) -> Result<CallToolResult, ErrorData> {
         #[cfg(windows)]
         {
             use windows_sys::Win32::Foundation::CloseHandle;
             use windows_sys::Win32::Security::{
-                GetTokenInformation, TokenIntegrityLevel, TOKEN_QUERY,
+                GetTokenInformation, TOKEN_QUERY, TokenIntegrityLevel,
             };
             use windows_sys::Win32::System::Threading::{
                 GetCurrentProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION,
             };
 
-            fn integrity_of(process: windows_sys::Win32::Foundation::HANDLE) -> Result<u32, String> {
+            fn integrity_of(
+                process: windows_sys::Win32::Foundation::HANDLE,
+            ) -> Result<u32, String> {
                 let mut token: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
                 // SAFETY: valid process handle and token pointer.
                 let ok = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
@@ -2475,7 +2903,8 @@ impl TrainlabMcpServer {
                 // The TOKEN_MANDATORY_LABEL has a SID; the integrity level is the
                 // last sub-authority of that SID.
                 // SAFETY: buf holds a TOKEN_MANDATORY_LABEL whose Label is a SID.
-                let label = buf.as_ptr() as *const windows_sys::Win32::Security::TOKEN_MANDATORY_LABEL;
+                let label =
+                    buf.as_ptr() as *const windows_sys::Win32::Security::TOKEN_MANDATORY_LABEL;
                 let sid = unsafe { (*label).Label.Sid };
                 // SAFETY: sid is a valid SID pointer.
                 let count = unsafe { windows_sys::Win32::Security::GetSidSubAuthorityCount(sid) };
@@ -2489,7 +2918,10 @@ impl TrainlabMcpServer {
 
             let game = {
                 let pid = {
-                    let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                    let s = self
+                        .session
+                        .lock()
+                        .map_err(|_| err("session lock poisoned"))?;
                     s.game_pid()
                 };
                 match pid {
@@ -2536,15 +2968,15 @@ impl TrainlabMcpServer {
                 }
             };
 
-            Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-                format!(
+            Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(format!(
                     "game integrity: {} ({})\ntrainer integrity: {} ({})",
                     game,
                     level_name(&game),
                     trainer,
                     level_name(&trainer),
-                ),
-            )]))
+                )),
+            ]))
         }
         #[cfg(not(windows))]
         {
@@ -2553,18 +2985,33 @@ impl TrainlabMcpServer {
     }
 
     /// AOB pattern scan over the game's readable memory (external).
-    #[tool(description = "Scan game memory for an AOB byte pattern (hex, ?? wildcards); returns match addresses, read externally. Can optionally bound search to a named region/marker and save to a marker. NOTE: Run memory scans sequentially (one at a time) rather than in parallel to avoid token/timeout limits.")]
-    fn scan_aob(&self, Parameters(args): Parameters<ScanAobArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Scan game memory for an AOB byte pattern (hex, ?? wildcards); returns match addresses, read externally. Can optionally bound search to a named region/marker and save to a marker. NOTE: Run memory scans sequentially (one at a time) rather than in parallel to avoid token/timeout limits."
+    )]
+    fn scan_aob(
+        &self,
+        Parameters(args): Parameters<ScanAobArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_scan_aob(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanAobArgs {
-            pattern: args.pattern,
-            offset: args.offset,
-            marker: args.marker,
-            region: args.region,
-            alignment: args.alignment,
-            limit: args.limit,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_scan_aob(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::ScanAobArgs {
+                pattern: args.pattern,
+                offset: args.offset,
+                marker: args.marker,
+                region: args.region,
+                alignment: args.alignment,
+                limit: args.limit,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
 
@@ -2574,34 +3021,52 @@ impl TrainlabMcpServer {
     }
 
     /// Backwards-compatible alias for [`scan_aob`].
-    #[tool(description = "Alias for scan_aob. Scan game memory for an AOB byte pattern. NOTE: Run memory scans sequentially (one at a time) rather than in parallel to avoid token/timeout limits.")]
+    #[tool(
+        description = "Alias for scan_aob. Scan game memory for an AOB byte pattern. NOTE: Run memory scans sequentially (one at a time) rather than in parallel to avoid token/timeout limits."
+    )]
     fn aob_scan(&self, Parameters(args): Parameters<AobArgs>) -> Result<CallToolResult, ErrorData> {
         self.scan_aob(Parameters(args))
     }
 
     /// Start a value scan over the game's memory.
-    #[tool(description = "First value scan: find all addresses holding a value (exact, or a range if max is given). Can optionally bound search to a named region/marker. Stores match set in the caller's scan context for narrowing with scan_next.")]
-    pub(crate) fn scan_start(&self, Parameters(args): Parameters<ScanStartArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "First value scan: find all addresses holding a value (exact, or a range if max is given). Can optionally bound search to a named region/marker. Stores match set in the caller's scan context for narrowing with scan_next."
+    )]
+    pub(crate) fn scan_start(
+        &self,
+        Parameters(args): Parameters<ScanStartArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let mut ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
         // Load any existing scan from session if present
         if let Ok(s) = self.session.lock() {
             ctx.scan = s.scan().cloned();
         }
 
-        let res = trainlab_core::tools::execute_scan_start(&self.session, &mut ctx, proc.as_ref(), trainlab_core::tools::ScanStartArgs {
-            value_type: args.value_type,
-            value: args.value,
-            max: args.max,
-            alignment: args.alignment,
-            region: args.region,
-        }).map_err(|e| err(e.message))?;
+        let res = trainlab_core::tools::execute_scan_start(
+            &self.session,
+            &mut ctx,
+            proc.as_ref(),
+            trainlab_core::tools::ScanStartArgs {
+                value_type: args.value_type,
+                value: args.value,
+                max: args.max,
+                alignment: args.alignment,
+                region: args.region,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         // Sync scan back to session for GUI/inspectors
         if let Some(scan) = ctx.scan
-            && let Ok(mut s) = self.session.lock() {
-                s.set_scan(scan);
-            }
+            && let Ok(mut s) = self.session.lock()
+        {
+            s.set_scan(scan);
+        }
 
         self.request_repaint();
 
@@ -2612,29 +3077,48 @@ impl TrainlabMcpServer {
 
     /// Backwards-compatible alias for [`scan_start`].
     #[tool(description = "Alias for scan_start. First value scan.")]
-    pub(crate) fn scan(&self, Parameters(args): Parameters<ScanArgs>) -> Result<CallToolResult, ErrorData> {
+    pub(crate) fn scan(
+        &self,
+        Parameters(args): Parameters<ScanArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.scan_start(Parameters(args))
     }
 
     /// Narrow the previous scan's match set.
-    #[tool(description = "Narrow the previous scan: keep matches that changed/unchanged/increased/decreased or match a new exact/range value.")]
-    pub(crate) fn scan_next(&self, Parameters(args): Parameters<ScanNextArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Narrow the previous scan: keep matches that changed/unchanged/increased/decreased or match a new exact/range value."
+    )]
+    pub(crate) fn scan_next(
+        &self,
+        Parameters(args): Parameters<ScanNextArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let mut ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
         if let Ok(s) = self.session.lock() {
             ctx.scan = s.scan().cloned();
         }
 
-        let res = trainlab_core::tools::execute_scan_next(&self.session, &mut ctx, proc.as_ref(), trainlab_core::tools::ScanNextArgs {
-            op: args.op,
-            value: args.value,
-            max: args.max,
-        }).map_err(|e| err(e.message))?;
+        let res = trainlab_core::tools::execute_scan_next(
+            &self.session,
+            &mut ctx,
+            proc.as_ref(),
+            trainlab_core::tools::ScanNextArgs {
+                op: args.op,
+                value: args.value,
+                max: args.max,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         if let Some(scan) = ctx.scan
-            && let Ok(mut s) = self.session.lock() {
-                s.set_scan(scan);
-            }
+            && let Ok(mut s) = self.session.lock()
+        {
+            s.set_scan(scan);
+        }
 
         self.request_repaint();
 
@@ -2645,19 +3129,29 @@ impl TrainlabMcpServer {
 
     /// Backwards-compatible alias for [`scan_next`].
     #[tool(description = "Alias for scan_next. Narrow the active scan.")]
-    pub(crate) fn next(&self, Parameters(args): Parameters<NextArgs>) -> Result<CallToolResult, ErrorData> {
+    pub(crate) fn next(
+        &self,
+        Parameters(args): Parameters<NextArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         self.scan_next(Parameters(args))
     }
 
     /// Read the active value scan status and candidate matches without mutating the scan state.
-    #[tool(description = "Inspect the current active scan session without modifying it. Reports total match count, value type, alignment, and lists the top 10 current candidate matches (address = value).")]
+    #[tool(
+        description = "Inspect the current active scan session without modifying it. Reports total match count, value type, alignment, and lists the top 10 current candidate matches (address = value)."
+    )]
     fn scan_status(&self) -> Result<CallToolResult, ErrorData> {
-        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let mut ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
         if let Ok(s) = self.session.lock() {
             ctx.scan = s.scan().cloned();
         }
 
-        let res = trainlab_core::tools::execute_scan_status(&self.session, &ctx).map_err(|e| err(e.message))?;
+        let res = trainlab_core::tools::execute_scan_status(&self.session, &ctx)
+            .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -2665,18 +3159,33 @@ impl TrainlabMcpServer {
     }
 
     /// Batch test-write a value across all matching addresses in the active scan.
-    #[tool(description = "Batch test-write: write a value to all matching addresses in the active scan (useful when <= 10 matches exist to test authoritative state). Snapshots each address for auto-undo.")]
-    fn scan_set(&self, Parameters(args): Parameters<ScanSetArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Batch test-write: write a value to all matching addresses in the active scan (useful when <= 10 matches exist to test authoritative state). Snapshots each address for auto-undo."
+    )]
+    fn scan_set(
+        &self,
+        Parameters(args): Parameters<ScanSetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let mut ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
         if let Ok(s) = self.session.lock() {
             ctx.scan = s.scan().cloned();
         }
 
-        let res = trainlab_core::tools::execute_scan_set(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanSetArgs {
-            value: args.value,
-            value_type: args.value_type,
-        }).map_err(|e| err(e.message))?;
+        let res = trainlab_core::tools::execute_scan_set(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::ScanSetArgs {
+                value: args.value,
+                value_type: args.value_type,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
 
@@ -2688,8 +3197,13 @@ impl TrainlabMcpServer {
     /// Clear or end the active scan session.
     #[tool(description = "Clear the active scan session in the caller's context.")]
     fn scan_clear(&self) -> Result<CallToolResult, ErrorData> {
-        let mut ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_scan_clear(&self.session, &mut ctx).map_err(|e| err(e.message))?;
+        let mut ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_scan_clear(&self.session, &mut ctx)
+            .map_err(|e| err(e.message))?;
 
         if let Ok(mut s) = self.session.lock() {
             s.clear_scan();
@@ -2709,18 +3223,30 @@ impl TrainlabMcpServer {
     }
 
     /// Find addresses that point to (reference) a target address.
-    #[tool(description = "Reverse-reference scan: find writable addresses whose pointer value points into the range around a target address. Use to find what points to a value (owning object), then chase a stable chain.")]
+    #[tool(
+        description = "Reverse-reference scan: find writable addresses whose pointer value points into the range around a target address. Use to find what points to a value (owning object), then chase a stable chain."
+    )]
     fn scan_pointer(
         &self,
         Parameters(args): Parameters<ScanPointerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_scan_pointer(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanPointerArgs {
-            address: args.address,
-            size: args.size,
-            limit: args.limit,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_scan_pointer(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::ScanPointerArgs {
+                address: args.address,
+                size: args.size,
+                limit: args.limit,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
 
@@ -2730,20 +3256,32 @@ impl TrainlabMcpServer {
     }
 
     /// Search memory for regex byte patterns using ripgrep's regex engine.
-    #[tool(description = "Search game memory for regular expression byte patterns using ripgrep's regex engine (e.g. ASCII strings, UTF-8 text, or binary regexes). Streams memory across readable regions with alignment and region boundary overlap support.")]
+    #[tool(
+        description = "Search game memory for regular expression byte patterns using ripgrep's regex engine (e.g. ASCII strings, UTF-8 text, or binary regexes). Streams memory across readable regions with alignment and region boundary overlap support."
+    )]
     fn scan_rgrep(
         &self,
         Parameters(args): Parameters<ScanRgrepArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_scan_rgrep(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::ScanRgrepArgs {
-            pattern: args.pattern,
-            alignment: args.alignment,
-            region: args.region,
-            marker: args.marker,
-            limit: args.limit,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_scan_rgrep(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::ScanRgrepArgs {
+                pattern: args.pattern,
+                alignment: args.alignment,
+                region: args.region,
+                marker: args.marker,
+                limit: args.limit,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
 
@@ -2754,10 +3292,7 @@ impl TrainlabMcpServer {
 
     /// Backwards-compatible alias for [`scan_rgrep`].
     #[tool(description = "Alias for 'scan_rgrep'. Search game memory with ripgrep regex engine.")]
-    fn rgrep(
-        &self,
-        Parameters(args): Parameters<RgrepArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
+    fn rgrep(&self, Parameters(args): Parameters<RgrepArgs>) -> Result<CallToolResult, ErrorData> {
         self.scan_rgrep(Parameters(args))
     }
 
@@ -2771,17 +3306,29 @@ impl TrainlabMcpServer {
     }
 
     /// Resolve a known pointer chain to the current address of a value.
-    #[tool(description = "Resolve a pointer chain (base + offsets) against the live game; returns each hop and the final value address. Use a chain you discovered, e.g. via pointer_scan. Dereference semantics: by default base is treated as a POINTER SLOT — hop 0 dereferences base, then each offset dereferences the running pointer (`base -> *base -> *(*base+off[0]) -> ... -> final`). If base references a marker whose kind is 'object' (the marker IS a struct instance, not a slot), the initial dereference is SKIPPED and offsets apply directly to the object: a single offset `['0xd0']` resolves to `base+0xd0`, and `['0xd0','0x0']` reads `*(base+0xd0)` then returns `ptr+0x0`. When a chase lands in module code/rdata from a heap-object base marker, set the base marker kind to 'object'.")]
+    #[tool(
+        description = "Resolve a pointer chain (base + offsets) against the live game; returns each hop and the final value address. Use a chain you discovered, e.g. via pointer_scan. Dereference semantics: by default base is treated as a POINTER SLOT — hop 0 dereferences base, then each offset dereferences the running pointer (`base -> *base -> *(*base+off[0]) -> ... -> final`). If base references a marker whose kind is 'object' (the marker IS a struct instance, not a slot), the initial dereference is SKIPPED and offsets apply directly to the object: a single offset `['0xd0']` resolves to `base+0xd0`, and `['0xd0','0x0']` reads `*(base+0xd0)` then returns `ptr+0x0`. When a chase lands in module code/rdata from a heap-object base marker, set the base marker kind to 'object'."
+    )]
     fn pointer_chase(
         &self,
         Parameters(args): Parameters<PointerChaseArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_pointer_chase(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::PointerChaseArgs {
-            base: args.base,
-            offsets: args.offsets,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_pointer_chase(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::PointerChaseArgs {
+                base: args.base,
+                offsets: args.offsets,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -2789,21 +3336,33 @@ impl TrainlabMcpServer {
     }
 
     /// Set a labeled marker for an address or region (persists across turns).
-    #[tool(description = "Save a labeled marker for an address or region (optional size in bytes) so the agent can reference or scan it later. kind describes what the address represents: 'pointer' (default — a slot holding an address to dereference, e.g. a module+offset base), 'object' (the marker IS a struct/class instance, e.g. a heap object; offsets apply directly without an initial deref in pointer_chase), 'buffer' (a contiguous memory region/allocation), or 'code' (a function/hook/cave). struct_type is an optional reference to a named layout registered via register_struct_def, meaningful when kind='object'.")]
+    #[tool(
+        description = "Save a labeled marker for an address or region (optional size in bytes) so the agent can reference or scan it later. kind describes what the address represents: 'pointer' (default — a slot holding an address to dereference, e.g. a module+offset base), 'object' (the marker IS a struct/class instance, e.g. a heap object; offsets apply directly without an initial deref in pointer_chase), 'buffer' (a contiguous memory region/allocation), or 'code' (a function/hook/cave). struct_type is an optional reference to a named layout registered via register_struct_def, meaningful when kind='object'."
+    )]
     pub(crate) fn set_marker(
         &self,
         Parameters(args): Parameters<SetMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session).ok();
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_set_marker(&self.session, &ctx, proc.as_ref().map(|p| p.as_ref()), trainlab_core::tools::SetMarkerArgs {
-            label: args.label,
-            address: args.address,
-            size: args.size,
-            kind: args.kind,
-            struct_type: args.struct_type,
-            note: args.note,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_set_marker(
+            &self.session,
+            &ctx,
+            proc.as_ref().map(|p| p.as_ref()),
+            trainlab_core::tools::SetMarkerArgs {
+                label: args.label,
+                address: args.address,
+                size: args.size,
+                kind: args.kind,
+                struct_type: args.struct_type,
+                note: args.note,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
         Ok(CallToolResult::success(vec![
@@ -2812,14 +3371,26 @@ impl TrainlabMcpServer {
     }
 
     /// Dump a chunk of memory formatted for struct/class reversal.
-    #[tool(description = "Read a chunk of memory around an address and format it as hex + ASCII (and typed fields where obvious) so the agent can reverse a struct/class layout. The LLM does the teasing-out.")]
+    #[tool(
+        description = "Read a chunk of memory around an address and format it as hex + ASCII (and typed fields where obvious) so the agent can reverse a struct/class layout. The LLM does the teasing-out."
+    )]
     fn dump(&self, Parameters(args): Parameters<DumpArgs>) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_dump(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::DumpArgs {
-            address: args.address,
-            len: args.len,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_dump(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::DumpArgs {
+                address: args.address,
+                len: args.len,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -2827,27 +3398,51 @@ impl TrainlabMcpServer {
     }
 
     /// Dump a memory range to a snapshot binary file on disk and return a downloadable URL.
-    #[tool(description = "Dump a large memory range (e.g. 15MB Lua heap) to a snapshot file on disk and return its local file path, size, and downloadable HTTP URL. Pass either 'end' or 'len'.")]
+    #[tool(
+        description = "Dump a large memory range (e.g. 15MB Lua heap) to a snapshot file on disk and return its local file path, size, and downloadable HTTP URL. Pass either 'end' or 'len'."
+    )]
     fn snapshot(
         &self,
         Parameters(args): Parameters<SnapshotArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_snapshot(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::SnapshotArgs {
-            start: args.start,
-            end: args.end,
-            len: args.len,
-            name: args.name,
-            max_len: args.max_len,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_snapshot(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::SnapshotArgs {
+                start: args.start,
+                end: args.end,
+                len: args.len,
+                name: args.name,
+                max_len: args.max_len,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         let (host, port) = {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             (s.dll_host().to_string(), s.dll_port())
         };
-        let url_host = if host == "0.0.0.0" { "127.0.0.1".to_string() } else { host };
-        let file_name = res.data.as_ref().and_then(|d| d.get("file_name")).and_then(|f| f.as_str()).unwrap_or("");
+        let url_host = if host == "0.0.0.0" {
+            "127.0.0.1".to_string()
+        } else {
+            host
+        };
+        let file_name = res
+            .data
+            .as_ref()
+            .and_then(|d| d.get("file_name"))
+            .and_then(|f| f.as_str())
+            .unwrap_or("");
         let url = format!("http://{url_host}:{port}/snapshots/{file_name}");
 
         let resp_json = serde_json::json!({
@@ -2864,7 +3459,9 @@ impl TrainlabMcpServer {
     }
 
     /// Upload a file or script to the trainer server's uploads directory.
-    #[tool(description = "Upload a file or script to the trainer server's 'uploads/' directory and return its server-side path and URL. The returned path can then be passed directly into 'allocate_string' (via the 'path' argument) without sending large script bodies repeatedly over the MCP protocol.")]
+    #[tool(
+        description = "Upload a file or script to the trainer server's 'uploads/' directory and return its server-side path and URL. The returned path can then be passed directly into 'allocate_string' (via the 'path' argument) without sending large script bodies repeatedly over the MCP protocol."
+    )]
     fn upload_file(
         &self,
         Parameters(args): Parameters<UploadFileArgs>,
@@ -2875,14 +3472,20 @@ impl TrainlabMcpServer {
             args.content.into_bytes()
         };
 
-        let res = crate::api::save_uploaded_file(&args.filename, &bytes)
-            .map_err(|e| err(e))?;
+        let res = crate::api::save_uploaded_file(&args.filename, &bytes).map_err(err)?;
 
         let (host, port) = {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             (s.dll_host().to_string(), s.dll_port())
         };
-        let url_host = if host == "0.0.0.0" { "127.0.0.1".to_string() } else { host };
+        let url_host = if host == "0.0.0.0" {
+            "127.0.0.1".to_string()
+        } else {
+            host
+        };
         let url = format!("http://{url_host}:{port}/uploads/{}", res.filename);
 
         let resp_json = serde_json::json!({
@@ -2901,90 +3504,148 @@ impl TrainlabMcpServer {
     }
 
     /// Allocate and lay out a string inside the game process and return its layout pointers.
-    #[tool(description = "Allocate and lay out a string inside the game process (C string, Rust fat pointer, JSON/YAML/XML/JS config) and return its address and layout. Supported kinds: 'c' (default, NUL-terminated), 'rust' (returns ptr and len), 'json', 'yaml', 'xml', 'js', 'config'. Can pass 'size' instead of 'content' to allocate a zero/fill-initialized buffer.")]
+    #[tool(
+        description = "Allocate and lay out a string inside the game process (C string, Rust fat pointer, JSON/YAML/XML/JS config) and return its address and layout. Supported kinds: 'c' (default, NUL-terminated), 'rust' (returns ptr and len), 'json', 'yaml', 'xml', 'js', 'config'. Can pass 'size' instead of 'content' to allocate a zero/fill-initialized buffer."
+    )]
     fn allocate_string(
         &self,
         Parameters(args): Parameters<AllocateStringArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_allocate_string(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateStringArgs {
-            content: args.content,
-            path: args.path,
-            size: args.size,
-            fill_byte: args.fill_byte,
-            kind: args.kind,
-            marker: args.marker,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_allocate_string(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::AllocateStringArgs {
+                content: args.content,
+                path: args.path,
+                size: args.size,
+                fill_byte: args.fill_byte,
+                kind: args.kind,
+                marker: args.marker,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
 
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(serde_json::to_string(&res.data).unwrap_or(res.message)),
+            rmcp::model::ContentBlock::text(
+                serde_json::to_string(&res.data).unwrap_or(res.message),
+            ),
         ]))
     }
 
     /// Allocate raw memory buffer of a specified size in the game process.
-    #[tool(description = "Allocate an arbitrary raw memory buffer of a specified size in bytes in the target game process without transmitting large string payloads. Useful for file extraction scratch buffers, hook landing pads, or data structures. Optional 'marker' saves the allocated address.")]
+    #[tool(
+        description = "Allocate an arbitrary raw memory buffer of a specified size in bytes in the target game process without transmitting large string payloads. Useful for file extraction scratch buffers, hook landing pads, or data structures. Optional 'marker' saves the allocated address."
+    )]
     fn allocate_memory(
         &self,
         Parameters(args): Parameters<AllocateMemoryArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_allocate_memory(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateMemoryArgs {
-            size: args.size,
-            marker: args.marker,
-            fill_byte: args.fill_byte,
-            permissions: args.permissions,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_allocate_memory(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::AllocateMemoryArgs {
+                size: args.size,
+                marker: args.marker,
+                fill_byte: args.fill_byte,
+                permissions: args.permissions,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
 
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(serde_json::to_string(&res.data).unwrap_or(res.message)),
+            rmcp::model::ContentBlock::text(
+                serde_json::to_string(&res.data).unwrap_or(res.message),
+            ),
         ]))
     }
 
     /// Free a previously allocated memory region or buffer in the game process.
-    #[tool(description = "Free / deallocate a previously allocated memory region or buffer in the target game process (VirtualFreeEx). Accepts an address or marker name (e.g. '$dump_buffer' or '0x7ff12000').")]
+    #[tool(
+        description = "Free / deallocate a previously allocated memory region or buffer in the target game process (VirtualFreeEx). Accepts an address or marker name (e.g. '$dump_buffer' or '0x7ff12000')."
+    )]
     fn free_memory(
         &self,
         Parameters(args): Parameters<FreeMemoryArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_free_memory(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::FreeMemoryArgs {
-            address: args.address,
-            size: args.size,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_free_memory(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::FreeMemoryArgs {
+                address: args.address,
+                size: args.size,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
 
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(serde_json::to_string(&res.data).unwrap_or(res.message)),
+            rmcp::model::ContentBlock::text(
+                serde_json::to_string(&res.data).unwrap_or(res.message),
+            ),
         ]))
     }
 
     /// Read a struct at an address and format each requested field by type.
-    #[tool(description = "Read a struct at an address and format each requested field by type. Field types: i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, ptr, cstr (null-terminated ASCII), or bytes. Pass an offset per field (default 0).")]
+    #[tool(
+        description = "Read a struct at an address and format each requested field by type. Field types: i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, ptr, cstr (null-terminated ASCII), or bytes. Pass an offset per field (default 0)."
+    )]
     fn dump_struct(
         &self,
         Parameters(args): Parameters<DumpStructArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let fields = args.fields.into_iter().map(|f| trainlab_core::tools::StructFieldSpec {
-            name: f.name,
-            offset: f.offset as i64,
-            value_type: f.value_type,
-            len: f.len,
-        }).collect();
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let fields = args
+            .fields
+            .into_iter()
+            .map(|f| trainlab_core::tools::StructFieldSpec {
+                name: f.name,
+                offset: f.offset as i64,
+                value_type: f.value_type,
+                len: f.len,
+            })
+            .collect();
 
-        let res = trainlab_core::tools::execute_dump_struct(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::DumpStructArgs {
-            address: args.address,
-            fields,
-        }).map_err(|e| err(e.message))?;
+        let res = trainlab_core::tools::execute_dump_struct(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::DumpStructArgs {
+                address: args.address,
+                fields,
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -2993,7 +3654,9 @@ impl TrainlabMcpServer {
 
     /// Resolve an address to a module-relative offset (e.g. `Urbek.exe+0x1234`),
     /// which is stable across launches where raw addresses are not.
-    #[tool(description = "Resolve an address to a loaded module + offset (e.g. Urbek.exe+0x1234), which is restart-stable. Also reports the region it falls in.")]
+    #[tool(
+        description = "Resolve an address to a loaded module + offset (e.g. Urbek.exe+0x1234), which is restart-stable. Also reports the region it falls in."
+    )]
     fn addr_to_module(
         &self,
         Parameters(args): Parameters<AddrToModuleArgs>,
@@ -3003,20 +3666,27 @@ impl TrainlabMcpServer {
         // Enumerate modules (Windows toolhelp) and regions.
         #[cfg(windows)]
         let pid = {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             s.game_pid().ok_or_else(|| err("no game process"))?
         };
         #[cfg(windows)]
-        let modules = trainlab_core::modinfo::enumerate_windows(pid)
-            .unwrap_or_default();
+        let modules = trainlab_core::modinfo::enumerate_windows(pid).unwrap_or_default();
         #[cfg(not(windows))]
         let modules = Vec::new();
-        let regions = proc.regions().map_err(|e| err(format!("regions failed: {e}")))?;
+        let regions = proc
+            .regions()
+            .map_err(|e| err(format!("regions failed: {e}")))?;
         let resolved = trainlab_core::modinfo::resolve(address, Some(&modules), &regions);
         // Also list which module name + offset it is in, if any.
         let mut text = format!("{address:#018x} -> {resolved}");
         if let Some(m) = trainlab_core::modinfo::find_module(&modules, address) {
-            text.push_str(&format!("\nmodule: {} (base {:#x}, size {:#x})", m.name, m.base, m.size));
+            text.push_str(&format!(
+                "\nmodule: {} (base {:#x}, size {:#x})",
+                m.name, m.base, m.size
+            ));
             if let Some(p) = &m.path {
                 text.push_str(&format!("\npath: {p}"));
             }
@@ -3027,18 +3697,30 @@ impl TrainlabMcpServer {
     }
 
     /// Disassemble raw bytes from the game into readable instructions.
-    #[tool(description = "Read bytes from game memory at an address and disassemble them into x86-64 instructions (iced-x86).")]
+    #[tool(
+        description = "Read bytes from game memory at an address and disassemble them into x86-64 instructions (iced-x86)."
+    )]
     fn disassemble(
         &self,
         Parameters(args): Parameters<DisassembleArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let proc = game_process(&self.session)?;
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_disassemble(&self.session, &ctx, proc.as_ref(), trainlab_core::tools::DisassembleArgs {
-            address: args.address,
-            len: args.len,
-            max_instructions: args.max_instructions.unwrap_or(32),
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_disassemble(
+            &self.session,
+            &ctx,
+            proc.as_ref(),
+            trainlab_core::tools::DisassembleArgs {
+                address: args.address,
+                len: args.len,
+                max_instructions: args.max_instructions.unwrap_or(32),
+            },
+        )
+        .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -3053,68 +3735,102 @@ impl TrainlabMcpServer {
     /// primitive: given a stable code site, reproduce a resource address
     /// without re-scanning. Read the recorded values back with
     /// `read_captures`, and clean up with `uninstall_capture_reg`.
-    #[tool(description = "Arm a passive, non-stalling register capture at a code address: records a chosen register (e.g. rcx) each time the site executes, replays stolen instructions, never stops the game. Returns a capture id + scratch buffer address; read back with 'read_captures', remove with 'uninstall_capture_reg'.")]
+    #[tool(
+        description = "Arm a passive, non-stalling register capture at a code address: records a chosen register (e.g. rcx) each time the site executes, replays stolen instructions, never stops the game. Returns a capture id + scratch buffer address; read back with 'read_captures', remove with 'uninstall_capture_reg'."
+    )]
     fn capture_reg(
         &self,
         Parameters(args): Parameters<CaptureRegArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         use trainlab_core::capture::{CaptureRegSpec, Gate, GateCmp, Register, ValueType};
         let target = parse_addr(&self.session, &args.target)?;
-        let reg = Register::parse(&args.reg)
-            .ok_or_else(|| err(format!("unknown register '{}' (try rax/rcx/rbx/... or xmm0..xmm7)", args.reg)))?;
-        let value_type = ValueType::parse(&args.value_type)
-            .ok_or_else(|| err(format!("unknown value_type '{}' (try ptr/i64/u64/f64/f32)", args.value_type)))?;
+        let reg = Register::parse(&args.reg).ok_or_else(|| {
+            err(format!(
+                "unknown register '{}' (try rax/rcx/rbx/... or xmm0..xmm7)",
+                args.reg
+            ))
+        })?;
+        let value_type = ValueType::parse(&args.value_type).ok_or_else(|| {
+            err(format!(
+                "unknown value_type '{}' (try ptr/i64/u64/f64/f32)",
+                args.value_type
+            ))
+        })?;
         // Build the optional gate (decoupled "capture X if Y compares Z").
         let gate = match &args.gate {
             None => None,
             Some(g) => {
-                let greg = Register::parse(&g.reg).ok_or_else(|| {
-                    err(format!("unknown gate register '{}'", g.reg))
-                })?;
+                let greg = Register::parse(&g.reg)
+                    .ok_or_else(|| err(format!("unknown gate register '{}'", g.reg)))?;
                 let cmp = GateCmp::parse(&g.cmp).ok_or_else(|| {
-                    err(format!("unknown gate cmp '{}' (try eq/ne/gt/lt/ge/le/range/whole)", g.cmp))
+                    err(format!(
+                        "unknown gate cmp '{}' (try eq/ne/gt/lt/ge/le/range/whole)",
+                        g.cmp
+                    ))
                 })?;
                 // The gate has its own value_type (defaults to the capture's).
                 let gate_vt = match &g.value_type {
                     None => value_type,
                     Some(v) => ValueType::parse(v).ok_or_else(|| {
-                        err(format!("unknown gate value_type '{}' (try ptr/i64/u64/f64/f32)", v))
+                        err(format!(
+                            "unknown gate value_type '{}' (try ptr/i64/u64/f64/f32)",
+                            v
+                        ))
                     })?,
                 };
                 let value = g.value.unwrap_or(0.0);
                 let min = g.min.unwrap_or(0.0);
                 let max = g.max.unwrap_or(0.0);
-                Some(Gate { reg: greg, cmp, value_type: gate_vt, value, min, max })
+                Some(Gate {
+                    reg: greg,
+                    cmp,
+                    value_type: gate_vt,
+                    value,
+                    min,
+                    max,
+                })
             }
         };
-        let jump_style = match args.jump.as_deref().unwrap_or("absolute").to_lowercase().as_str() {
+        let jump_style = match args
+            .jump
+            .as_deref()
+            .unwrap_or("absolute")
+            .to_lowercase()
+            .as_str()
+        {
             "relative" | "short" => trainlab_core::cave_hook::JumpStyle::Relative,
             _ => trainlab_core::cave_hook::JumpStyle::Absolute,
         };
 
         // Arm-time instruction boundary verification guard
-        if !args.force {
-            if let Ok(proc) = game_process(&self.session) {
-                let context_len = 64usize;
-                let base = target.saturating_sub(48);
-                let read_len = context_len + 32;
-                if let Ok(bytes) = proc.read(base, read_len) {
-                    if let Err(msg) = trainlab_core::disasm::verify_instruction_boundary(base, &bytes, target) {
-                        return Err(err(format!(
-                            "{msg} (pass 'force: true' if you explicitly intend to bypass instruction boundary checking)"
-                        )));
-                    }
-                }
+        if !args.force
+            && let Ok(proc) = game_process(&self.session)
+        {
+            let context_len = 64usize;
+            let base = target.saturating_sub(48);
+            let read_len = context_len + 32;
+            if let Ok(bytes) = proc.read(base, read_len)
+                && let Err(msg) =
+                    trainlab_core::disasm::verify_instruction_boundary(base, &bytes, target)
+            {
+                return Err(err(format!(
+                    "{msg} (pass 'force: true' if you explicitly intend to bypass instruction boundary checking)"
+                )));
             }
         }
 
-        let spec = CaptureRegSpec::new(reg, value_type).with_optional_gate(gate).with_jump(jump_style);
-        match call_dll(&self.session, &Request::CaptureReg {
-            target,
-            spec,
-            capacity: args.capacity,
-            disarm: args.stop_on_match,
-        }) {
+        let spec = CaptureRegSpec::new(reg, value_type)
+            .with_optional_gate(gate)
+            .with_jump(jump_style);
+        match crate::controller::request(
+            &self.session,
+            &Request::CaptureReg {
+                target,
+                spec,
+                capacity: args.capacity,
+                disarm: args.stop_on_match,
+            },
+        ) {
             Ok(Response::CaptureInstalled {
                 id,
                 scratch,
@@ -3156,12 +3872,14 @@ impl TrainlabMcpServer {
     }
 
     /// Read back the entries recorded by a `capture_reg` capture.
-    #[tool(description = "Read back the register values recorded by a passive 'capture_reg' capture (by id). Returns each captured entry: sequence, decoded capture value, raw 64-bit value, the gate value at capture time, and the site address that was executing.")]
+    #[tool(
+        description = "Read back the register values recorded by a passive 'capture_reg' capture (by id). Returns each captured entry: sequence, decoded capture value, raw 64-bit value, the gate value at capture time, and the site address that was executing."
+    )]
     fn read_captures(
         &self,
         Parameters(args): Parameters<ReadCapturesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match call_dll(&self.session, &Request::ReadCaptures { id: args.id }) {
+        match crate::controller::request(&self.session, &Request::ReadCaptures { id: args.id }) {
             Ok(Response::ReadCaptures { entries, disarmed }) => {
                 if entries.is_empty() {
                     let note = if disarmed {
@@ -3177,7 +3895,11 @@ impl TrainlabMcpServer {
                     ]));
                 }
                 let disarm_note = if disarmed { " (disarmed)" } else { "" };
-                let mut lines = vec![format!("capture {} — {} recorded hit(s){disarm_note}:", args.id, entries.len())];
+                let mut lines = vec![format!(
+                    "capture {} — {} recorded hit(s){disarm_note}:",
+                    args.id,
+                    entries.len()
+                )];
                 for e in entries {
                     lines.push(format!(
                         "  seq={} reg_value={:.4} raw=0x{:016x} gate_value={:.4} rip=0x{:016x}",
@@ -3196,12 +3918,15 @@ impl TrainlabMcpServer {
 
     /// Uninstall a passive register capture: restore the original bytes at the
     /// patched site and free the scratch ring.
-    #[tool(description = "Uninstall a passive 'capture_reg' capture by id: restores the original bytes at the patched code site and frees the scratch ring. No residual patch remains.")]
+    #[tool(
+        description = "Uninstall a passive 'capture_reg' capture by id: restores the original bytes at the patched code site and frees the scratch ring. No residual patch remains."
+    )]
     fn uninstall_capture_reg(
         &self,
         Parameters(args): Parameters<UninstallCaptureArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match call_dll(&self.session, &Request::UninstallCapture { id: args.id }) {
+        match crate::controller::request(&self.session, &Request::UninstallCapture { id: args.id })
+        {
             Ok(Response::CaptureUninstalled { id }) => {
                 if let Ok(mut s) = self.session.lock() {
                     s.remove_capture(id);
@@ -3223,19 +3948,24 @@ impl TrainlabMcpServer {
     /// When the game writes the address, the DLL captures the writing
     /// instruction's registers and reports them. This is the "find what writes
     /// this value" capability.
-    #[tool(description = "Find what code writes an address: arm a hardware watchpoint; when the game writes it, returns the instruction pointer and register state of the writing code.")]
+    #[tool(
+        description = "Find what code writes an address: arm a hardware watchpoint; when the game writes it, returns the instruction pointer and register state of the writing code."
+    )]
     fn watch_writes(
         &self,
         Parameters(args): Parameters<WatchWritesArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&self.session, &args.address)?;
         let len = args.len.unwrap_or(4);
-        match call_dll(&self.session, &Request::WatchWrites {
-            address,
-            len,
-            one_shot: args.one_shot,
-            mechanism: args.mechanism,
-        }) {
+        match crate::controller::request(
+            &self.session,
+            &Request::WatchWrites {
+                address,
+                len,
+                one_shot: args.one_shot,
+                mechanism: args.mechanism,
+            },
+        ) {
             Ok(Response::WatchArmed) => {
                 if let Ok(mut s) = self.session.lock() {
                     s.record_breakpoint(address);
@@ -3253,7 +3983,9 @@ impl TrainlabMcpServer {
     }
 
     /// Arm a lightweight breakpoint on a code address and capture registers.
-    #[tool(description = "Break on a code instruction: patch it with int3, and when execution reaches it capture registers and stack trace without a full debugger stop. NOTE: int3 code patching is intended for single-threaded or cold execution paths; for high-frequency or multi-threaded hot code sites, prefer 'capture_reg' (code cave / trampoline) or 'watch_writes' (page guard) to avoid thread concurrency contention.")]
+    #[tool(
+        description = "Break on a code instruction: patch it with int3, and when execution reaches it capture registers and stack trace without a full debugger stop. NOTE: int3 code patching is intended for single-threaded or cold execution paths; for high-frequency or multi-threaded hot code sites, prefer 'capture_reg' (code cave / trampoline) or 'watch_writes' (page guard) to avoid thread concurrency contention."
+    )]
     fn break_on_code(
         &self,
         Parameters(args): Parameters<BreakOnCodeArgs>,
@@ -3261,25 +3993,29 @@ impl TrainlabMcpServer {
         let address = parse_addr(&self.session, &args.address)?;
 
         // Arm-time instruction boundary verification guard
-        if !args.force {
-            if let Ok(proc) = game_process(&self.session) {
-                let context_len = 64usize;
-                let base = address.saturating_sub(48);
-                let read_len = context_len + 32;
-                if let Ok(bytes) = proc.read(base, read_len) {
-                    if let Err(msg) = trainlab_core::disasm::verify_instruction_boundary(base, &bytes, address) {
-                        return Err(err(format!(
-                            "{msg} (pass 'force: true' if you explicitly intend to bypass instruction boundary checking)"
-                        )));
-                    }
-                }
+        if !args.force
+            && let Ok(proc) = game_process(&self.session)
+        {
+            let context_len = 64usize;
+            let base = address.saturating_sub(48);
+            let read_len = context_len + 32;
+            if let Ok(bytes) = proc.read(base, read_len)
+                && let Err(msg) =
+                    trainlab_core::disasm::verify_instruction_boundary(base, &bytes, address)
+            {
+                return Err(err(format!(
+                    "{msg} (pass 'force: true' if you explicitly intend to bypass instruction boundary checking)"
+                )));
             }
         }
 
-        match call_dll(&self.session, &Request::BreakOnCode {
-            address,
-            one_shot: args.one_shot,
-        }) {
+        match crate::controller::request(
+            &self.session,
+            &Request::BreakOnCode {
+                address,
+                one_shot: args.one_shot,
+            },
+        ) {
             Ok(Response::BreakArmed) => {
                 if let Ok(mut s) = self.session.lock() {
                     s.record_breakpoint(address);
@@ -3297,9 +4033,11 @@ impl TrainlabMcpServer {
     }
 
     /// Poll for hits from an armed watchpoint/breakpoint.
-    #[tool(description = "Retrieve accumulated watchpoint/breakpoint hits (registers + stack). Returns nothing if no hit is pending.")]
+    #[tool(
+        description = "Retrieve accumulated watchpoint/breakpoint hits (registers + stack). Returns nothing if no hit is pending."
+    )]
     fn watch_poll(&self) -> Result<CallToolResult, ErrorData> {
-        match call_dll(&self.session, &Request::PollHit) {
+        match crate::controller::request(&self.session, &Request::PollHit) {
             Ok(Response::PollHit { hits, hit }) => {
                 let all_hits = if !hits.is_empty() {
                     hits
@@ -3348,7 +4086,7 @@ impl TrainlabMcpServer {
             Ok(_) => Err(err("unexpected response from DLL")),
             Err(e) => {
                 let s_guard = self.session.lock().ok();
-                let connected = s_guard.as_ref().map_or(false, |s| s.connected());
+                let connected = s_guard.as_ref().is_some_and(|s| s.connected());
                 if !connected {
                     Ok(CallToolResult::success(vec![
                         rmcp::model::ContentBlock::text("no pending hit"),
@@ -3361,9 +4099,11 @@ impl TrainlabMcpServer {
     }
 
     /// Clear any active watchpoints / breakpoints.
-    #[tool(description = "Disarm any active watchpoint or breakpoint and restore any patched bytes.")]
+    #[tool(
+        description = "Disarm any active watchpoint or breakpoint and restore any patched bytes."
+    )]
     fn clear_breakpoints(&self) -> Result<CallToolResult, ErrorData> {
-        match call_dll(&self.session, &Request::ClearBreakpoints) {
+        match crate::controller::request(&self.session, &Request::ClearBreakpoints) {
             Ok(Response::BreakpointsCleared) => {
                 if let Ok(mut s) = self.session.lock() {
                     s.clear_all_breakpoints();
@@ -3379,12 +4119,17 @@ impl TrainlabMcpServer {
     }
 
     /// Retrieve captured network traffic log from the session.
-    #[tool(description = "Retrieve captured network packets (TCP/UDP/HTTP) logged by in-game hooks. Output is kept lightweight (summaries and short preview); returns relative file paths or download links for full packet dumps.")]
+    #[tool(
+        description = "Retrieve captured network packets (TCP/UDP/HTTP) logged by in-game hooks. Output is kept lightweight (summaries and short preview); returns relative file paths or download links for full packet dumps."
+    )]
     pub fn get_network_log(
         &self,
         Parameters(args): Parameters<GetNetworkLogArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        let s = self
+            .session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
         if !s.has_capability("network_capture") {
             let caps = s.dll_capabilities().join(", ");
             return Ok(CallToolResult::success(vec![
@@ -3418,23 +4163,45 @@ impl TrainlabMcpServer {
         }
 
         let mut lines = Vec::new();
-        lines.push(format!("Captured Network Packets (showing {} of {total}):", packets.len()));
+        lines.push(format!(
+            "Captured Network Packets (showing {} of {total}):",
+            packets.len()
+        ));
 
         for p in &packets {
-            let ep = p.remote_endpoint.as_deref().unwrap_or(p.local_endpoint.as_deref().unwrap_or("?"));
+            let ep = p
+                .remote_endpoint
+                .as_deref()
+                .unwrap_or(p.local_endpoint.as_deref().unwrap_or("?"));
             let dir_icon = match p.direction {
                 trainlab_core::protocol::PacketDirection::Inbound => "IN  ⬇",
                 trainlab_core::protocol::PacketDirection::Outbound => "OUT ⬆",
             };
 
             // Lightweight ASCII preview
-            let preview_str: String = p.payload_preview.iter()
+            let preview_str: String = p
+                .payload_preview
+                .iter()
                 .take(64)
-                .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
                 .collect();
 
-            let file_ref = p.artifact_file.as_deref().map(|f| format!(" [file: {f}]")).unwrap_or_default();
-            let url_ref = p.url.as_deref().map(|u| format!(" url: {u}")).unwrap_or_default();
+            let file_ref = p
+                .artifact_file
+                .as_deref()
+                .map(|f| format!(" [file: {f}]"))
+                .unwrap_or_default();
+            let url_ref = p
+                .url
+                .as_deref()
+                .map(|u| format!(" url: {u}"))
+                .unwrap_or_default();
 
             lines.push(format!(
                 "  #{:04} [{}] {:<4} {:<22} size={:<4} preview=\"{}\"{url_ref}{file_ref}",
@@ -3453,16 +4220,21 @@ impl TrainlabMcpServer {
     }
 
     /// Watch or inspect incoming network traffic with optional endpoint filtering.
-    #[tool(description = "Watch incoming/outgoing network packets matching an optional host/port or URL filter. Returns the latest matching packet summaries and lightweight previews.")]
+    #[tool(
+        description = "Watch incoming/outgoing network packets matching an optional host/port or URL filter. Returns the latest matching packet summaries and lightweight previews."
+    )]
     pub fn watch_network(
         &self,
         Parameters(args): Parameters<WatchNetworkArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        let s = self
+            .session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
         if !s.has_capability("network_capture") {
             return Ok(CallToolResult::success(vec![
                 rmcp::model::ContentBlock::text(
-                    "Network capture is unavailable: target DLL does not support 'network_capture'."
+                    "Network capture is unavailable: target DLL does not support 'network_capture'.",
                 ),
             ]));
         }
@@ -3475,12 +4247,8 @@ impl TrainlabMcpServer {
             _ => None,
         };
 
-        let (packets, total) = s.list_network_packets(
-            args.limit.or(Some(10)),
-            None,
-            proto,
-            args.filter.as_deref(),
-        );
+        let (packets, total) =
+            s.list_network_packets(args.limit.or(Some(10)), None, proto, args.filter.as_deref());
 
         if packets.is_empty() {
             return Ok(CallToolResult::success(vec![
@@ -3491,19 +4259,42 @@ impl TrainlabMcpServer {
         }
 
         let mut lines = Vec::new();
-        lines.push(format!("Network Traffic Watch (latest {} packets):", packets.len()));
+        lines.push(format!(
+            "Network Traffic Watch (latest {} packets):",
+            packets.len()
+        ));
         for p in &packets {
             let ep = p.remote_endpoint.as_deref().unwrap_or("?");
             let dir_icon = match p.direction {
                 trainlab_core::protocol::PacketDirection::Inbound => "IN ",
                 trainlab_core::protocol::PacketDirection::Outbound => "OUT",
             };
-            let preview: String = p.payload_preview.iter()
+            let preview: String = p
+                .payload_preview
+                .iter()
                 .take(48)
-                .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+                .map(|&b| {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
                 .collect();
-            let file_ref = p.artifact_file.as_deref().map(|f| format!(" [download: {f}]")).unwrap_or_default();
-            lines.push(format!("  #{:04} [{}] {:<4} {:<20} ({} B): \"{}\"{file_ref}", p.id, dir_icon, p.kind.as_str(), ep, p.payload_len, preview));
+            let file_ref = p
+                .artifact_file
+                .as_deref()
+                .map(|f| format!(" [download: {f}]"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  #{:04} [{}] {:<4} {:<20} ({} B): \"{}\"{file_ref}",
+                p.id,
+                dir_icon,
+                p.kind.as_str(),
+                ep,
+                p.payload_len,
+                preview
+            ));
         }
 
         Ok(CallToolResult::success(vec![
@@ -3517,22 +4308,36 @@ impl TrainlabMcpServer {
         &self,
         Parameters(_args): Parameters<ClearNetworkLogArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+        let mut s = self
+            .session
+            .lock()
+            .map_err(|_| err("session lock poisoned"))?;
         let cleared = s.clear_network_packets();
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!("Cleared {cleared} captured network packet(s) from session.")),
+            rmcp::model::ContentBlock::text(format!(
+                "Cleared {cleared} captured network packet(s) from session."
+            )),
         ]))
     }
 
     /// Retrieve live network hook traffic statistics and capture counts.
-    #[tool(description = "Retrieve real-time network traffic packet counts and byte volumes across all hooked sites (Winsock TCP/UDP, WinHTTP, SChannel, Steamworks). Shows inbound vs outbound traffic, active filters, and dropped counts.")]
+    #[tool(
+        description = "Retrieve real-time network traffic packet counts and byte volumes across all hooked sites (Winsock TCP/UDP, WinHTTP, SChannel, Steamworks). Shows inbound vs outbound traffic, active filters, and dropped counts."
+    )]
     pub fn get_network_status(
         &self,
         Parameters(_args): Parameters<GetNetworkStatusArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let (has_cap, _caps, session_logged) = {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
-            (s.has_capability("network_capture"), s.dll_capabilities().join(", "), s.list_network_packets(None, None, None, None).1)
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
+            (
+                s.has_capability("network_capture"),
+                s.dll_capabilities().join(", "),
+                s.list_network_packets(None, None, None, None).1,
+            )
         };
 
         let req = trainlab_core::protocol::Request::GetNetworkStatus;
@@ -3544,28 +4349,41 @@ impl TrainlabMcpServer {
         match resp {
             Ok(trainlab_core::protocol::Response::NetworkStatus(stats)) => {
                 lines.push(format!("  Capture Active: {}", stats.enabled));
-                lines.push(format!("  Capture Loopback (127.0.0.1): {}", stats.capture_loopback));
+                lines.push(format!(
+                    "  Capture Loopback (127.0.0.1): {}",
+                    stats.capture_loopback
+                ));
                 lines.push("".to_string());
-                lines.push(format!("  {:<12} | {:>14} | {:>14} | {:>12}", "Protocol", "Inbound", "Outbound", "Total Bytes"));
-                lines.push(format!("  {:-<12}-+-{:-<14}-+-{:-<14}-+-{:-<12}", "", "", "", ""));
+                lines.push(format!(
+                    "  {:<12} | {:>14} | {:>14} | {:>12}",
+                    "Protocol", "Inbound", "Outbound", "Total Bytes"
+                ));
+                lines.push(format!(
+                    "  {:-<12}-+-{:-<14}-+-{:-<14}-+-{:-<12}",
+                    "", "", "", ""
+                ));
 
-                let fmt_proto = |name: &str, p: &trainlab_core::protocol::ProtocolDirectionStatsDto| {
-                    format!(
-                        "  {:<12} | {:>5} pkts ({:>5}B) | {:>5} pkts ({:>5}B) | {:>10}B",
-                        name,
-                        p.inbound_packets,
-                        p.inbound_bytes,
-                        p.outbound_packets,
-                        p.outbound_bytes,
-                        p.inbound_bytes + p.outbound_bytes
-                    )
-                };
+                let fmt_proto =
+                    |name: &str, p: &trainlab_core::protocol::ProtocolDirectionStatsDto| {
+                        format!(
+                            "  {:<12} | {:>5} pkts ({:>5}B) | {:>5} pkts ({:>5}B) | {:>10}B",
+                            name,
+                            p.inbound_packets,
+                            p.inbound_bytes,
+                            p.outbound_packets,
+                            p.outbound_bytes,
+                            p.inbound_bytes + p.outbound_bytes
+                        )
+                    };
 
                 lines.push(fmt_proto("UDP (Winsock)", &stats.udp));
                 lines.push(fmt_proto("TCP (Winsock)", &stats.tcp));
                 lines.push(fmt_proto("HTTP/TLS", &stats.http));
                 lines.push(fmt_proto("Steamworks", &stats.steam));
-                lines.push(format!("  {:-<12}-+-{:-<14}-+-{:-<14}-+-{:-<12}", "", "", "", ""));
+                lines.push(format!(
+                    "  {:-<12}-+-{:-<14}-+-{:-<14}-+-{:-<12}",
+                    "", "", "", ""
+                ));
                 lines.push(format!(
                     "  {:<12} | {:>5} pkts ({:>5}B) | {:>5} pkts ({:>5}B) | {:>10}B",
                     "TOTAL",
@@ -3576,11 +4394,19 @@ impl TrainlabMcpServer {
                     stats.total_bytes()
                 ));
                 lines.push("".to_string());
-                lines.push(format!("  Total Logged Packets: {} (session buffer: {})", stats.total_logged, session_logged));
-                lines.push(format!("  Total Dropped (by filters): {}", stats.total_dropped));
+                lines.push(format!(
+                    "  Total Logged Packets: {} (session buffer: {})",
+                    stats.total_logged, session_logged
+                ));
+                lines.push(format!(
+                    "  Total Dropped (by filters): {}",
+                    stats.total_dropped
+                ));
             }
             Ok(other) => {
-                lines.push(format!("  Unexpected response from injected DLL: {other:?}"));
+                lines.push(format!(
+                    "  Unexpected response from injected DLL: {other:?}"
+                ));
                 lines.push(format!("  Session Logged Packets: {session_logged}"));
             }
             Err(e) => {
@@ -3598,7 +4424,9 @@ impl TrainlabMcpServer {
     }
 
     /// Configure network traffic capture: toggle capture, ignore ports, or allow loopback.
-    #[tool(description = "Configure in-game network traffic interception. By default loopback (127.0.0.1) and internal trainer ports are ignored so buffers only capture actual game traffic. Use this tool to toggle interception, change ignored ports, or opt into loopback traffic capture.")]
+    #[tool(
+        description = "Configure in-game network traffic interception. By default loopback (127.0.0.1) and internal trainer ports are ignored so buffers only capture actual game traffic. Use this tool to toggle interception, change ignored ports, or opt into loopback traffic capture."
+    )]
     pub fn configure_network(
         &self,
         Parameters(args): Parameters<ConfigureNetworkArgs>,
@@ -3635,7 +4463,9 @@ impl TrainlabMcpServer {
 
         let status_desc = match resp {
             Ok(trainlab_core::protocol::Response::NetworkHookConfigured { enabled }) => {
-                format!("Network interception set to {enabled}. Ignored ports: {ports:?}, capture_loopback: {capture_loopback}, ignore_hosts: {ignore_hosts:?}")
+                format!(
+                    "Network interception set to {enabled}. Ignored ports: {ports:?}, capture_loopback: {capture_loopback}, ignore_hosts: {ignore_hosts:?}"
+                )
             }
             Ok(other) => format!("Unexpected DLL response: {other:?}"),
             Err(e) => format!("Failed to configure network hook on DLL (DLL may be offline): {e}"),
@@ -3647,13 +4477,20 @@ impl TrainlabMcpServer {
     }
 
     /// Pin an address to a constant value using the optimal provider (Tier 1 on-frame in DLL or Tier 2 external timer).
-    #[tool(description = "Pin / freeze an address to a constant value. Automatically routes to Tier 1 on-frame DXGI render loop (when DLL is injected) or Tier 2 external periodic timer cadence. Includes fail-safe assertions so if a pointer becomes null, writes are aborted cleanly without crashes.")]
+    #[tool(
+        description = "Pin / freeze an address to a constant value. Automatically routes to Tier 1 on-frame DXGI render loop (when DLL is injected) or Tier 2 external periodic timer cadence. Includes fail-safe assertions so if a pointer becomes null, writes are aborted cleanly without crashes."
+    )]
     pub fn pin_value(
         &self,
         Parameters(args): Parameters<PinValueArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&self.session, &args.address)?;
-        let vt = match args.value_type.as_deref().map(|s| s.to_lowercase()).as_deref() {
+        let vt = match args
+            .value_type
+            .as_deref()
+            .map(|s| s.to_lowercase())
+            .as_deref()
+        {
             Some("u32") => trainlab_core::scan::ValueType::U32,
             Some("f32") | Some("float") => trainlab_core::scan::ValueType::F32,
             Some("i64") => trainlab_core::scan::ValueType::I64,
@@ -3669,13 +4506,19 @@ impl TrainlabMcpServer {
         if assert_not_null {
             ops.push(trainlab_core::protocol::PinOp::AssertNotNull { address });
         }
-        ops.push(trainlab_core::protocol::PinOp::WriteConstant { address, data: bytes.clone() });
+        ops.push(trainlab_core::protocol::PinOp::WriteConstant {
+            address,
+            data: bytes.clone(),
+        });
 
         let label = args.label.unwrap_or_else(|| format!("pin_{:#x}", address));
 
         // Determine optimal provider
         let (pin_id, provider) = {
-            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let mut s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             let provider = if s.has_capability("frame_pinning") {
                 trainlab_core::protocol::PinProvider::InProcessFrame
             } else {
@@ -3688,20 +4531,32 @@ impl TrainlabMcpServer {
         // If in-process frame provider, sync active pins to DLL
         if provider == trainlab_core::protocol::PinProvider::InProcessFrame {
             let all_pins = {
-                let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                let s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
                 s.list_pins().to_vec()
             };
-            let _ = crate::controller::request(&self.session, &trainlab_core::protocol::Request::SyncPins { pins: all_pins });
+            let _ = crate::controller::request(
+                &self.session,
+                &trainlab_core::protocol::Request::SyncPins { pins: all_pins },
+            );
         }
 
         self.request_repaint();
 
         let desc = match provider {
             trainlab_core::protocol::PinProvider::InProcessFrame => {
-                format!("Pinned {address:#x} to '{}' (Tier 1: In-Process DXGI On-Frame, pin id #{pin_id})", args.value)
+                format!(
+                    "Pinned {address:#x} to '{}' (Tier 1: In-Process DXGI On-Frame, pin id #{pin_id})",
+                    args.value
+                )
             }
             trainlab_core::protocol::PinProvider::ExternalTimer => {
-                format!("Pinned {address:#x} to '{}' (Tier 2: External Timer Cadence, pin id #{pin_id})", args.value)
+                format!(
+                    "Pinned {address:#x} to '{}' (Tier 2: External Timer Cadence, pin id #{pin_id})",
+                    args.value
+                )
             }
         };
 
@@ -3711,7 +4566,9 @@ impl TrainlabMcpServer {
     }
 
     /// Pin dynamic value copy / arithmetic from a source to a destination.
-    #[tool(description = "Pin dynamic value copy / sync from src to dst (e.g. dst = src, dst = src + addend, or dst = max(dst, src)). Automatically routes to Tier 1 on-frame DXGI render loop or Tier 2 external timer.")]
+    #[tool(
+        description = "Pin dynamic value copy / sync from src to dst (e.g. dst = src, dst = src + addend, or dst = max(dst, src)). Automatically routes to Tier 1 on-frame DXGI render loop or Tier 2 external timer."
+    )]
     pub fn pin_copy(
         &self,
         Parameters(args): Parameters<PinCopyArgs>,
@@ -3719,7 +4576,12 @@ impl TrainlabMcpServer {
         let src_address = parse_addr(&self.session, &args.src)?;
         let dst_address = parse_addr(&self.session, &args.dst)?;
 
-        let vt = match args.value_type.as_deref().map(|s| s.to_lowercase()).as_deref() {
+        let vt = match args
+            .value_type
+            .as_deref()
+            .map(|s| s.to_lowercase())
+            .as_deref()
+        {
             Some("u32") => trainlab_core::scan::ValueType::U32,
             Some("f32") | Some("float") => trainlab_core::scan::ValueType::F32,
             Some("i64") => trainlab_core::scan::ValueType::I64,
@@ -3732,8 +4594,12 @@ impl TrainlabMcpServer {
         let assert_not_null = args.assert_not_null.unwrap_or(true);
         let mut ops = Vec::new();
         if assert_not_null {
-            ops.push(trainlab_core::protocol::PinOp::AssertNotNull { address: src_address });
-            ops.push(trainlab_core::protocol::PinOp::AssertNotNull { address: dst_address });
+            ops.push(trainlab_core::protocol::PinOp::AssertNotNull {
+                address: src_address,
+            });
+            ops.push(trainlab_core::protocol::PinOp::AssertNotNull {
+                address: dst_address,
+            });
         }
         ops.push(trainlab_core::protocol::PinOp::CopyValue {
             src_address,
@@ -3743,11 +4609,16 @@ impl TrainlabMcpServer {
             max_only: args.max_only.unwrap_or(false),
         });
 
-        let label = args.label.unwrap_or_else(|| format!("copy_{:#x}_to_{:#x}", src_address, dst_address));
+        let label = args
+            .label
+            .unwrap_or_else(|| format!("copy_{:#x}_to_{:#x}", src_address, dst_address));
 
         // Determine optimal provider
         let (pin_id, provider) = {
-            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let mut s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             let provider = if s.has_capability("frame_pinning") {
                 trainlab_core::protocol::PinProvider::InProcessFrame
             } else {
@@ -3760,20 +4631,30 @@ impl TrainlabMcpServer {
         // If in-process frame provider, sync active pins to DLL
         if provider == trainlab_core::protocol::PinProvider::InProcessFrame {
             let all_pins = {
-                let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                let s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
                 s.list_pins().to_vec()
             };
-            let _ = crate::controller::request(&self.session, &trainlab_core::protocol::Request::SyncPins { pins: all_pins });
+            let _ = crate::controller::request(
+                &self.session,
+                &trainlab_core::protocol::Request::SyncPins { pins: all_pins },
+            );
         }
 
         self.request_repaint();
 
         let desc = match provider {
             trainlab_core::protocol::PinProvider::InProcessFrame => {
-                format!("Dynamic pin registered: {src_address:#x} -> {dst_address:#x} (Tier 1: In-Process DXGI On-Frame, pin id #{pin_id})")
+                format!(
+                    "Dynamic pin registered: {src_address:#x} -> {dst_address:#x} (Tier 1: In-Process DXGI On-Frame, pin id #{pin_id})"
+                )
             }
             trainlab_core::protocol::PinProvider::ExternalTimer => {
-                format!("Dynamic pin registered: {src_address:#x} -> {dst_address:#x} (Tier 2: External Timer Cadence, pin id #{pin_id})")
+                format!(
+                    "Dynamic pin registered: {src_address:#x} -> {dst_address:#x} (Tier 2: External Timer Cadence, pin id #{pin_id})"
+                )
             }
         };
 
@@ -3789,16 +4670,25 @@ impl TrainlabMcpServer {
         Parameters(args): Parameters<UnpinArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let removed = {
-            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let mut s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             s.remove_pin(args.id)
         };
 
         if removed {
             let all_pins = {
-                let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+                let s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
                 s.list_pins().to_vec()
             };
-            let _ = crate::controller::request(&self.session, &trainlab_core::protocol::Request::SyncPins { pins: all_pins });
+            let _ = crate::controller::request(
+                &self.session,
+                &trainlab_core::protocol::Request::SyncPins { pins: all_pins },
+            );
             self.request_repaint();
             Ok(CallToolResult::success(vec![
                 rmcp::model::ContentBlock::text(format!("Removed pin #{}", args.id)),
@@ -3809,13 +4699,18 @@ impl TrainlabMcpServer {
     }
 
     /// List all active value pins and their execution providers.
-    #[tool(description = "List all active value pins, their instructions, and their execution providers (Tier 1 In-Process vs Tier 2 External Timer).")]
+    #[tool(
+        description = "List all active value pins, their instructions, and their execution providers (Tier 1 In-Process vs Tier 2 External Timer)."
+    )]
     pub fn list_pins(
         &self,
         Parameters(_args): Parameters<ListPinsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let pins = {
-            let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             s.list_pins().to_vec()
         };
 
@@ -3830,9 +4725,18 @@ impl TrainlabMcpServer {
         for p in &pins {
             let prov = match p.provider {
                 trainlab_core::protocol::PinProvider::InProcessFrame => "Tier 1: On-Frame (DLL)",
-                trainlab_core::protocol::PinProvider::ExternalTimer => "Tier 2: External Timer (GUI)",
+                trainlab_core::protocol::PinProvider::ExternalTimer => {
+                    "Tier 2: External Timer (GUI)"
+                }
             };
-            lines.push(format!("  #{} '{}' [{}] ({} ops, enabled: {})", p.id, p.label, prov, p.ops.len(), p.enabled));
+            lines.push(format!(
+                "  #{} '{}' [{}] ({} ops, enabled: {})",
+                p.id,
+                p.label,
+                prov,
+                p.ops.len(),
+                p.enabled
+            ));
         }
 
         Ok(CallToolResult::success(vec![
@@ -3847,10 +4751,14 @@ impl TrainlabMcpServer {
         Parameters(_args): Parameters<ListPinsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         {
-            let mut s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
+            let mut s = self
+                .session
+                .lock()
+                .map_err(|_| err("session lock poisoned"))?;
             s.clear_pins();
         }
-        let _ = crate::controller::request(&self.session, &trainlab_core::protocol::Request::ClearPins);
+        let _ =
+            crate::controller::request(&self.session, &trainlab_core::protocol::Request::ClearPins);
         self.request_repaint();
 
         Ok(CallToolResult::success(vec![
@@ -3859,8 +4767,13 @@ impl TrainlabMcpServer {
     }
 
     /// Write bytes or a typed value to game memory directly (with auto-undo snapshotting).
-    #[tool(description = "Write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Executes immediately and records an undo snapshot.")]
-    pub(crate) fn write(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, ErrorData> {
+    #[tool(
+        description = "Write to game memory at an address. Accepts EITHER raw hex bytes (data='00 80 ac 43') OR a typed value (value='0xe890000', value_type='ptr' or 'i32'/'f32'/'i64'/'u64'/'f64') so you never have to hand-encode hex. Executes immediately and records an undo snapshot."
+    )]
+    pub(crate) fn write(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let address = parse_addr(&self.session, &args.address)?;
         let (bytes, desc) = match (args.data.as_deref(), args.value.as_deref()) {
             (Some(hex_str), None) => {
@@ -3872,7 +4785,10 @@ impl TrainlabMcpServer {
                     "write {} byte(s) at {:#x}: {}",
                     b.len(),
                     address,
-                    b.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+                    b.iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 );
                 (b, d)
             }
@@ -3894,15 +4810,22 @@ impl TrainlabMcpServer {
                     val_str,
                     vt_str,
                     address,
-                    b.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+                    b.iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 );
                 (b, d)
             }
             (Some(_), Some(_)) => {
-                return Err(err("specify either 'data' (raw hex) or 'value' (typed value), but not both"));
+                return Err(err(
+                    "specify either 'data' (raw hex) or 'value' (typed value), but not both",
+                ));
             }
             (None, None) => {
-                return Err(err("must specify either 'data' (raw hex) or 'value' (typed value)"));
+                return Err(err(
+                    "must specify either 'data' (raw hex) or 'value' (typed value)",
+                ));
             }
         };
 
@@ -3910,10 +4833,13 @@ impl TrainlabMcpServer {
         let proc = game_process(&self.session)?;
         let original = proc.read(address, bytes.len()).unwrap_or_default();
 
-        match call_dll(&self.session, &Request::Write {
-            address,
-            data: bytes.clone(),
-        }) {
+        match crate::controller::request(
+            &self.session,
+            &Request::Write {
+                address,
+                data: bytes.clone(),
+            },
+        ) {
             Ok(Response::Write { bytes_written }) => {
                 let mut s = self
                     .session
@@ -3921,11 +4847,7 @@ impl TrainlabMcpServer {
                     .map_err(|_| err("session lock poisoned"))?;
                 s.log_activity("mcp", format!("write: {desc}"));
                 let undo_msg = if !original.is_empty() {
-                    let id = s.record_undo(
-                        address,
-                        original,
-                        desc.clone(),
-                    );
+                    let id = s.record_undo(address, original, desc.clone());
                     format!(" (undo id #{id})")
                 } else {
                     String::new()
@@ -3946,7 +4868,9 @@ impl TrainlabMcpServer {
     }
 
     /// Install a code-cave hook directly in game memory (with auto-undo snapshotting).
-    #[tool(description = "Install a code cave hook directly. Kinds: 1) 'trampoline' (DEFAULT): runs your custom payload, automatically disassembles and replays stolen instructions in the cave, then jumps back — original game logic is preserved (empty payload = transparent no-op). 2) 'override': runs payload and jumps back, skipping stolen instructions. Returns allocated cave address and auto-registers label markers.")]
+    #[tool(
+        description = "Install a code cave hook directly. Kinds: 1) 'trampoline' (DEFAULT): runs your custom payload, automatically disassembles and replays stolen instructions in the cave, then jumps back — original game logic is preserved (empty payload = transparent no-op). 2) 'override': runs payload and jumps back, skipping stolen instructions. Returns allocated cave address and auto-registers label markers."
+    )]
     fn install_cave(
         &self,
         Parameters(args): Parameters<InstallCaveArgs>,
@@ -3955,7 +4879,9 @@ impl TrainlabMcpServer {
         let target = parse_addr(&self.session, &args.target)?;
 
         if args.asm.is_some() && !args.payload.trim().is_empty() {
-            return Err(err("cannot provide both 'asm' and 'payload' (mutually exclusive)"));
+            return Err(err(
+                "cannot provide both 'asm' and 'payload' (mutually exclusive)",
+            ));
         }
 
         let (payload, label_offsets) = if let Some(asm_src) = &args.asm {
@@ -3966,36 +4892,63 @@ impl TrainlabMcpServer {
                 trainlab_core::asm::check_trampoline_data_fallthrough(asm_src).map_err(err)?;
             }
             let symbols: std::collections::HashMap<String, u64> = {
-                let s = self.session.lock().map_err(|_| err("session lock poisoned"))?;
-                s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
+                let s = self
+                    .session
+                    .lock()
+                    .map_err(|_| err("session lock poisoned"))?;
+                s.list_markers()
+                    .iter()
+                    .map(|m| (m.label.clone(), m.address))
+                    .collect()
             };
-            let block = trainlab_core::asm::assemble_text(asm_src, target, &symbols).map_err(err)?;
+            let block =
+                trainlab_core::asm::assemble_text(asm_src, target, &symbols).map_err(err)?;
             (block.bytes, block.label_offsets)
         } else {
-            (parse_hex_bytes(&args.payload)?, std::collections::HashMap::new())
+            (
+                parse_hex_bytes(&args.payload)?,
+                std::collections::HashMap::new(),
+            )
         };
 
         let jump = match args.jump.to_lowercase().as_str() {
             "absolute" => JumpStyle::Absolute,
             "relative" | "short" => JumpStyle::Relative,
-            other => return Err(err(format!("unknown jump style '{other}' (expected 'absolute' or 'relative')"))),
+            other => {
+                return Err(err(format!(
+                    "unknown jump style '{other}' (expected 'absolute' or 'relative')"
+                )));
+            }
         };
         let hook = match args.hook.as_str() {
-            "trampoline" => CaveHook::Trampoline { payload: payload.clone(), jump },
+            "trampoline" => CaveHook::Trampoline {
+                payload: payload.clone(),
+                jump,
+            },
             "override" => {
                 if payload.is_empty() {
-                    return Err(err("override hook requires a non-empty payload; an empty override drops stolen instructions without replacement"));
+                    return Err(err(
+                        "override hook requires a non-empty payload; an empty override drops stolen instructions without replacement",
+                    ));
                 }
-                CaveHook::Override { payload: payload.clone(), jump }
+                CaveHook::Override {
+                    payload: payload.clone(),
+                    jump,
+                }
             }
-            other => return Err(err(format!("unknown hook kind '{other}' (expected 'trampoline' or 'override')"))),
+            other => {
+                return Err(err(format!(
+                    "unknown hook kind '{other}' (expected 'trampoline' or 'override')"
+                )));
+            }
         };
 
-        match call_dll(&self.session, &Request::InstallCave {
-            target,
-            hook,
-        }) {
-            Ok(Response::CaveInstalled { cave, target, original }) => {
+        match crate::controller::request(&self.session, &Request::InstallCave { target, hook }) {
+            Ok(Response::CaveInstalled {
+                cave,
+                target,
+                original,
+            }) => {
                 let mut s = self
                     .session
                     .lock()
@@ -4006,22 +4959,44 @@ impl TrainlabMcpServer {
                     format!("install_cave at {:#x}", target),
                 );
                 if let Some(m) = &args.marker {
-                    let _ = s.set_marker_full(m, cave, None, trainlab_core::session::MarkerKind::Code, None, Some(&format!("Code cave allocated for target {target:#x}")));
+                    let _ = s.set_marker_full(
+                        m,
+                        cave,
+                        None,
+                        trainlab_core::session::MarkerKind::Code,
+                        None,
+                        Some(&format!("Code cave allocated for target {target:#x}")),
+                    );
                 }
                 // Auto-set markers for any labels defined in the assembly
                 for (lbl_name, offset) in &label_offsets {
                     let lbl_addr = cave.saturating_add(*offset);
-                    let _ = s.set_marker(lbl_name, lbl_addr, Some(&format!("Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})")));
+                    let _ = s.set_marker(
+                        lbl_name,
+                        lbl_addr,
+                        Some(&format!(
+                            "Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})"
+                        )),
+                    );
                 }
                 s.log_activity("mcp", format!("installed cave at target {target:#x} -> cave={cave:#x} ({} label(s) marked)", label_offsets.len()));
                 drop(s);
                 self.request_repaint();
 
-                let mut out_msg = format!("installed cave: cave={cave:#x} target={target:#x} (payload {} bytes, original {} bytes saved, undo id #{id})", payload.len(), original.len());
+                let mut out_msg = format!(
+                    "installed cave: cave={cave:#x} target={target:#x} (payload {} bytes, original {} bytes saved, undo id #{id})",
+                    payload.len(),
+                    original.len()
+                );
                 if !label_offsets.is_empty() {
                     out_msg.push_str("\nlabels marked:");
                     for (lbl_name, offset) in &label_offsets {
-                        out_msg.push_str(&format!("\n  • {} -> {:#x} (+{:#x})", lbl_name, cave.saturating_add(*offset), offset));
+                        out_msg.push_str(&format!(
+                            "\n  • {} -> {:#x} (+{:#x})",
+                            lbl_name,
+                            cave.saturating_add(*offset),
+                            offset
+                        ));
                     }
                 }
                 Ok(CallToolResult::success(vec![
@@ -4035,7 +5010,9 @@ impl TrainlabMcpServer {
     }
 
     /// Revert a write or cave mutation directly by undo id (or the most recent mutation).
-    #[tool(description = "Undo a write or cave mutation by id (or the most recent if omitted): restores original memory bytes directly.")]
+    #[tool(
+        description = "Undo a write or cave mutation by id (or the most recent if omitted): restores original memory bytes directly."
+    )]
     fn undo(&self, Parameters(args): Parameters<UndoArgs>) -> Result<CallToolResult, ErrorData> {
         let entry = {
             let s = self
@@ -4066,17 +5043,26 @@ impl TrainlabMcpServer {
             return Err(err(warn_msg));
         }
 
-        match call_dll(&self.session, &Request::Write {
-            address: e.address,
-            data: e.original_bytes.clone(),
-        }) {
+        match crate::controller::request(
+            &self.session,
+            &Request::Write {
+                address: e.address,
+                data: e.original_bytes.clone(),
+            },
+        ) {
             Ok(Response::Write { bytes_written }) => {
                 let mut s = self
                     .session
                     .lock()
                     .map_err(|_| err("session lock poisoned"))?;
                 s.pop_undo(e.id);
-                s.log_activity("mcp", format!("undo #{}: restored {} bytes at {:#x}", e.id, bytes_written, e.address));
+                s.log_activity(
+                    "mcp",
+                    format!(
+                        "undo #{}: restored {} bytes at {:#x}",
+                        e.id, bytes_written, e.address
+                    ),
+                );
                 drop(s);
                 self.request_repaint();
                 Ok(CallToolResult::success(vec![
@@ -4093,7 +5079,9 @@ impl TrainlabMcpServer {
     }
 
     /// Apply a previously staged (pending) mutation.
-    #[tool(description = "Apply a staged mutation by id if one exists. (Deprecated: 'write' and 'install_cave' now execute immediately).")]
+    #[tool(
+        description = "Apply a staged mutation by id if one exists. (Deprecated: 'write' and 'install_cave' now execute immediately)."
+    )]
     pub(crate) fn confirm_op(
         &self,
         Parameters(args): Parameters<OpConfirmArgs>,
@@ -4105,7 +5093,9 @@ impl TrainlabMcpServer {
                 .lock()
                 .map_err(|_| err("session lock poisoned"))?;
             if let Some(op) = s.operation_in_progress() {
-                return Err(err(format!("operation '{op}' is currently in progress; cannot confirm op")));
+                return Err(err(format!(
+                    "operation '{op}' is currently in progress; cannot confirm op"
+                )));
             }
         }
 
@@ -4132,10 +5122,13 @@ impl TrainlabMcpServer {
                 // Snapshot originals for the undo log before writing.
                 let proc = game_process(&self.session)?;
                 let original = proc.read(address, data.len()).unwrap_or_default();
-                match call_dll(&self.session, &Request::Write {
-                    address,
-                    data: data.clone(),
-                }) {
+                match crate::controller::request(
+                    &self.session,
+                    &Request::Write {
+                        address,
+                        data: data.clone(),
+                    },
+                ) {
                     Ok(Response::Write { bytes_written }) => {
                         let mut s = self
                             .session
@@ -4145,13 +5138,14 @@ impl TrainlabMcpServer {
                         if let Some(cid) = cheat_id {
                             // Toggle patch cheat state
                             if let Some(c) = s.get_cheat(cid)
-                                && let CheatKind::Patch { patch_bytes, .. } = &c.kind {
-                                    let is_enabling = data == patch_bytes;
-                                    s.set_cheat_toggle(cid, is_enabling);
-                                    if !is_enabling {
-                                        is_restoring_patch = true;
-                                    }
+                                && let CheatKind::Patch { patch_bytes, .. } = &c.kind
+                            {
+                                let is_enabling = data == patch_bytes;
+                                s.set_cheat_toggle(cid, is_enabling);
+                                if !is_enabling {
+                                    is_restoring_patch = true;
                                 }
+                            }
                         }
                         if is_restoring_patch {
                             // The patch was restored back to original bytes, clean up any undo log entry for this address.
@@ -4181,12 +5175,23 @@ impl TrainlabMcpServer {
                     Err(e) => Err(e),
                 }
             }
-            PendingKind::InstallCave { hook, marker, label_offsets } => {
-                match call_dll(&self.session, &Request::InstallCave {
-                    target: address,
-                    hook: hook.clone(),
-                }) {
-                    Ok(Response::CaveInstalled { cave, target, original }) => {
+            PendingKind::InstallCave {
+                hook,
+                marker,
+                label_offsets,
+            } => {
+                match crate::controller::request(
+                    &self.session,
+                    &Request::InstallCave {
+                        target: address,
+                        hook: hook.clone(),
+                    },
+                ) {
+                    Ok(Response::CaveInstalled {
+                        cave,
+                        target,
+                        original,
+                    }) => {
                         let mut s = self
                             .session
                             .lock()
@@ -4197,12 +5202,25 @@ impl TrainlabMcpServer {
                             format!("install_cave at {:#x}", target),
                         );
                         if let Some(m) = marker {
-                            let _ = s.set_marker_full(m, cave, None, trainlab_core::session::MarkerKind::Code, None, Some(&format!("Code cave allocated for target {target:#x}")));
+                            let _ = s.set_marker_full(
+                                m,
+                                cave,
+                                None,
+                                trainlab_core::session::MarkerKind::Code,
+                                None,
+                                Some(&format!("Code cave allocated for target {target:#x}")),
+                            );
                         }
                         // Auto-set markers for any labels defined in the assembly
                         for (lbl_name, offset) in label_offsets {
                             let lbl_addr = cave.saturating_add(*offset);
-                            let _ = s.set_marker(lbl_name, lbl_addr, Some(&format!("Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})")));
+                            let _ = s.set_marker(
+                                lbl_name,
+                                lbl_addr,
+                                Some(&format!(
+                                    "Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})"
+                                )),
+                            );
                         }
                         // T-110/T-111: update the toggle cheat's cave info + flip enabled.
                         if let Some(cid) = cheat_id {
@@ -4224,10 +5242,13 @@ impl TrainlabMcpServer {
                 }
             }
             PendingKind::Undo { original_bytes } => {
-                match call_dll(&self.session, &Request::Write {
-                    address,
-                    data: original_bytes.clone(),
-                }) {
+                match crate::controller::request(
+                    &self.session,
+                    &Request::Write {
+                        address,
+                        data: original_bytes.clone(),
+                    },
+                ) {
                     Ok(Response::Write { bytes_written }) => {
                         let mut s = self
                             .session
@@ -4263,7 +5284,12 @@ impl TrainlabMcpServer {
                     Vec::new()
                 };
                 if !overlay_cheats.is_empty() {
-                    let _ = crate::controller::request(&self.session, &Request::SyncCheats { cheats: overlay_cheats });
+                    let _ = crate::controller::request(
+                        &self.session,
+                        &Request::SyncCheats {
+                            cheats: overlay_cheats,
+                        },
+                    );
                 }
                 // T-150/T-151: emit event + request repaint.
                 self.request_repaint();
@@ -4279,14 +5305,24 @@ impl TrainlabMcpServer {
     }
 
     /// Discard a previously staged (pending) mutation without applying it.
-    #[tool(description = "Discard a staged mutation (from 'write'/'install_cave'/'undo') by id without applying it.")]
+    #[tool(
+        description = "Discard a staged mutation (from 'write'/'install_cave'/'undo') by id without applying it."
+    )]
     pub(crate) fn reject_op(
         &self,
         Parameters(args): Parameters<OpConfirmArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_reject_op(&self.session, &ctx, trainlab_core::tools::OpConfirmArgs { id: args.id })
-            .map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_reject_op(
+            &self.session,
+            &ctx,
+            trainlab_core::tools::OpConfirmArgs { id: args.id },
+        )
+        .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -4294,9 +5330,15 @@ impl TrainlabMcpServer {
     }
 
     /// List all staged (pending) mutations awaiting confirmation.
-    #[tool(description = "List all staged (pending) mutations awaiting human confirmation, with their ids and previews.")]
+    #[tool(
+        description = "List all staged (pending) mutations awaiting human confirmation, with their ids and previews."
+    )]
     fn list_pending(&self) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
         let res = trainlab_core::tools::execute_list_pending(&self.session, &ctx)
             .map_err(|e| err(e.message))?;
 
@@ -4311,10 +5353,17 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<GetMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_get_marker(&self.session, &ctx, trainlab_core::tools::GetMarkerArgs {
-            label: args.label,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_get_marker(
+            &self.session,
+            &ctx,
+            trainlab_core::tools::GetMarkerArgs { label: args.label },
+        )
+        .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -4324,8 +5373,13 @@ impl TrainlabMcpServer {
     /// List all saved markers.
     #[tool(description = "List all markers saved in the session, sorted by label.")]
     fn list_markers(&self) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_list_markers(&self.session, &ctx).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_list_markers(&self.session, &ctx)
+            .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -4338,10 +5392,17 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<RemoveMarkerArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_remove_marker(&self.session, &ctx, trainlab_core::tools::RemoveMarkerArgs {
-            label: args.label,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_remove_marker(
+            &self.session,
+            &ctx,
+            trainlab_core::tools::RemoveMarkerArgs { label: args.label },
+        )
+        .map_err(|e| err(e.message))?;
 
         self.request_repaint();
         Ok(CallToolResult::success(vec![
@@ -4350,7 +5411,9 @@ impl TrainlabMcpServer {
     }
 
     /// Register or overwrite a named struct/object type definition in the session type catalog.
-    #[tool(description = "Register a named struct/class layout definition (type name + fields with offsets and value types) in the session type catalog. Once registered, use set_marker with kind='object' and struct_type='TypeName' to tag markers. Future dump_struct calls can reference the type by name.")]
+    #[tool(
+        description = "Register a named struct/class layout definition (type name + fields with offsets and value types) in the session type catalog. Once registered, use set_marker with kind='object' and struct_type='TypeName' to tag markers. Future dump_struct calls can reference the type by name."
+    )]
     fn register_struct_def(
         &self,
         Parameters(args): Parameters<RegisterStructDefArgs>,
@@ -4358,46 +5421,81 @@ impl TrainlabMcpServer {
         let def = trainlab_core::session::StructDef {
             name: args.name.clone(),
             size: args.size,
-            fields: args.fields.into_iter().map(|f| {
-                let vt = parse_value_type(&f.value_type).unwrap_or(trainlab_core::scan::ValueType::I32);
-                trainlab_core::session::StructField {
-                    label: f.label,
-                    offset_expr: f.offset_expr,
-                    value_type: vt,
-                }
-            }).collect(),
+            fields: args
+                .fields
+                .into_iter()
+                .map(|f| {
+                    let vt = parse_value_type(&f.value_type)
+                        .unwrap_or(trainlab_core::scan::ValueType::I32);
+                    trainlab_core::session::StructField {
+                        label: f.label,
+                        offset_expr: f.offset_expr,
+                        value_type: vt,
+                    }
+                })
+                .collect(),
             note: args.note,
         };
         let field_count = def.fields.len();
-        let size_str = def.size.map(|s| format!(" ({s:#x} bytes)")).unwrap_or_default();
+        let size_str = def
+            .size
+            .map(|s| format!(" ({s:#x} bytes)"))
+            .unwrap_or_default();
         self.session.lock().unwrap().register_struct_def(def);
         self.request_repaint();
         Ok(CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text(format!("registered struct type '{}'{size_str} with {field_count} field(s)", args.name)),
+            rmcp::model::ContentBlock::text(format!(
+                "registered struct type '{}'{size_str} with {field_count} field(s)",
+                args.name
+            )),
         ]))
     }
 
     /// List all registered struct definitions in the session type catalog.
-    #[tool(description = "List all named struct/object type definitions currently registered in the session type catalog.")]
+    #[tool(
+        description = "List all named struct/object type definitions currently registered in the session type catalog."
+    )]
     fn list_struct_defs(&self) -> Result<CallToolResult, ErrorData> {
         let s = self.session.lock().unwrap();
         let defs = s.list_struct_defs();
         if defs.is_empty() {
-            return Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text("no struct definitions registered")]));
+            return Ok(CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text("no struct definitions registered"),
+            ]));
         }
-        let lines: Vec<String> = defs.iter().map(|d| {
-            let size_str = d.size.map(|sz| format!(" ({sz:#x} bytes)")).unwrap_or_default();
-            let fields_str: Vec<String> = d.fields.iter().map(|f| {
-                format!("  +{}: {} ({:?})", f.offset_expr, f.label, f.value_type)
-            }).collect();
-            format!("{}{}:\n{}", d.name, size_str,
-                if fields_str.is_empty() { "  (no fields)".into() } else { fields_str.join("\n") })
-        }).collect();
-        Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(lines.join("\n\n"))]))
+        let lines: Vec<String> = defs
+            .iter()
+            .map(|d| {
+                let size_str = d
+                    .size
+                    .map(|sz| format!(" ({sz:#x} bytes)"))
+                    .unwrap_or_default();
+                let fields_str: Vec<String> = d
+                    .fields
+                    .iter()
+                    .map(|f| format!("  +{}: {} ({:?})", f.offset_expr, f.label, f.value_type))
+                    .collect();
+                format!(
+                    "{}{}:\n{}",
+                    d.name,
+                    size_str,
+                    if fields_str.is_empty() {
+                        "  (no fields)".into()
+                    } else {
+                        fields_str.join("\n")
+                    }
+                )
+            })
+            .collect();
+        Ok(CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text(lines.join("\n\n")),
+        ]))
     }
 
     /// Remove a named struct definition from the session type catalog.
-    #[tool(description = "Remove a named struct/object type definition from the session type catalog by type name.")]
+    #[tool(
+        description = "Remove a named struct/object type definition from the session type catalog by type name."
+    )]
     fn remove_struct_def(
         &self,
         Parameters(args): Parameters<RemoveStructDefArgs>,
@@ -4414,15 +5512,24 @@ impl TrainlabMcpServer {
     }
 
     /// Describe an undo entry (or the most recent one).
-    #[tool(description = "Inspect the undo log: a specific entry by id, or the most recent mutation.")]
+    #[tool(
+        description = "Inspect the undo log: a specific entry by id, or the most recent mutation."
+    )]
     fn undo_info(
         &self,
         Parameters(args): Parameters<UndoInfoArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let ctx = trainlab_core::session::ClientContext::new("mcp", trainlab_core::session::ClientKind::Mcp { agent_name: None }, self.session.lock().unwrap().event_bus());
-        let res = trainlab_core::tools::execute_undo_info(&self.session, &ctx, trainlab_core::tools::UndoInfoArgs {
-            id: args.id,
-        }).map_err(|e| err(e.message))?;
+        let ctx = trainlab_core::session::ClientContext::new(
+            "mcp",
+            trainlab_core::session::ClientKind::Mcp { agent_name: None },
+            self.session.lock().unwrap().event_bus(),
+        );
+        let res = trainlab_core::tools::execute_undo_info(
+            &self.session,
+            &ctx,
+            trainlab_core::tools::UndoInfoArgs { id: args.id },
+        )
+        .map_err(|e| err(e.message))?;
 
         Ok(CallToolResult::success(vec![
             rmcp::model::ContentBlock::text(res.message),
@@ -4488,7 +5595,7 @@ pub(crate) fn parse_addr_expr_with_mem(
     if input.starts_with('[') && input.ends_with(']') {
         let inner = &input[1..input.len() - 1].trim();
         let ptr_addr = parse_addr_expr_with_mem(session, inner, custom_mem)?;
-        
+
         // Read 8-byte pointer from game memory or custom mem
         let data = if let Some(mem) = custom_mem {
             mem.read(ptr_addr, 8).map_err(|e| {
@@ -4514,20 +5621,27 @@ pub(crate) fn parse_addr_expr_with_mem(
     }
 
     // 2. Try raw address string (0x hex or decimal)
-    if let Some(hex) = input.strip_prefix("0x").or_else(|| input.strip_prefix("0X")) {
+    if let Some(hex) = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"))
+    {
         if let Ok(a) = u64::from_str_radix(hex, 16) {
             return Ok(a);
         }
-    } else if let Ok(a) = input.parse::<u64>().or_else(|_| u64::from_str_radix(input, 16)) {
+    } else if let Ok(a) = input
+        .parse::<u64>()
+        .or_else(|_| u64::from_str_radix(input, 16))
+    {
         return Ok(a);
     }
 
     // 3. Try looking up in session markers (support optional '$' prefix like "$mycoolstring" or "mycoolstring")
     let marker_name = input.strip_prefix('$').unwrap_or(input);
     if let Ok(s) = session.lock()
-        && let Some(m) = s.get_marker(marker_name).or_else(|| s.get_marker(input)) {
-            return Ok(m.address);
-        }
+        && let Some(m) = s.get_marker(marker_name).or_else(|| s.get_marker(input))
+    {
+        return Ok(m.address);
+    }
 
     // 4. Try looking up as a loaded module base (e.g. "Unrailed2.exe" or "game.dll")
     if let Ok(base) = resolve_module_base(session, input) {
@@ -4546,17 +5660,30 @@ pub(crate) fn execute_profile_commands(
 ) -> Result<(), String> {
     for (idx, cmd) in cmds.iter().enumerate() {
         match cmd {
-            crate::profile::ProfileCommand::Write { address_ref, address, value, value_type, .. } => {
+            crate::profile::ProfileCommand::Write {
+                address_ref,
+                address,
+                value,
+                value_type,
+                ..
+            } => {
                 let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
                 let parsed_addr = parse_addr_expr(session, addr_str)
                     .map_err(|e| format!("cmd {idx}: bad address '{addr_str}': {e:?}"))?;
                 if parsed_addr == 0 {
-                    return Err(format!("cmd {idx}: write target '{addr_str}' resolved to 0x0; sequence aborted"));
+                    return Err(format!(
+                        "cmd {idx}: write target '{addr_str}' resolved to 0x0; sequence aborted"
+                    ));
                 }
 
                 let vt_str = value_type.as_deref().unwrap_or_else(|| {
                     let vt_trim = value.trim();
-                    if vt_trim.starts_with("0x") || vt_trim.starts_with("0X") || vt_trim.starts_with('$') || vt_trim.contains('+') || vt_trim.contains('-') {
+                    if vt_trim.starts_with("0x")
+                        || vt_trim.starts_with("0X")
+                        || vt_trim.starts_with('$')
+                        || vt_trim.contains('+')
+                        || vt_trim.contains('-')
+                    {
                         "ptr"
                     } else {
                         "i32"
@@ -4564,8 +5691,9 @@ pub(crate) fn execute_profile_commands(
                 });
                 let vt_lower = vt_str.trim().to_lowercase();
                 let (bytes, eval_val_str) = if vt_lower == "bytes" || vt_lower == "hex" {
-                    let parsed = parse_hex_bytes(&value)
-                        .map_err(|e| format!("cmd {idx}: failed to parse hex bytes '{value}': {e:?}"))?;
+                    let parsed = parse_hex_bytes(value).map_err(|e| {
+                        format!("cmd {idx}: failed to parse hex bytes '{value}': {e:?}")
+                    })?;
                     if parsed.is_empty() {
                         return Err(format!("cmd {idx}: empty hex bytes specified for write"));
                     }
@@ -4590,8 +5718,14 @@ pub(crate) fn execute_profile_commands(
                         match parse_addr_expr(session, value) {
                             Ok(val_addr) => format!("{val_addr:#x}"),
                             Err(e) => {
-                                if vt == trainlab_core::scan::ValueType::Ptr || val_trimmed.starts_with('$') || val_trimmed.starts_with('[') || val_trimmed.contains('+') {
-                                    return Err(format!("cmd {idx}: failed to resolve value address expression '{value}': {e:?}"));
+                                if vt == trainlab_core::scan::ValueType::Ptr
+                                    || val_trimmed.starts_with('$')
+                                    || val_trimmed.starts_with('[')
+                                    || val_trimmed.contains('+')
+                                {
+                                    return Err(format!(
+                                        "cmd {idx}: failed to resolve value address expression '{value}': {e:?}"
+                                    ));
                                 }
                                 value.clone()
                             }
@@ -4600,8 +5734,11 @@ pub(crate) fn execute_profile_commands(
                         value.clone()
                     };
 
-                    let parsed = parse_value_bytes(&eval_val_str, vt)
-                        .map_err(|e| format!("cmd {idx}: failed to parse value bytes for '{eval_val_str}': {e:?}"))?;
+                    let parsed = parse_value_bytes(&eval_val_str, vt).map_err(|e| {
+                        format!(
+                            "cmd {idx}: failed to parse value bytes for '{eval_val_str}': {e:?}"
+                        )
+                    })?;
                     (parsed, eval_val_str)
                 };
 
@@ -4613,8 +5750,14 @@ pub(crate) fn execute_profile_commands(
 
                 let resp = crate::controller::request(
                     session,
-                    &trainlab_core::protocol::Request::Write { address: parsed_addr, data: bytes.clone() },
-                ).map_err(|e| format!("cmd {idx}: write to {addr_str} ({parsed_addr:#x}) failed: {e}"))?;
+                    &trainlab_core::protocol::Request::Write {
+                        address: parsed_addr,
+                        data: bytes.clone(),
+                    },
+                )
+                .map_err(|e| {
+                    format!("cmd {idx}: write to {addr_str} ({parsed_addr:#x}) failed: {e}")
+                })?;
                 if let trainlab_core::protocol::Response::Error { message } = resp {
                     return Err(format!("cmd {idx}: write failed: {message}"));
                 }
@@ -4624,22 +5767,39 @@ pub(crate) fn execute_profile_commands(
                         s.record_undo(
                             parsed_addr,
                             original,
-                            format!("profile write {} byte(s) at {:#x}", bytes.len(), parsed_addr),
+                            format!(
+                                "profile write {} byte(s) at {:#x}",
+                                bytes.len(),
+                                parsed_addr
+                            ),
                         );
                     }
                     s.log_activity("PROFILE", format!("cmd {idx}: write '{eval_val_str}' ({vt_str}) to {addr_str} ({parsed_addr:#x}) -> ok"));
                 }
             }
-            crate::profile::ProfileCommand::InstallCave { target_ref, target, hook, jump, payload, asm, marker, .. } => {
+            crate::profile::ProfileCommand::InstallCave {
+                target_ref,
+                target,
+                hook,
+                jump,
+                payload,
+                asm,
+                marker,
+                ..
+            } => {
                 let tgt_str = target_ref.as_deref().or(target.as_deref()).unwrap_or("");
                 let target_addr = parse_addr_expr(session, tgt_str)
                     .map_err(|e| format!("cmd {idx}: bad target '{tgt_str}': {e:?}"))?;
                 if target_addr == 0 {
-                    return Err(format!("cmd {idx}: cave target '{tgt_str}' resolved to 0x0; sequence aborted"));
+                    return Err(format!(
+                        "cmd {idx}: cave target '{tgt_str}' resolved to 0x0; sequence aborted"
+                    ));
                 }
 
                 if asm.is_some() && !payload.trim().is_empty() {
-                    return Err(format!("cmd {idx}: cannot provide both 'asm' and 'payload' (mutually exclusive)"));
+                    return Err(format!(
+                        "cmd {idx}: cannot provide both 'asm' and 'payload' (mutually exclusive)"
+                    ));
                 }
 
                 let (payload_bytes, label_offsets) = if let Some(asm_src) = asm {
@@ -4650,13 +5810,24 @@ pub(crate) fn execute_profile_commands(
                             .map_err(|e| format!("cmd {idx}: {e}"))?;
                     }
                     let symbols: HashMap<String, u64> = {
-                        let s = session.lock().map_err(|_| format!("session lock poisoned"))?;
-                        s.list_markers().iter().map(|m| (m.label.clone(), m.address)).collect()
+                        let s = session
+                            .lock()
+                            .map_err(|_| "session lock poisoned".to_string())?;
+                        s.list_markers()
+                            .iter()
+                            .map(|m| (m.label.clone(), m.address))
+                            .collect()
                     };
                     let block = crate::asm::assemble_text(asm_src, target_addr, &symbols)
                         .map_err(|e| format!("cmd {idx}: asm compilation failed: {e}"))?;
                     if let Ok(mut s) = session.lock() {
-                        s.log_activity("PROFILE", format!("cmd {idx}: assembled {} byte(s) from asm", block.bytes.len()));
+                        s.log_activity(
+                            "PROFILE",
+                            format!(
+                                "cmd {idx}: assembled {} byte(s) from asm",
+                                block.bytes.len()
+                            ),
+                        );
                     }
                     (block.bytes, block.label_offsets)
                 } else {
@@ -4670,27 +5841,57 @@ pub(crate) fn execute_profile_commands(
                     _ => trainlab_core::cave_hook::JumpStyle::Absolute,
                 };
                 let cave_hook = match hook.as_str() {
-                    "override" => trainlab_core::cave_hook::CaveHook::Override { payload: payload_bytes, jump: jump_style },
-                    "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline { payload: payload_bytes, jump: jump_style },
-                    other => return Err(format!("cmd {idx}: unknown hook kind '{other}' (expected 'trampoline' or 'override')")),
+                    "override" => trainlab_core::cave_hook::CaveHook::Override {
+                        payload: payload_bytes,
+                        jump: jump_style,
+                    },
+                    "trampoline" => trainlab_core::cave_hook::CaveHook::Trampoline {
+                        payload: payload_bytes,
+                        jump: jump_style,
+                    },
+                    other => {
+                        return Err(format!(
+                            "cmd {idx}: unknown hook kind '{other}' (expected 'trampoline' or 'override')"
+                        ));
+                    }
                 };
 
                 let resp = crate::controller::request(
                     session,
-                    &trainlab_core::protocol::Request::InstallCave { target: target_addr, hook: cave_hook },
-                ).map_err(|e| format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed: {e}"))?;
+                    &trainlab_core::protocol::Request::InstallCave {
+                        target: target_addr,
+                        hook: cave_hook,
+                    },
+                )
+                .map_err(|e| {
+                    format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed: {e}")
+                })?;
 
                 match resp {
                     trainlab_core::protocol::Response::CaveInstalled { cave, original, .. } => {
                         if let Some(m) = marker
-                            && let Ok(mut s) = session.lock() {
-                                let _ = s.set_marker_full(m, cave, None, trainlab_core::session::MarkerKind::Code, None, Some(&format!("Cave for target {target_addr:#x}")));
-                            }
+                            && let Ok(mut s) = session.lock()
+                        {
+                            let _ = s.set_marker_full(
+                                m,
+                                cave,
+                                None,
+                                trainlab_core::session::MarkerKind::Code,
+                                None,
+                                Some(&format!("Cave for target {target_addr:#x}")),
+                            );
+                        }
                         if let Ok(mut s) = session.lock() {
                             // Auto-set markers for any labels defined in the assembly
                             for (lbl_name, offset) in &label_offsets {
                                 let lbl_addr = cave.saturating_add(*offset);
-                                let _ = s.set_marker(lbl_name, lbl_addr, Some(&format!("Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})")));
+                                let _ = s.set_marker(
+                                    lbl_name,
+                                    lbl_addr,
+                                    Some(&format!(
+                                        "Cave label '{lbl_name}' at +{offset:#x} (cave {cave:#x})"
+                                    )),
+                                );
                             }
                             // T-101: Record undo snapshot for profile-command cave installs.
                             if !original.is_empty() {
@@ -4703,78 +5904,163 @@ pub(crate) fn execute_profile_commands(
                             s.log_activity("PROFILE", format!("cmd {idx}: install cave at {tgt_str} ({target_addr:#x}) -> cave={cave:#x} ({} label(s) marked)", label_offsets.len()));
                         }
                     }
-                    trainlab_core::protocol::Response::Error { message } => return Err(format!("cmd {idx}: cave install failed: {message}")),
-                    _ => return Err(format!("cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed")),
+                    trainlab_core::protocol::Response::Error { message } => {
+                        return Err(format!("cmd {idx}: cave install failed: {message}"));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "cmd {idx}: cave install at {tgt_str} ({target_addr:#x}) failed"
+                        ));
+                    }
                 }
             }
-            crate::profile::ProfileCommand::AllocateString { content, path, size, fill_byte, string_kind, marker, .. } => {
-                let proc = game_process(session).map_err(|e| format!("cmd {idx}: allocate_string process access error: {e:?}"))?;
-                let ctx = trainlab_core::session::ClientContext::new("profile", trainlab_core::session::ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
-                let res = trainlab_core::tools::execute_allocate_string(session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateStringArgs {
-                    content: content.clone(),
-                    path: path.clone(),
-                    size: *size,
-                    fill_byte: *fill_byte,
-                    kind: string_kind.clone(),
-                    marker: marker.clone(),
-                }).map_err(|e| format!("cmd {idx}: allocate string failed: {}", e.message))?;
+            crate::profile::ProfileCommand::AllocateString {
+                content,
+                path,
+                size,
+                fill_byte,
+                string_kind,
+                marker,
+                ..
+            } => {
+                let proc = game_process(session).map_err(|e| {
+                    format!("cmd {idx}: allocate_string process access error: {e:?}")
+                })?;
+                let ctx = trainlab_core::session::ClientContext::new(
+                    "profile",
+                    trainlab_core::session::ClientKind::Mcp { agent_name: None },
+                    session.lock().unwrap().event_bus(),
+                );
+                let res = trainlab_core::tools::execute_allocate_string(
+                    session,
+                    &ctx,
+                    proc.as_ref(),
+                    trainlab_core::tools::AllocateStringArgs {
+                        content: content.clone(),
+                        path: path.clone(),
+                        size: *size,
+                        fill_byte: *fill_byte,
+                        kind: string_kind.clone(),
+                        marker: marker.clone(),
+                    },
+                )
+                .map_err(|e| format!("cmd {idx}: allocate string failed: {}", e.message))?;
                 if let Ok(mut s) = session.lock() {
-                    s.log_activity("PROFILE", format!("cmd {idx}: allocate string ({string_kind}) -> {}", res.message));
+                    s.log_activity(
+                        "PROFILE",
+                        format!(
+                            "cmd {idx}: allocate string ({string_kind}) -> {}",
+                            res.message
+                        ),
+                    );
                 }
             }
-            crate::profile::ProfileCommand::AllocateMemory { size, marker, fill_byte, permissions, .. } => {
-                let proc = game_process(session).map_err(|e| format!("cmd {idx}: allocate_memory process access error: {e:?}"))?;
-                let ctx = trainlab_core::session::ClientContext::new("profile", trainlab_core::session::ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
-                let res = trainlab_core::tools::execute_allocate_memory(session, &ctx, proc.as_ref(), trainlab_core::tools::AllocateMemoryArgs {
-                    size: *size,
-                    marker: marker.clone(),
-                    fill_byte: *fill_byte,
-                    permissions: permissions.clone(),
-                }).map_err(|e| format!("cmd {idx}: allocate memory failed: {}", e.message))?;
+            crate::profile::ProfileCommand::AllocateMemory {
+                size,
+                marker,
+                fill_byte,
+                permissions,
+                ..
+            } => {
+                let proc = game_process(session).map_err(|e| {
+                    format!("cmd {idx}: allocate_memory process access error: {e:?}")
+                })?;
+                let ctx = trainlab_core::session::ClientContext::new(
+                    "profile",
+                    trainlab_core::session::ClientKind::Mcp { agent_name: None },
+                    session.lock().unwrap().event_bus(),
+                );
+                let res = trainlab_core::tools::execute_allocate_memory(
+                    session,
+                    &ctx,
+                    proc.as_ref(),
+                    trainlab_core::tools::AllocateMemoryArgs {
+                        size: *size,
+                        marker: marker.clone(),
+                        fill_byte: *fill_byte,
+                        permissions: permissions.clone(),
+                    },
+                )
+                .map_err(|e| format!("cmd {idx}: allocate memory failed: {}", e.message))?;
                 if let Ok(mut s) = session.lock() {
-                    s.log_activity("PROFILE", format!("cmd {idx}: allocate memory ({size} bytes) -> {}", res.message));
+                    s.log_activity(
+                        "PROFILE",
+                        format!(
+                            "cmd {idx}: allocate memory ({size} bytes) -> {}",
+                            res.message
+                        ),
+                    );
                 }
             }
             crate::profile::ProfileCommand::FreeMemory { address, size, .. } => {
-                let proc = game_process(session).map_err(|e| format!("cmd {idx}: free_memory process access error: {e:?}"))?;
-                let ctx = trainlab_core::session::ClientContext::new("profile", trainlab_core::session::ClientKind::Mcp { agent_name: None }, session.lock().unwrap().event_bus());
-                let res = trainlab_core::tools::execute_free_memory(session, &ctx, proc.as_ref(), trainlab_core::tools::FreeMemoryArgs {
-                    address: address.clone(),
-                    size: *size,
-                }).map_err(|e| format!("cmd {idx}: free memory failed: {}", e.message))?;
+                let proc = game_process(session)
+                    .map_err(|e| format!("cmd {idx}: free_memory process access error: {e:?}"))?;
+                let ctx = trainlab_core::session::ClientContext::new(
+                    "profile",
+                    trainlab_core::session::ClientKind::Mcp { agent_name: None },
+                    session.lock().unwrap().event_bus(),
+                );
+                let res = trainlab_core::tools::execute_free_memory(
+                    session,
+                    &ctx,
+                    proc.as_ref(),
+                    trainlab_core::tools::FreeMemoryArgs {
+                        address: address.clone(),
+                        size: *size,
+                    },
+                )
+                .map_err(|e| format!("cmd {idx}: free memory failed: {}", e.message))?;
                 if let Ok(mut s) = session.lock() {
-                    s.log_activity("PROFILE", format!("cmd {idx}: free memory -> {}", res.message));
+                    s.log_activity(
+                        "PROFILE",
+                        format!("cmd {idx}: free memory -> {}", res.message),
+                    );
                 }
             }
-            crate::profile::ProfileCommand::AobScan { marker, pattern, offset, region, .. } => {
+            crate::profile::ProfileCommand::AobScan {
+                marker,
+                pattern,
+                offset,
+                region,
+                ..
+            } => {
                 let parsed_pat = trainlab_core::aob::parse(pattern);
                 if parsed_pat.is_empty() {
                     return Err(format!("cmd {idx}: empty AOB pattern '{pattern}'"));
                 }
-                let proc = game_process(session).map_err(|e| format!("cmd {idx}: AOB scan process access error: {e:?}"))?;
-                let all_regions = proc.regions().map_err(|e| format!("cmd {idx}: AOB scan list regions error: {e}"))?;
+                let proc = game_process(session)
+                    .map_err(|e| format!("cmd {idx}: AOB scan process access error: {e:?}"))?;
+                let all_regions = proc
+                    .regions()
+                    .map_err(|e| format!("cmd {idx}: AOB scan list regions error: {e}"))?;
 
                 let regions = if let Some(r_name) = region {
                     let (r_start, r_end) = {
-                        let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+                        let s = session
+                            .lock()
+                            .map_err(|_| "session lock poisoned".to_string())?;
                         if let Some(m) = s.get_marker(r_name) {
                             let end = m.end_address().unwrap_or(m.address.saturating_add(0x1000));
                             (m.address, end)
                         } else {
                             drop(s);
-                            let start = parse_addr_expr(session, r_name).map_err(|e| e.to_string())?;
+                            let start =
+                                parse_addr_expr(session, r_name).map_err(|e| e.to_string())?;
                             (start, start.saturating_add(0x1000))
                         }
                     };
-                    all_regions.into_iter().filter_map(|mut r| {
-                        if r.end <= r_start || r.start >= r_end {
-                            None
-                        } else {
-                            r.start = r.start.max(r_start);
-                            r.end = r.end.min(r_end);
-                            Some(r)
-                        }
-                    }).collect()
+                    all_regions
+                        .into_iter()
+                        .filter_map(|mut r| {
+                            if r.end <= r_start || r.start >= r_end {
+                                None
+                            } else {
+                                r.start = r.start.max(r_start);
+                                r.end = r.end.min(r_end);
+                                Some(r)
+                            }
+                        })
+                        .collect()
                 } else {
                     all_regions
                 };
@@ -4789,43 +6075,53 @@ pub(crate) fn execute_profile_commands(
                         continue;
                     }
                     if let Ok(buf) = proc.read(r.start, len)
-                        && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_pat).first() {
-                            first_match = Some(r.start + *off as u64);
-                            break;
-                        }
+                        && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_pat).first()
+                    {
+                        first_match = Some(r.start + *off as u64);
+                        break;
+                    }
                 }
 
                 // Fallback: If AOB pattern had 0 matches and original_bytes was recorded,
                 // attempt exact search for the pristine original bytes to relocate the hook site after game updates.
                 if first_match.is_none()
-                    && let crate::profile::ProfileCommand::AobScan { original_bytes: Some(orig_hex), .. } = &cmd {
-                        if let Ok(orig_pat) = parse_hex_bytes(orig_hex)
-                            && !orig_pat.is_empty() {
-                                let parsed_orig: Vec<Option<u8>> = orig_pat.into_iter().map(Some).collect();
-                                for r in &regions {
-                                    if !r.readable {
-                                        continue;
-                                    }
-                                    let len = (r.end - r.start) as usize;
-                                    if len < parsed_orig.len() {
-                                        continue;
-                                    }
-                                    if let Ok(buf) = proc.read(r.start, len)
-                                        && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_orig).first() {
-                                            first_match = Some(r.start + *off as u64);
-                                            if let Ok(mut s) = session.lock() {
-                                                s.log_activity("PROFILE", format!("cmd {idx}: AOB pattern failed, but relocated hook site via original_bytes at {:#x}", r.start + *off as u64));
-                                            }
-                                            break;
-                                        }
-                                }
+                    && let crate::profile::ProfileCommand::AobScan {
+                        original_bytes: Some(orig_hex),
+                        ..
+                    } = &cmd
+                    && let Ok(orig_pat) = parse_hex_bytes(orig_hex)
+                    && !orig_pat.is_empty()
+                {
+                    let parsed_orig: Vec<Option<u8>> = orig_pat.into_iter().map(Some).collect();
+                    for r in &regions {
+                        if !r.readable {
+                            continue;
+                        }
+                        let len = (r.end - r.start) as usize;
+                        if len < parsed_orig.len() {
+                            continue;
+                        }
+                        if let Ok(buf) = proc.read(r.start, len)
+                            && let Some(off) =
+                                trainlab_core::aob::find_all(&buf, &parsed_orig).first()
+                        {
+                            first_match = Some(r.start + *off as u64);
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity("PROFILE", format!("cmd {idx}: AOB pattern failed, but relocated hook site via original_bytes at {:#x}", r.start + *off as u64));
                             }
+                            break;
+                        }
                     }
+                }
 
                 if let Some(match_addr) = first_match {
                     let final_addr = (match_addr as i64 + offset.unwrap_or(0)) as u64;
                     if let Ok(mut s) = session.lock() {
-                        let _ = s.set_marker(marker, final_addr, Some(&format!("AOB match for pattern '{pattern}'")));
+                        let _ = s.set_marker(
+                            marker,
+                            final_addr,
+                            Some(&format!("AOB match for pattern '{pattern}'")),
+                        );
                     }
                     if let Ok(mut s) = session.lock() {
                         s.log_activity("PROFILE", format!("cmd {idx}: external AOB scan found match at {final_addr:#x} -> saved marker '${marker}'"));
@@ -4842,27 +6138,45 @@ pub(crate) fn execute_profile_commands(
                             s.log_activity("PROFILE", format!("cmd {idx}: AOB pattern '{pattern}' already patched/hooked; reusing existing marker '${marker}' = {addr:#x}"));
                         }
                     } else {
-                        return Err(format!("cmd {idx}: AOB scan '{pattern}' found 0 matches; sequence aborted"));
+                        return Err(format!(
+                            "cmd {idx}: AOB scan '{pattern}' found 0 matches; sequence aborted"
+                        ));
                     }
                 }
             }
-            crate::profile::ProfileCommand::PointerChase { marker, base, offsets, .. } => {
+            crate::profile::ProfileCommand::PointerChase {
+                marker,
+                base,
+                offsets,
+                ..
+            } => {
                 let mut curr_addr = parse_addr_expr(session, base)
                     .map_err(|e| format!("cmd {idx}: bad base '{base}': {e:?}"))?;
                 // Detect Object-kind markers: skip the initial dereference — the base IS the object.
                 let base_is_object = {
                     let raw = base.trim().trim_start_matches('$');
-                    session.lock().ok()
-                        .and_then(|s| s.get_marker(raw).map(|m| m.kind == trainlab_core::session::MarkerKind::Object))
+                    session
+                        .lock()
+                        .ok()
+                        .and_then(|s| {
+                            s.get_marker(raw)
+                                .map(|m| m.kind == trainlab_core::session::MarkerKind::Object)
+                        })
                         .unwrap_or(false)
                 };
                 // T-131: Parse offsets strictly — error on malformed offsets instead of silently dropping them.
-                let parsed_offs: Vec<u64> = offsets.iter().map(|o| {
-                    let clean = o.trim_start_matches('+').trim();
-                    let hex_str = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")).unwrap_or(clean);
-                    u64::from_str_radix(hex_str, 16)
-                        .map_err(|e| format!("cmd {idx}: bad pointer chase offset '{o}': {e}"))
-                }).collect::<Result<Vec<_>, _>>()?;
+                let parsed_offs: Vec<u64> = offsets
+                    .iter()
+                    .map(|o| {
+                        let clean = o.trim_start_matches('+').trim();
+                        let hex_str = clean
+                            .strip_prefix("0x")
+                            .or_else(|| clean.strip_prefix("0X"))
+                            .unwrap_or(clean);
+                        u64::from_str_radix(hex_str, 16)
+                            .map_err(|e| format!("cmd {idx}: bad pointer chase offset '{o}': {e}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
 
                 if base_is_object {
                     // Object mode: base IS the struct; no initial dereference of base.
@@ -4883,24 +6197,46 @@ pub(crate) fn execute_profile_commands(
                                 curr_addr = u64::from_le_bytes(data.try_into().unwrap());
                             }
                             trainlab_core::protocol::Response::Error { message } => {
-                                return Err(format!("cmd {idx}: pointer chase object-mode read error at {first_read_addr:#x}: {message}"));
+                                return Err(format!(
+                                    "cmd {idx}: pointer chase object-mode read error at {first_read_addr:#x}: {message}"
+                                ));
                             }
-                            _ => return Err(format!("cmd {idx}: pointer chase object-mode short read at {first_read_addr:#x}")),
+                            _ => {
+                                return Err(format!(
+                                    "cmd {idx}: pointer chase object-mode short read at {first_read_addr:#x}"
+                                ));
+                            }
                         }
                         for off in &parsed_offs[1..] {
                             let read_res = crate::controller::request(
                                 session,
-                                &trainlab_core::protocol::Request::Read { address: curr_addr, len: 8 },
-                            ).map_err(|e| format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}: {e}"))?;
+                                &trainlab_core::protocol::Request::Read {
+                                    address: curr_addr,
+                                    len: 8,
+                                },
+                            )
+                            .map_err(|e| {
+                                format!(
+                                    "cmd {idx}: pointer chase read failed at {curr_addr:#x}: {e}"
+                                )
+                            })?;
                             match read_res {
-                                trainlab_core::protocol::Response::Read { data } if data.len() == 8 => {
+                                trainlab_core::protocol::Response::Read { data }
+                                    if data.len() == 8 =>
+                                {
                                     let ptr = u64::from_le_bytes(data.try_into().unwrap());
                                     curr_addr = ptr.wrapping_add(*off);
                                 }
                                 trainlab_core::protocol::Response::Error { message } => {
-                                    return Err(format!("cmd {idx}: pointer chase read error at {curr_addr:#x}: {message}"));
+                                    return Err(format!(
+                                        "cmd {idx}: pointer chase read error at {curr_addr:#x}: {message}"
+                                    ));
                                 }
-                                _ => return Err(format!("cmd {idx}: pointer chase short read at {curr_addr:#x}")),
+                                _ => {
+                                    return Err(format!(
+                                        "cmd {idx}: pointer chase short read at {curr_addr:#x}"
+                                    ));
+                                }
                             }
                         }
                     }
@@ -4908,31 +6244,58 @@ pub(crate) fn execute_profile_commands(
                     for off in &parsed_offs {
                         let read_res = crate::controller::request(
                             session,
-                            &trainlab_core::protocol::Request::Read { address: curr_addr, len: 8 },
-                        ).map_err(|e| format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}: {e}"))?;
+                            &trainlab_core::protocol::Request::Read {
+                                address: curr_addr,
+                                len: 8,
+                            },
+                        )
+                        .map_err(|e| {
+                            format!("cmd {idx}: pointer chase read failed at {curr_addr:#x}: {e}")
+                        })?;
                         match read_res {
                             trainlab_core::protocol::Response::Read { data } if data.len() == 8 => {
                                 let ptr = u64::from_le_bytes(data.try_into().unwrap());
                                 curr_addr = ptr.wrapping_add(*off);
                             }
                             trainlab_core::protocol::Response::Error { message } => {
-                                return Err(format!("cmd {idx}: pointer chase read error at {curr_addr:#x}: {message}"));
+                                return Err(format!(
+                                    "cmd {idx}: pointer chase read error at {curr_addr:#x}: {message}"
+                                ));
                             }
-                            _ => return Err(format!("cmd {idx}: pointer chase short read or unexpected response at {curr_addr:#x}")),
+                            _ => {
+                                return Err(format!(
+                                    "cmd {idx}: pointer chase short read or unexpected response at {curr_addr:#x}"
+                                ));
+                            }
                         }
                     }
                 }
                 if let Ok(mut s) = session.lock() {
-                    let _ = s.set_marker(marker, curr_addr, Some(&format!("Pointer chase base '{base}' offsets {:?}", offsets)));
+                    let _ = s.set_marker(
+                        marker,
+                        curr_addr,
+                        Some(&format!(
+                            "Pointer chase base '{base}' offsets {:?}",
+                            offsets
+                        )),
+                    );
                     s.log_activity("PROFILE", format!("cmd {idx}: pointer chase -> target {curr_addr:#x} saved marker '${marker}'"));
                 }
             }
-            crate::profile::ProfileCommand::Assert { address_ref, address, expected, value_type, .. } => {
+            crate::profile::ProfileCommand::Assert {
+                address_ref,
+                address,
+                expected,
+                value_type,
+                ..
+            } => {
                 let addr_str = address_ref.as_deref().or(address.as_deref()).unwrap_or("");
                 let target_addr = parse_addr_expr(session, addr_str)
                     .map_err(|e| format!("cmd {idx}: assert bad target '{addr_str}': {e:?}"))?;
                 if target_addr == 0 {
-                    return Err(format!("cmd {idx}: assert failed — target address '{addr_str}' is 0x0"));
+                    return Err(format!(
+                        "cmd {idx}: assert failed — target address '{addr_str}' is 0x0"
+                    ));
                 }
 
                 let vt_str = value_type.as_deref().unwrap_or("i32");
@@ -4943,47 +6306,82 @@ pub(crate) fn execute_profile_commands(
                     let expected_bytes = parse_hex_bytes(exp_clean)
                         .map_err(|e| format!("cmd {idx}: assert failed to parse expected hex bytes '{exp_clean}': {e:?}"))?;
                     if expected_bytes.is_empty() {
-                        return Err(format!("cmd {idx}: assert failed — expected hex bytes cannot be empty"));
+                        return Err(format!(
+                            "cmd {idx}: assert failed — expected hex bytes cannot be empty"
+                        ));
                     }
 
                     let read_len = expected_bytes.len();
                     let read_res = crate::controller::request(
                         session,
-                        &trainlab_core::protocol::Request::Read { address: target_addr, len: read_len },
-                    ).map_err(|e| format!("cmd {idx}: assert read memory failed: {e}"))?;
+                        &trainlab_core::protocol::Request::Read {
+                            address: target_addr,
+                            len: read_len,
+                        },
+                    )
+                    .map_err(|e| format!("cmd {idx}: assert read memory failed: {e}"))?;
 
                     match read_res {
-                        trainlab_core::protocol::Response::Read { data } if data.len() == read_len => {
+                        trainlab_core::protocol::Response::Read { data }
+                            if data.len() == read_len =>
+                        {
                             if data != expected_bytes {
-                                let got_hex = data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
-                                let exp_hex = expected_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                                let got_hex = data
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                let exp_hex = expected_bytes
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
                                 return Err(format!(
                                     "cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) == {got_hex} (expected {exp_hex})"
                                 ));
                             }
                             if let Ok(mut s) = session.lock() {
-                                let exp_hex = expected_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                                let exp_hex = expected_bytes
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
                                 s.log_activity("PROFILE", format!("cmd {idx}: assert {exp_hex} (bytes) @ {addr_str} ({target_addr:#x}) passed"));
                             }
                         }
-                        _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
+                        _ => {
+                            return Err(format!(
+                                "cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})"
+                            ));
+                        }
                     }
                 } else {
-                    let vt = parse_value_type(vt_str)
-                        .map_err(|e| format!("cmd {idx}: assert bad value_type '{vt_str}': {e:?}"))?;
+                    let vt = parse_value_type(vt_str).map_err(|e| {
+                        format!("cmd {idx}: assert bad value_type '{vt_str}': {e:?}")
+                    })?;
                     let read_len = vt.size();
 
                     let read_res = crate::controller::request(
                         session,
-                        &trainlab_core::protocol::Request::Read { address: target_addr, len: read_len },
-                    ).map_err(|e| format!("cmd {idx}: assert read memory failed: {e}"))?;
+                        &trainlab_core::protocol::Request::Read {
+                            address: target_addr,
+                            len: read_len,
+                        },
+                    )
+                    .map_err(|e| format!("cmd {idx}: assert read memory failed: {e}"))?;
 
                     match read_res {
-                        trainlab_core::protocol::Response::Read { data } if data.len() == read_len => {
+                        trainlab_core::protocol::Response::Read { data }
+                            if data.len() == read_len =>
+                        {
                             let exp_clean = expected.trim();
                             let got_val_str = crate::format_value(&data, vt);
 
-                            if exp_clean == "!0" || exp_clean == "!0x0" || exp_clean == "!0X0" || exp_clean == "!null" {
+                            if exp_clean == "!0"
+                                || exp_clean == "!0x0"
+                                || exp_clean == "!0X0"
+                                || exp_clean == "!null"
+                            {
                                 let val_u64 = match data.len() {
                                     1 => data[0] as u64,
                                     2 => u16::from_le_bytes(data[..2].try_into().unwrap()) as u64,
@@ -4992,7 +6390,9 @@ pub(crate) fn execute_profile_commands(
                                     _ => 0,
                                 };
                                 if val_u64 == 0 {
-                                    return Err(format!("cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) is 0x0 (expected non-null)"));
+                                    return Err(format!(
+                                        "cmd {idx}: assert failed — memory @ {addr_str} ({target_addr:#x}) is 0x0 (expected non-null)"
+                                    ));
                                 }
                                 if let Ok(mut s) = session.lock() {
                                     s.log_activity("PROFILE", format!("cmd {idx}: assert non-null @ {addr_str} ({target_addr:#x}) passed ({val_u64:#x})"));
@@ -5028,19 +6428,39 @@ pub(crate) fn execute_profile_commands(
                                 }
                             }
                         }
-                        _ => return Err(format!("cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})")),
+                        _ => {
+                            return Err(format!(
+                                "cmd {idx}: assert read memory failed @ {addr_str} ({target_addr:#x})"
+                            ));
+                        }
                     }
                 }
             }
-            crate::profile::ProfileCommand::SetMarker { marker, address, .. } => {
-                let parsed_addr = parse_addr_expr(session, address)
-                    .map_err(|e| format!("cmd {idx}: bad address expression '{address}' for marker '{marker}': {e:?}"))?;
+            crate::profile::ProfileCommand::SetMarker {
+                marker, address, ..
+            } => {
+                let parsed_addr = parse_addr_expr(session, address).map_err(|e| {
+                    format!(
+                        "cmd {idx}: bad address expression '{address}' for marker '{marker}': {e:?}"
+                    )
+                })?;
                 if parsed_addr == 0 {
-                    return Err(format!("cmd {idx}: marker '{marker}' address expression '{address}' resolved to 0x0; sequence aborted"));
+                    return Err(format!(
+                        "cmd {idx}: marker '{marker}' address expression '{address}' resolved to 0x0; sequence aborted"
+                    ));
                 }
                 if let Ok(mut s) = session.lock() {
-                    let _ = s.set_marker(marker, parsed_addr, Some(&format!("Profile set_marker '{address}'")));
-                    s.log_activity("PROFILE", format!("cmd {idx}: set_marker '{marker}' = {parsed_addr:#x} (from '{address}')"));
+                    let _ = s.set_marker(
+                        marker,
+                        parsed_addr,
+                        Some(&format!("Profile set_marker '{address}'")),
+                    );
+                    s.log_activity(
+                        "PROFILE",
+                        format!(
+                            "cmd {idx}: set_marker '{marker}' = {parsed_addr:#x} (from '{address}')"
+                        ),
+                    );
                 }
             }
             crate::profile::ProfileCommand::Wait { ms, .. } => {
@@ -5052,7 +6472,14 @@ pub(crate) fn execute_profile_commands(
                     s.log_activity("PROFILE", format!("cmd {idx}: wait {ms}ms complete"));
                 }
             }
-            crate::profile::ProfileCommand::WriteCopy { src, dst, value_type, addend_ref, op, .. } => {
+            crate::profile::ProfileCommand::WriteCopy {
+                src,
+                dst,
+                value_type,
+                addend_ref,
+                op,
+                ..
+            } => {
                 let vt_str = value_type.as_deref().unwrap_or("f32");
                 let vt = parse_value_type(vt_str)
                     .map_err(|e| format!("cmd {idx}: invalid value type '{vt_str}': {e}"))?;
@@ -5060,13 +6487,17 @@ pub(crate) fn execute_profile_commands(
                 let src_addr = parse_addr_expr(session, src)
                     .map_err(|e| format!("cmd {idx}: bad src '{src}': {e}"))?;
                 if src_addr == 0 {
-                    return Err(format!("cmd {idx}: src '{src}' resolved to 0x0; sequence aborted"));
+                    return Err(format!(
+                        "cmd {idx}: src '{src}' resolved to 0x0; sequence aborted"
+                    ));
                 }
 
                 let dst_addr = parse_addr_expr(session, dst)
                     .map_err(|e| format!("cmd {idx}: bad dst '{dst}': {e}"))?;
                 if dst_addr == 0 {
-                    return Err(format!("cmd {idx}: dst '{dst}' resolved to 0x0; sequence aborted"));
+                    return Err(format!(
+                        "cmd {idx}: dst '{dst}' resolved to 0x0; sequence aborted"
+                    ));
                 }
 
                 let size = vt.size();
@@ -5074,15 +6505,25 @@ pub(crate) fn execute_profile_commands(
                 // Read src value
                 let src_resp = crate::controller::request(
                     session,
-                    &trainlab_core::protocol::Request::Read { address: src_addr, len: size },
-                ).map_err(|e| format!("cmd {idx}: read src at {src} ({src_addr:#x}) failed: {e}"))?;
+                    &trainlab_core::protocol::Request::Read {
+                        address: src_addr,
+                        len: size,
+                    },
+                )
+                .map_err(|e| format!("cmd {idx}: read src at {src} ({src_addr:#x}) failed: {e}"))?;
 
                 let src_bytes = match src_resp {
                     trainlab_core::protocol::Response::Read { data } if data.len() == size => data,
                     trainlab_core::protocol::Response::Error { message } => {
-                        return Err(format!("cmd {idx}: read src failed at {src} ({src_addr:#x}): {message}"));
+                        return Err(format!(
+                            "cmd {idx}: read src failed at {src} ({src_addr:#x}): {message}"
+                        ));
                     }
-                    _ => return Err(format!("cmd {idx}: short read on src at {src} ({src_addr:#x})")),
+                    _ => {
+                        return Err(format!(
+                            "cmd {idx}: short read on src at {src} ({src_addr:#x})"
+                        ));
+                    }
                 };
 
                 // Compute final bytes, applying optional addend
@@ -5090,20 +6531,36 @@ pub(crate) fn execute_profile_commands(
                     let add_addr = parse_addr_expr(session, add_expr)
                         .map_err(|e| format!("cmd {idx}: bad addend_ref '{add_expr}': {e}"))?;
                     if add_addr == 0 {
-                        return Err(format!("cmd {idx}: addend_ref '{add_expr}' resolved to 0x0; sequence aborted"));
+                        return Err(format!(
+                            "cmd {idx}: addend_ref '{add_expr}' resolved to 0x0; sequence aborted"
+                        ));
                     }
 
                     let add_resp = crate::controller::request(
                         session,
-                        &trainlab_core::protocol::Request::Read { address: add_addr, len: size },
-                    ).map_err(|e| format!("cmd {idx}: read addend at {add_expr} ({add_addr:#x}) failed: {e}"))?;
+                        &trainlab_core::protocol::Request::Read {
+                            address: add_addr,
+                            len: size,
+                        },
+                    )
+                    .map_err(|e| {
+                        format!("cmd {idx}: read addend at {add_expr} ({add_addr:#x}) failed: {e}")
+                    })?;
 
                     let add_bytes = match add_resp {
-                        trainlab_core::protocol::Response::Read { data } if data.len() == size => data,
-                        trainlab_core::protocol::Response::Error { message } => {
-                            return Err(format!("cmd {idx}: read addend failed at {add_expr} ({add_addr:#x}): {message}"));
+                        trainlab_core::protocol::Response::Read { data } if data.len() == size => {
+                            data
                         }
-                        _ => return Err(format!("cmd {idx}: short read on addend at {add_expr} ({add_addr:#x})")),
+                        trainlab_core::protocol::Response::Error { message } => {
+                            return Err(format!(
+                                "cmd {idx}: read addend failed at {add_expr} ({add_addr:#x}): {message}"
+                            ));
+                        }
+                        _ => {
+                            return Err(format!(
+                                "cmd {idx}: short read on addend at {add_expr} ({add_addr:#x})"
+                            ));
+                        }
                     };
 
                     match vt {
@@ -5132,7 +6589,8 @@ pub(crate) fn execute_profile_commands(
                             let a = i64::from_le_bytes(add_bytes.as_slice().try_into().unwrap());
                             s.wrapping_add(a).to_le_bytes().to_vec()
                         }
-                        trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => {
+                        trainlab_core::scan::ValueType::U64
+                        | trainlab_core::scan::ValueType::Ptr => {
                             let s = u64::from_le_bytes(src_bytes.as_slice().try_into().unwrap());
                             let a = u64::from_le_bytes(add_bytes.as_slice().try_into().unwrap());
                             s.wrapping_add(a).to_le_bytes().to_vec()
@@ -5145,8 +6603,12 @@ pub(crate) fn execute_profile_commands(
                 // Read destination if op == "max" or for undo snapshot
                 let dst_resp = crate::controller::request(
                     session,
-                    &trainlab_core::protocol::Request::Read { address: dst_addr, len: size },
-                ).map_err(|e| format!("cmd {idx}: read dst at {dst} ({dst_addr:#x}) failed: {e}"))?;
+                    &trainlab_core::protocol::Request::Read {
+                        address: dst_addr,
+                        len: size,
+                    },
+                )
+                .map_err(|e| format!("cmd {idx}: read dst at {dst} ({dst_addr:#x}) failed: {e}"))?;
 
                 let (dst_bytes, original) = match dst_resp {
                     trainlab_core::protocol::Response::Read { data } if data.len() == size => {
@@ -5160,7 +6622,9 @@ pub(crate) fn execute_profile_commands(
                     if let Some(cur) = dst_bytes {
                         match vt {
                             trainlab_core::scan::ValueType::F32 => {
-                                let c = f32::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let c = f32::from_le_bytes(
+                                    computed_bytes.as_slice().try_into().unwrap(),
+                                );
                                 let d = f32::from_le_bytes(cur.as_slice().try_into().unwrap());
                                 if d >= c {
                                     if let Ok(mut s) = session.lock() {
@@ -5171,7 +6635,9 @@ pub(crate) fn execute_profile_commands(
                                 c.max(d).to_le_bytes().to_vec()
                             }
                             trainlab_core::scan::ValueType::F64 => {
-                                let c = f64::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let c = f64::from_le_bytes(
+                                    computed_bytes.as_slice().try_into().unwrap(),
+                                );
                                 let d = f64::from_le_bytes(cur.as_slice().try_into().unwrap());
                                 if d >= c {
                                     if let Ok(mut s) = session.lock() {
@@ -5182,7 +6648,9 @@ pub(crate) fn execute_profile_commands(
                                 c.max(d).to_le_bytes().to_vec()
                             }
                             trainlab_core::scan::ValueType::I32 => {
-                                let c = i32::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let c = i32::from_le_bytes(
+                                    computed_bytes.as_slice().try_into().unwrap(),
+                                );
                                 let d = i32::from_le_bytes(cur.as_slice().try_into().unwrap());
                                 if d >= c {
                                     return Ok(());
@@ -5190,7 +6658,9 @@ pub(crate) fn execute_profile_commands(
                                 c.max(d).to_le_bytes().to_vec()
                             }
                             trainlab_core::scan::ValueType::U32 => {
-                                let c = u32::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let c = u32::from_le_bytes(
+                                    computed_bytes.as_slice().try_into().unwrap(),
+                                );
                                 let d = u32::from_le_bytes(cur.as_slice().try_into().unwrap());
                                 if d >= c {
                                     return Ok(());
@@ -5198,15 +6668,20 @@ pub(crate) fn execute_profile_commands(
                                 c.max(d).to_le_bytes().to_vec()
                             }
                             trainlab_core::scan::ValueType::I64 => {
-                                let c = i64::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                                let c = i64::from_le_bytes(
+                                    computed_bytes.as_slice().try_into().unwrap(),
+                                );
                                 let d = i64::from_le_bytes(cur.as_slice().try_into().unwrap());
                                 if d >= c {
                                     return Ok(());
                                 }
                                 c.max(d).to_le_bytes().to_vec()
                             }
-                            trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => {
-                                let c = u64::from_le_bytes(computed_bytes.as_slice().try_into().unwrap());
+                            trainlab_core::scan::ValueType::U64
+                            | trainlab_core::scan::ValueType::Ptr => {
+                                let c = u64::from_le_bytes(
+                                    computed_bytes.as_slice().try_into().unwrap(),
+                                );
                                 let d = u64::from_le_bytes(cur.as_slice().try_into().unwrap());
                                 if d >= c {
                                     return Ok(());
@@ -5223,8 +6698,12 @@ pub(crate) fn execute_profile_commands(
 
                 let resp = crate::controller::request(
                     session,
-                    &trainlab_core::protocol::Request::Write { address: dst_addr, data: bytes_to_write.clone() },
-                ).map_err(|e| format!("cmd {idx}: write to {dst} ({dst_addr:#x}) failed: {e}"))?;
+                    &trainlab_core::protocol::Request::Write {
+                        address: dst_addr,
+                        data: bytes_to_write.clone(),
+                    },
+                )
+                .map_err(|e| format!("cmd {idx}: write to {dst} ({dst_addr:#x}) failed: {e}"))?;
 
                 if let trainlab_core::protocol::Response::Error { message } = resp {
                     return Err(format!("cmd {idx}: write failed: {message}"));
@@ -5248,22 +6727,34 @@ pub(crate) fn execute_profile_commands(
 }
 
 /// Allocate string memory in target game process and write bytes.
-pub(crate) fn allocate_string_in_game(session: &SharedSession, content: &str, kind: &str) -> Result<(u64, usize), String> {
+pub(crate) fn allocate_string_in_game(
+    session: &SharedSession,
+    content: &str,
+    kind: &str,
+) -> Result<(u64, usize), String> {
     let mut bytes = content.as_bytes().to_vec();
     let kind_lower = kind.trim().to_lowercase();
-    let is_c_like = matches!(kind_lower.as_str(), "c" | "json" | "yaml" | "xml" | "js" | "config");
+    let is_c_like = matches!(
+        kind_lower.as_str(),
+        "c" | "json" | "yaml" | "xml" | "js" | "config"
+    );
     if is_c_like && !bytes.ends_with(&[0]) {
         bytes.push(0);
     }
     let len = bytes.len();
     let pid = {
-        let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
-        s.game_pid().ok_or_else(|| "no attached game process".to_string())?
+        let s = session
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        s.game_pid()
+            .ok_or_else(|| "no attached game process".to_string())?
     };
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx,
+        };
         let proc_handle = unsafe {
             windows_sys::Win32::System::Threading::OpenProcess(
                 windows_sys::Win32::System::Threading::PROCESS_VM_OPERATION
@@ -5277,9 +6768,17 @@ pub(crate) fn allocate_string_in_game(session: &SharedSession, content: &str, ki
             return Err("failed to open process for allocation".into());
         }
         let ptr = unsafe {
-            VirtualAllocEx(proc_handle, std::ptr::null(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+            VirtualAllocEx(
+                proc_handle,
+                std::ptr::null(),
+                len,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            )
         };
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(proc_handle); }
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(proc_handle);
+        }
         if ptr.is_null() {
             return Err("VirtualAllocEx failed".into());
         }
@@ -5293,6 +6792,7 @@ pub(crate) fn allocate_string_in_game(session: &SharedSession, content: &str, ki
     }
     #[cfg(not(windows))]
     {
+        let _ = len;
         let _ = pid;
         let _ = bytes;
         // T-164: Return an error instead of a fake address on non-Windows platforms.
@@ -5307,7 +6807,12 @@ fn resolve_setup_step(
 ) -> Result<u64, String> {
     use crate::profile::SetupStep;
     match step {
-        SetupStep::AobScan { pattern, offset, region, .. } => {
+        SetupStep::AobScan {
+            pattern,
+            offset,
+            region,
+            ..
+        } => {
             // AOB scan externally (matches the `aob_scan` tool), optionally bound
             // to a specific region/module/marker, take the first match + offset.
             let parsed = trainlab_core::aob::parse(pattern);
@@ -5319,7 +6824,9 @@ fn resolve_setup_step(
 
             let regions = if let Some(r_name) = region {
                 let (r_start, r_end) = {
-                    let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
+                    let s = session
+                        .lock()
+                        .map_err(|_| "session lock poisoned".to_string())?;
                     if let Some(m) = s.get_marker(r_name) {
                         let end = m.end_address().unwrap_or(m.address.saturating_add(0x1000));
                         (m.address, end)
@@ -5329,15 +6836,18 @@ fn resolve_setup_step(
                         (start, start.saturating_add(0x1000))
                     }
                 };
-                all_regions.into_iter().filter_map(|mut r| {
-                    if r.end <= r_start || r.start >= r_end {
-                        None
-                    } else {
-                        r.start = r.start.max(r_start);
-                        r.end = r.end.min(r_end);
-                        Some(r)
-                    }
-                }).collect()
+                all_regions
+                    .into_iter()
+                    .filter_map(|mut r| {
+                        if r.end <= r_start || r.start >= r_end {
+                            None
+                        } else {
+                            r.start = r.start.max(r_start);
+                            r.end = r.end.min(r_end);
+                            Some(r)
+                        }
+                    })
+                    .collect()
             } else {
                 all_regions
             };
@@ -5352,43 +6862,55 @@ fn resolve_setup_step(
                     continue;
                 }
                 if let Ok(buf) = proc.read(r.start, len)
-                    && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed).first() {
-                        first_match = Some(r.start + *off as u64);
-                        break;
-                    }
+                    && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed).first()
+                {
+                    first_match = Some(r.start + *off as u64);
+                    break;
+                }
             }
 
             // Fallback: If AOB pattern had 0 matches and original_bytes was recorded,
             // attempt exact search for the pristine original bytes to relocate the hook site after game updates.
             if first_match.is_none()
-                && let SetupStep::AobScan { original_bytes: Some(orig_hex), .. } = step {
-                    if let Ok(orig_pat) = parse_hex_bytes(orig_hex)
-                        && !orig_pat.is_empty() {
-                            let parsed_orig: Vec<Option<u8>> = orig_pat.into_iter().map(Some).collect();
-                            for r in &regions {
-                                if !r.readable {
-                                    continue;
-                                }
-                                let len = (r.end - r.start) as usize;
-                                if len < parsed_orig.len() {
-                                    continue;
-                                }
-                                if let Ok(buf) = proc.read(r.start, len)
-                                    && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_orig).first() {
-                                        first_match = Some(r.start + *off as u64);
-                                        if let Ok(mut s) = session.lock() {
-                                            s.log_activity("PROFILE", format!("AOB pattern failed, but relocated hook site via original_bytes at {:#x}", r.start + *off as u64));
-                                        }
-                                        break;
-                                    }
-                            }
+                && let SetupStep::AobScan {
+                    original_bytes: Some(orig_hex),
+                    ..
+                } = step
+                && let Ok(orig_pat) = parse_hex_bytes(orig_hex)
+                && !orig_pat.is_empty()
+            {
+                let parsed_orig: Vec<Option<u8>> = orig_pat.into_iter().map(Some).collect();
+                for r in &regions {
+                    if !r.readable {
+                        continue;
+                    }
+                    let len = (r.end - r.start) as usize;
+                    if len < parsed_orig.len() {
+                        continue;
+                    }
+                    if let Ok(buf) = proc.read(r.start, len)
+                        && let Some(off) = trainlab_core::aob::find_all(&buf, &parsed_orig).first()
+                    {
+                        first_match = Some(r.start + *off as u64);
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity("PROFILE", format!("AOB pattern failed, but relocated hook site via original_bytes at {:#x}", r.start + *off as u64));
                         }
+                        break;
+                    }
                 }
+            }
 
-            let m = first_match.ok_or_else(|| "aob scan found no matches (including original_bytes fallback)".to_string())?;
+            let m = first_match.ok_or_else(|| {
+                "aob scan found no matches (including original_bytes fallback)".to_string()
+            })?;
             Ok((m as i64 + offset.unwrap_or(0)) as u64)
         }
-        SetupStep::PointerChain { module, base, offsets, .. } => {
+        SetupStep::PointerChain {
+            module,
+            base,
+            offsets,
+            ..
+        } => {
             // Resolve the module base, then add the module-relative base
             // offset, then chase the chain via the DLL.
             let module_base = resolve_module_base(session, module)?;
@@ -5427,8 +6949,11 @@ fn resolve_setup_step(
 /// the game process's loaded modules.
 fn resolve_module_base(session: &SharedSession, module: &str) -> Result<u64, String> {
     let pid = {
-        let s = session.lock().map_err(|_| "session lock poisoned".to_string())?;
-        s.game_pid().ok_or_else(|| "no game process attached".to_string())?
+        let s = session
+            .lock()
+            .map_err(|_| "session lock poisoned".to_string())?;
+        s.game_pid()
+            .ok_or_else(|| "no game process attached".to_string())?
     };
     let modules = trainlab_core::modinfo::enumerate_windows(pid)
         .map_err(|e| format!("enumerate modules: {e}"))?;
@@ -5483,7 +7008,8 @@ fn parse_addr_str(s: &str) -> Result<u64, String> {
         u64::from_str_radix(hex.trim_start_matches("0x"), 16)
             .map_err(|e| format!("bad offset '{s}': {e}"))
     } else {
-        s.parse::<u64>().map_err(|e| format!("bad address '{s}': {e}"))
+        s.parse::<u64>()
+            .map_err(|e| format!("bad address '{s}': {e}"))
     }
 }
 
@@ -5493,10 +7019,16 @@ fn hex_encode(data: &[u8]) -> String {
 }
 
 /// Parse a decimal/float string into little-endian bytes for a value type.
-pub(crate) fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<u8>, ErrorData> {
+pub(crate) fn parse_value_bytes(
+    s: &str,
+    vt: trainlab_core::scan::ValueType,
+) -> Result<Vec<u8>, ErrorData> {
     use trainlab_core::scan::ValueType;
     let s = s.trim();
-    fn parse_int<T: std::str::FromStr>(s: &str, parse_hex: impl FnOnce(&str) -> Result<T, std::num::ParseIntError>) -> Result<T, ()> {
+    fn parse_int<T: std::str::FromStr>(
+        s: &str,
+        parse_hex: impl FnOnce(&str) -> Result<T, std::num::ParseIntError>,
+    ) -> Result<T, ()> {
         if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
             parse_hex(hex).map_err(|_| ())
         } else {
@@ -5549,7 +7081,8 @@ pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, ErrorData> {
     }
     let mut out = Vec::with_capacity(cleaned.len() / 2);
     for i in (0..cleaned.len()).step_by(2) {
-        let byte = u8::from_str_radix(&cleaned[i..i + 2], 16).map_err(|_| err("invalid hex byte"))?;
+        let byte =
+            u8::from_str_radix(&cleaned[i..i + 2], 16).map_err(|_| err("invalid hex byte"))?;
         out.push(byte);
     }
     Ok(out)
@@ -5557,11 +7090,7 @@ pub(crate) fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, ErrorData> {
 
 /// Build an `ErrorData` with an internal-error code.
 fn err(message: impl Into<String>) -> ErrorData {
-    ErrorData::new(
-        rmcp::model::ErrorCode::INTERNAL_ERROR,
-        message.into(),
-        None,
-    )
+    ErrorData::new(rmcp::model::ErrorCode::INTERNAL_ERROR, message.into(), None)
 }
 
 /// Parse a value-type string into a [`ValueType`].
@@ -5610,35 +7139,59 @@ fn parse_scan_op(
 
 /// Read a little-endian signed/unsigned integer from the process and format it.
 /// Each function reads exactly its own width.
-fn read_i8(proc: &dyn trainlab_core::memory::ProcessMemory, address: u64) -> Result<String, String> {
+fn read_i8(
+    proc: &dyn trainlab_core::memory::ProcessMemory,
+    address: u64,
+) -> Result<String, String> {
     let b = proc.read(address, 1).map_err(|e| e.to_string())?;
     Ok(i8::from_le_bytes([b[0]]).to_string())
 }
-fn read_u8(proc: &dyn trainlab_core::memory::ProcessMemory, address: u64) -> Result<String, String> {
+fn read_u8(
+    proc: &dyn trainlab_core::memory::ProcessMemory,
+    address: u64,
+) -> Result<String, String> {
     let b = proc.read(address, 1).map_err(|e| e.to_string())?;
     Ok(u8::from_le_bytes([b[0]]).to_string())
 }
-fn read_i16(proc: &dyn trainlab_core::memory::ProcessMemory, address: u64) -> Result<String, String> {
+fn read_i16(
+    proc: &dyn trainlab_core::memory::ProcessMemory,
+    address: u64,
+) -> Result<String, String> {
     let b = proc.read(address, 2).map_err(|e| e.to_string())?;
     Ok(i16::from_le_bytes([b[0], b[1]]).to_string())
 }
-fn read_u16(proc: &dyn trainlab_core::memory::ProcessMemory, address: u64) -> Result<String, String> {
+fn read_u16(
+    proc: &dyn trainlab_core::memory::ProcessMemory,
+    address: u64,
+) -> Result<String, String> {
     let b = proc.read(address, 2).map_err(|e| e.to_string())?;
     Ok(u16::from_le_bytes([b[0], b[1]]).to_string())
 }
-fn read_i32(proc: &dyn trainlab_core::memory::ProcessMemory, address: u64) -> Result<String, String> {
+fn read_i32(
+    proc: &dyn trainlab_core::memory::ProcessMemory,
+    address: u64,
+) -> Result<String, String> {
     let b = proc.read(address, 4).map_err(|e| e.to_string())?;
     Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]).to_string())
 }
-fn read_u32(proc: &dyn trainlab_core::memory::ProcessMemory, address: u64) -> Result<String, String> {
+fn read_u32(
+    proc: &dyn trainlab_core::memory::ProcessMemory,
+    address: u64,
+) -> Result<String, String> {
     let b = proc.read(address, 4).map_err(|e| e.to_string())?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]).to_string())
 }
-fn read_i64(proc: &dyn trainlab_core::memory::ProcessMemory, address: u64) -> Result<String, String> {
+fn read_i64(
+    proc: &dyn trainlab_core::memory::ProcessMemory,
+    address: u64,
+) -> Result<String, String> {
     let b = proc.read(address, 8).map_err(|e| e.to_string())?;
     Ok(i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]).to_string())
 }
-fn read_u64(proc: &dyn trainlab_core::memory::ProcessMemory, address: u64) -> Result<String, String> {
+fn read_u64(
+    proc: &dyn trainlab_core::memory::ProcessMemory,
+    address: u64,
+) -> Result<String, String> {
     let b = proc.read(address, 8).map_err(|e| e.to_string())?;
     Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]).to_string())
 }
@@ -5658,10 +7211,7 @@ fn read_f64_val(
     address: u64,
 ) -> Result<String, String> {
     let b = proc.read(address, 8).map_err(|e| e.to_string())?;
-    Ok(f64::from_le_bytes([
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-    ])
-    .to_string())
+    Ok(f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]).to_string())
 }
 
 /// Read a null-terminated ASCII string (up to `max_len` bytes) from the process.
@@ -5718,9 +7268,15 @@ fn format_hit(
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("{description}\n"));
-    out.push_str(&format!("RIP={rip:#018x}  RAX={rax:#018x}  RBX={rbx:#018x}\n"));
-    out.push_str(&format!("RCX={rcx:#018x}  RDX={rdx:#018x}  RSI={rsi:#018x}\n"));
-    out.push_str(&format!("RDI={rdi:#018x}  RSP={rsp:#018x}  RBP={rbp:#018x}\n"));
+    out.push_str(&format!(
+        "RIP={rip:#018x}  RAX={rax:#018x}  RBX={rbx:#018x}\n"
+    ));
+    out.push_str(&format!(
+        "RCX={rcx:#018x}  RDX={rdx:#018x}  RSI={rsi:#018x}\n"
+    ));
+    out.push_str(&format!(
+        "RDI={rdi:#018x}  RSP={rsp:#018x}  RBP={rbp:#018x}\n"
+    ));
     if !stack.is_empty() {
         out.push_str("stack (RSP upward):\n");
         for (i, w) in stack.iter().enumerate() {
@@ -5745,8 +7301,8 @@ pub async fn serve(
     egui_ctx: Option<eframe::egui::Context>,
 ) -> anyhow::Result<(String, tokio_util::sync::CancellationToken)> {
     use rmcp::transport::{
-        streamable_http_server::session::local::LocalSessionManager,
         StreamableHttpServerConfig, StreamableHttpService,
+        streamable_http_server::session::local::LocalSessionManager,
     };
 
     let ct = tokio_util::sync::CancellationToken::new();
@@ -5759,7 +7315,10 @@ pub async fn serve(
             .merge(dashboard_router)
             .nest("/api", api_router)
             .nest_service("/captures", tower_http::services::ServeDir::new("captures"))
-            .nest_service("/snapshots", tower_http::services::ServeDir::new("snapshots"))
+            .nest_service(
+                "/snapshots",
+                tower_http::services::ServeDir::new("snapshots"),
+            )
             .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
             .nest_service("/scans", tower_http::services::ServeDir::new("scans"))
             .nest_service("/regions", tower_http::services::ServeDir::new("regions"))
@@ -5777,7 +7336,12 @@ pub async fn serve(
         let session_factory = {
             let session = session.clone();
             let egui_ctx = egui_ctx.clone();
-            move || Ok(TrainlabMcpServer::with_session_and_ctx(session.clone(), egui_ctx.clone()))
+            move || {
+                Ok(TrainlabMcpServer::with_session_and_ctx(
+                    session.clone(),
+                    egui_ctx.clone(),
+                ))
+            }
         };
         let service: StreamableHttpService<TrainlabMcpServer, LocalSessionManager> =
             StreamableHttpService::new(
@@ -5814,24 +7378,29 @@ async fn serve_session_log() -> impl axum::response::IntoResponse {
     use axum::response::IntoResponse;
     match tokio::fs::read_to_string("trainlab_session.log").await {
         Ok(contents) => (
-            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
             contents,
-        ).into_response(),
+        )
+            .into_response(),
         Err(_) => (
             axum::http::StatusCode::NOT_FOUND,
             "session log not found (no activity logged yet)",
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trainlab_core::memory::ProcessMemory;
+    use rmcp::ClientHandler;
     use rmcp::model::CallToolRequestParams;
     use rmcp::service::ServiceExt;
     use rmcp::transport::StreamableHttpClientTransport;
-    use rmcp::ClientHandler;
+    use trainlab_core::memory::ProcessMemory;
 
     /// A minimal no-op client handler.
     struct TestClient;
@@ -5916,7 +7485,11 @@ mod tests {
         data: Vec<u8>,
     }
     impl trainlab_core::memory::ProcessMemory for FakeMem {
-        fn read(&self, address: u64, len: usize) -> Result<Vec<u8>, trainlab_core::memory::MemoryError> {
+        fn read(
+            &self,
+            address: u64,
+            len: usize,
+        ) -> Result<Vec<u8>, trainlab_core::memory::MemoryError> {
             let start = address as usize;
             let end = (start + len).min(self.data.len());
             if start >= self.data.len() {
@@ -5926,10 +7499,17 @@ mod tests {
             }
             Ok(self.data[start..end].to_vec())
         }
-        fn write(&self, _address: u64, _data: &[u8]) -> Result<usize, trainlab_core::memory::MemoryError> {
+        fn write(
+            &self,
+            _address: u64,
+            _data: &[u8],
+        ) -> Result<usize, trainlab_core::memory::MemoryError> {
             Ok(0)
         }
-        fn regions(&self) -> Result<Vec<trainlab_core::memory::Region>, trainlab_core::memory::MemoryError> {
+        fn regions(
+            &self,
+        ) -> Result<Vec<trainlab_core::memory::Region>, trainlab_core::memory::MemoryError>
+        {
             Ok(vec![])
         }
     }
@@ -5970,7 +7550,11 @@ mod tests {
         let http_url = format!("{base_url}/snapshots/test_http_snap.bin");
 
         let res = reqwest::get(&http_url).await?;
-        assert!(res.status().is_success(), "HTTP get snapshot failed with status: {}", res.status());
+        assert!(
+            res.status().is_success(),
+            "HTTP get snapshot failed with status: {}",
+            res.status()
+        );
         let body = res.bytes().await?;
         assert_eq!(&body[..], b"SNAPSHOT_DATA_TEST_1234");
 
@@ -5993,7 +7577,11 @@ mod tests {
 
         let http_url = format!("{base_url}/captures/packet_9999.bin");
         let res = reqwest::get(&http_url).await?;
-        assert!(res.status().is_success(), "HTTP get capture failed with status: {}", res.status());
+        assert!(
+            res.status().is_success(),
+            "HTTP get capture failed with status: {}",
+            res.status()
+        );
         let body = res.bytes().await?;
         assert_eq!(&body[..], b"NETWORK_PAYLOAD_TEST_BYTES");
 
@@ -6035,17 +7623,28 @@ mod tests {
         let (url, ct) = serve("127.0.0.1", 0, true, true, session.clone(), None).await?;
         let base_url = url.trim_end_matches("/mcp");
 
-        let test_name = format!("agent_test_{}.lua", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros());
+        let test_name = format!(
+            "agent_test_{}.lua",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+        );
 
         // 1. Test POST /api/upload with raw bytes & query filename
         let client = reqwest::Client::new();
         let upload_url = format!("{base_url}/api/upload?filename={test_name}");
-        let res = client.post(&upload_url)
+        let res = client
+            .post(&upload_url)
             .body("function probe() return 42 end")
             .send()
             .await?;
 
-        assert!(res.status().is_success(), "Upload POST failed: {}", res.status());
+        assert!(
+            res.status().is_success(),
+            "Upload POST failed: {}",
+            res.status()
+        );
         let json: serde_json::Value = res.json().await?;
         assert_eq!(json["filename"], test_name);
         assert_eq!(json["size"], 30);
@@ -6059,7 +7658,8 @@ mod tests {
         assert_eq!(body, "function probe() return 42 end");
 
         // 3. Test collision numbering: second upload with same name
-        let res2 = client.post(&upload_url)
+        let res2 = client
+            .post(&upload_url)
             .body("function probe_v2() return 99 end")
             .send()
             .await?;
@@ -6070,11 +7670,13 @@ mod tests {
 
         // 4. Test MCP upload_file tool
         let server = TrainlabMcpServer::with_session_and_ctx(session.clone(), None);
-        let mcp_res = server.upload_file(Parameters(UploadFileArgs {
-            filename: "mcp_probe.lua".into(),
-            content: "local x = 100".into(),
-            is_hex: false,
-        })).unwrap();
+        let mcp_res = server
+            .upload_file(Parameters(UploadFileArgs {
+                filename: "mcp_probe.lua".into(),
+                content: "local x = 100".into(),
+                is_hex: false,
+            }))
+            .unwrap();
 
         let text = match &mcp_res.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
@@ -6099,12 +7701,14 @@ mod tests {
         let server = TrainlabMcpServer::with_session_and_ctx(session.clone(), None);
 
         // 1. Without network_capture capability, notices are returned gracefully
-        let res_no_cap = server.get_network_log(Parameters(GetNetworkLogArgs {
-            limit: None,
-            offset: None,
-            proto: None,
-            filter: None,
-        })).unwrap();
+        let res_no_cap = server
+            .get_network_log(Parameters(GetNetworkLogArgs {
+                limit: None,
+                offset: None,
+                proto: None,
+                filter: None,
+            }))
+            .unwrap();
         let text_no_cap = match &res_no_cap.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text"),
@@ -6132,12 +7736,14 @@ mod tests {
         }
 
         // 3. Test get_network_log
-        let res_log = server.get_network_log(Parameters(GetNetworkLogArgs {
-            limit: Some(10),
-            offset: None,
-            proto: Some("tcp".into()),
-            filter: Some("93.184".into()),
-        })).unwrap();
+        let res_log = server
+            .get_network_log(Parameters(GetNetworkLogArgs {
+                limit: Some(10),
+                offset: None,
+                proto: Some("tcp".into()),
+                filter: Some("93.184".into()),
+            }))
+            .unwrap();
         let text_log = match &res_log.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text"),
@@ -6148,11 +7754,13 @@ mod tests {
         assert!(text_log.contains("[file: captures/packet_101.bin]"));
 
         // 4. Test watch_network
-        let res_watch = server.watch_network(Parameters(WatchNetworkArgs {
-            filter: Some("93.184".into()),
-            proto: None,
-            limit: Some(5),
-        })).unwrap();
+        let res_watch = server
+            .watch_network(Parameters(WatchNetworkArgs {
+                filter: Some("93.184".into()),
+                proto: None,
+                limit: Some(5),
+            }))
+            .unwrap();
         let text_watch = match &res_watch.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text"),
@@ -6161,7 +7769,9 @@ mod tests {
         assert!(text_watch.contains("GET / HTTP/1.1"));
 
         // 5. Test clear_network_log
-        let res_clear = server.clear_network_log(Parameters(ClearNetworkLogArgs {})).unwrap();
+        let res_clear = server
+            .clear_network_log(Parameters(ClearNetworkLogArgs {}))
+            .unwrap();
         let text_clear = match &res_clear.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text"),
@@ -6169,12 +7779,14 @@ mod tests {
         assert!(text_clear.contains("Cleared 1 captured network packet(s)"));
 
         // Confirm buffer is now empty
-        let res_empty = server.get_network_log(Parameters(GetNetworkLogArgs {
-            limit: None,
-            offset: None,
-            proto: None,
-            filter: None,
-        })).unwrap();
+        let res_empty = server
+            .get_network_log(Parameters(GetNetworkLogArgs {
+                limit: None,
+                offset: None,
+                proto: None,
+                filter: None,
+            }))
+            .unwrap();
         let text_empty = match &res_empty.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text"),
@@ -6182,7 +7794,9 @@ mod tests {
         assert!(text_empty.contains("No captured network packets"));
 
         // 6. Test get_network_status
-        let res_status = server.get_network_status(Parameters(GetNetworkStatusArgs {})).unwrap();
+        let res_status = server
+            .get_network_status(Parameters(GetNetworkStatusArgs {}))
+            .unwrap();
         let text_status = match &res_status.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text"),
@@ -6190,7 +7804,6 @@ mod tests {
         assert!(text_status.contains("Network Interception Traffic Counters"));
         assert!(text_status.contains("Session Logged Packets"));
     }
-
 
     #[test]
     fn allocate_string_kind_validation() {
@@ -6268,7 +7881,12 @@ mod tests {
             value_type: None,
         }));
         assert!(res_neither.is_err());
-        assert!(res_neither.unwrap_err().message.contains("must specify either"));
+        assert!(
+            res_neither
+                .unwrap_err()
+                .message
+                .contains("must specify either")
+        );
     }
 
     #[test]
@@ -6284,9 +7902,18 @@ mod tests {
 
     #[test]
     fn parse_hex_bytes_accepts_spaced_and_unspaced() {
-        assert_eq!(parse_hex_bytes("00 80 ac 43").unwrap(), vec![0x00, 0x80, 0xac, 0x43]);
-        assert_eq!(parse_hex_bytes("0080ac43").unwrap(), vec![0x00, 0x80, 0xac, 0x43]);
-        assert_eq!(parse_hex_bytes("  00  80  ac  43  ").unwrap(), vec![0x00, 0x80, 0xac, 0x43]);
+        assert_eq!(
+            parse_hex_bytes("00 80 ac 43").unwrap(),
+            vec![0x00, 0x80, 0xac, 0x43]
+        );
+        assert_eq!(
+            parse_hex_bytes("0080ac43").unwrap(),
+            vec![0x00, 0x80, 0xac, 0x43]
+        );
+        assert_eq!(
+            parse_hex_bytes("  00  80  ac  43  ").unwrap(),
+            vec![0x00, 0x80, 0xac, 0x43]
+        );
         assert_eq!(parse_hex_bytes("").unwrap(), Vec::<u8>::new());
         assert!(parse_hex_bytes("00 80 zzz").is_err());
     }
@@ -6334,7 +7961,12 @@ mod tests {
         assert_eq!(parse_addr_expr(&s, "wood_ptr + 0x48").unwrap(), 0x0e890048);
         assert_eq!(parse_addr_expr(&s, "$wood_ptr + 0x48").unwrap(), 0x0e890048);
         assert_eq!(parse_addr_expr(&s, "$wood_ptr - 0x10").unwrap(), 0x0e88fff0);
-        assert_eq!(parse_addr_expr(&s, "($wood_ptr + 0x48) + 0x10").unwrap_err().code, rmcp::model::ErrorCode(-32603));
+        assert_eq!(
+            parse_addr_expr(&s, "($wood_ptr + 0x48) + 0x10")
+                .unwrap_err()
+                .code,
+            rmcp::model::ErrorCode(-32603)
+        );
     }
 
     #[test]
@@ -6363,12 +7995,15 @@ mod tests {
         assert_eq!(res1, 0x2000);
 
         // Test 2-level dereference: [[$player_base + 0x08] + 0x10] => 0x3000
-        let res2 = parse_addr_expr_with_mem(&s, "[[$player_base + 0x08] + 0x10]", Some(&fake_mem)).unwrap();
+        let res2 = parse_addr_expr_with_mem(&s, "[[$player_base + 0x08] + 0x10]", Some(&fake_mem))
+            .unwrap();
         assert_eq!(res2, 0x3000);
 
         // Test 3-level dereference + final field offset: [[[$player_base + 0x08] + 0x10] + 0x14]
         // This calculates base ptr dereference plus offset 0x14 -> 0x3014
-        let res3 = parse_addr_expr_with_mem(&s, "[[$player_base + 0x08] + 0x10] + 0x14", Some(&fake_mem)).unwrap();
+        let res3 =
+            parse_addr_expr_with_mem(&s, "[[$player_base + 0x08] + 0x10] + 0x14", Some(&fake_mem))
+                .unwrap();
         assert_eq!(res3, 0x3014);
 
         // Verify reading final value from the resolved address in fake memory
@@ -6403,7 +8038,7 @@ mod tests {
     #[test]
     fn test_load_profile_setup_markers_available_to_init_commands() {
         let s = SharedSession::default();
-        let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
+        let _server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
 
         // Define a profile where setup step resolves an address (Address type, offset from fake base)
         // and init_commands use Assert referencing that setup marker by name.
@@ -6446,18 +8081,18 @@ cheats: []
         }
 
         // Run ProfileCommand::SetMarker deriving gc_slot = "gc_cave+0x44"
-        let cmds = vec![
-            crate::profile::ProfileCommand::SetMarker {
-                marker: "gc_slot".into(),
-                address: "gc_cave+0x44".into(),
-                note: None,
-            },
-        ];
+        let cmds = vec![crate::profile::ProfileCommand::SetMarker {
+            marker: "gc_slot".into(),
+            address: "gc_cave+0x44".into(),
+            note: None,
+        }];
         execute_profile_commands(&s, &cmds).expect("execute set_marker command");
 
         // Verify gc_slot marker was created with value 0x140000044
         let session = s.lock().unwrap();
-        let marker = session.get_marker("gc_slot").expect("gc_slot marker exists");
+        let marker = session
+            .get_marker("gc_slot")
+            .expect("gc_slot marker exists");
         assert_eq!(marker.address, 0x140000044);
     }
 
@@ -6468,37 +8103,41 @@ cheats: []
             let mut session = s.lock().unwrap();
             // Seed a cave data slot marker 'tolstring_addr' and an address marker 'lua_tolstring'
             let _ = session.set_marker("tolstring_addr", 0x13fff0040, Some("cave slot"));
-            let _ = session.set_marker("lua_tolstring", 0x1401a6ae0, Some("resolved lua_tolstring"));
+            let _ =
+                session.set_marker("lua_tolstring", 0x1401a6ae0, Some("resolved lua_tolstring"));
         }
 
         // Test that Write command with address_ref: "tolstring_addr", value: "$lua_tolstring", value_type: "ptr"
         // fails with bad target / no game process rather than failing expression resolution!
         // But if value is an unresolvable marker expression, it must return a clear resolution error immediately.
-        let bad_val_cmd = vec![
-            crate::profile::ProfileCommand::Write {
-                address_ref: Some("tolstring_addr".into()),
-                address: None,
-                value: "$nonexistent_marker".into(),
-                value_type: Some("ptr".into()),
-                note: None,
-            },
-        ];
+        let bad_val_cmd = vec![crate::profile::ProfileCommand::Write {
+            address_ref: Some("tolstring_addr".into()),
+            address: None,
+            value: "$nonexistent_marker".into(),
+            value_type: Some("ptr".into()),
+            note: None,
+        }];
         let err_bad = execute_profile_commands(&s, &bad_val_cmd).unwrap_err();
-        assert!(err_bad.contains("failed to resolve value address expression '$nonexistent_marker'"), "got {err_bad}");
+        assert!(
+            err_bad.contains("failed to resolve value address expression '$nonexistent_marker'"),
+            "got {err_bad}"
+        );
 
         // Test that unresolvable module expression fails cleanly
-        let bad_mod_cmd = vec![
-            crate::profile::ProfileCommand::Write {
-                address_ref: Some("tolstring_addr".into()),
-                address: None,
-                value: "helldivers.exe+0x1a6ae0".into(),
-                value_type: Some("ptr".into()),
-                note: None,
-            },
-        ];
+        let bad_mod_cmd = vec![crate::profile::ProfileCommand::Write {
+            address_ref: Some("tolstring_addr".into()),
+            address: None,
+            value: "helldivers.exe+0x1a6ae0".into(),
+            value_type: Some("ptr".into()),
+            note: None,
+        }];
         let err_mod = execute_profile_commands(&s, &bad_mod_cmd).unwrap_err();
         // Since no process is attached, resolving helldivers.exe will fail to resolve address expression
-        assert!(err_mod.contains("failed to resolve value address expression 'helldivers.exe+0x1a6ae0'"), "got {err_mod}");
+        assert!(
+            err_mod
+                .contains("failed to resolve value address expression 'helldivers.exe+0x1a6ae0'"),
+            "got {err_mod}"
+        );
     }
 
     #[test]
@@ -6510,56 +8149,60 @@ cheats: []
         }
 
         // 1. Assert with empty bytes fails validation
-        let empty_bytes_cmd = vec![
-            crate::profile::ProfileCommand::Assert {
-                address_ref: Some("glpc_hookspot".into()),
-                address: None,
-                expected: "  ".into(),
-                value_type: Some("bytes".into()),
-                note: None,
-            },
-        ];
+        let empty_bytes_cmd = vec![crate::profile::ProfileCommand::Assert {
+            address_ref: Some("glpc_hookspot".into()),
+            address: None,
+            expected: "  ".into(),
+            value_type: Some("bytes".into()),
+            note: None,
+        }];
         let err_empty = execute_profile_commands(&s, &empty_bytes_cmd).unwrap_err();
-        assert!(err_empty.contains("expected hex bytes cannot be empty"), "got {err_empty}");
+        assert!(
+            err_empty.contains("expected hex bytes cannot be empty"),
+            "got {err_empty}"
+        );
 
         // 2. Assert with invalid hex string fails validation
-        let invalid_hex_cmd = vec![
-            crate::profile::ProfileCommand::Assert {
-                address_ref: Some("glpc_hookspot".into()),
-                address: None,
-                expected: "c5 f8 1".into(), // odd length
-                value_type: Some("bytes".into()),
-                note: None,
-            },
-        ];
+        let invalid_hex_cmd = vec![crate::profile::ProfileCommand::Assert {
+            address_ref: Some("glpc_hookspot".into()),
+            address: None,
+            expected: "c5 f8 1".into(), // odd length
+            value_type: Some("bytes".into()),
+            note: None,
+        }];
         let err_inv = execute_profile_commands(&s, &invalid_hex_cmd).unwrap_err();
-        assert!(err_inv.contains("assert failed to parse expected hex bytes"), "got {err_inv}");
+        assert!(
+            err_inv.contains("assert failed to parse expected hex bytes"),
+            "got {err_inv}"
+        );
 
         // 3. Valid hex string parses cleanly and attempts memory read (fails with read memory failed because no process is attached)
-        let valid_hex_cmd = vec![
-            crate::profile::ProfileCommand::Assert {
-                address_ref: Some("glpc_hookspot".into()),
-                address: None,
-                expected: "c5 f8 10 40 18 c5 f8 11 02 48 8b c2".into(), // 11-byte sequence
-                value_type: Some("bytes".into()),
-                note: None,
-            },
-        ];
+        let valid_hex_cmd = vec![crate::profile::ProfileCommand::Assert {
+            address_ref: Some("glpc_hookspot".into()),
+            address: None,
+            expected: "c5 f8 10 40 18 c5 f8 11 02 48 8b c2".into(), // 11-byte sequence
+            value_type: Some("bytes".into()),
+            note: None,
+        }];
         let err_read = execute_profile_commands(&s, &valid_hex_cmd).unwrap_err();
-        assert!(err_read.contains("assert read memory failed"), "got {err_read}");
+        assert!(
+            err_read.contains("assert read memory failed"),
+            "got {err_read}"
+        );
 
         // 4. Write command with bytes value_type
-        let write_bytes_cmd = vec![
-            crate::profile::ProfileCommand::Write {
-                address_ref: Some("glpc_hookspot".into()),
-                address: None,
-                value: "90 90 90 90".into(),
-                value_type: Some("bytes".into()),
-                note: None,
-            },
-        ];
+        let write_bytes_cmd = vec![crate::profile::ProfileCommand::Write {
+            address_ref: Some("glpc_hookspot".into()),
+            address: None,
+            value: "90 90 90 90".into(),
+            value_type: Some("bytes".into()),
+            note: None,
+        }];
         let err_write = execute_profile_commands(&s, &write_bytes_cmd).unwrap_err();
-        assert!(err_write.contains("write to glpc_hookspot (0x140001000) failed"), "got {err_write}");
+        assert!(
+            err_write.contains("write to glpc_hookspot (0x140001000) failed"),
+            "got {err_write}"
+        );
     }
 
     #[test]
@@ -6576,7 +8219,8 @@ cheats: []
                 "value_type": "ptr"
             }
         }"#;
-        let args_struct: CaptureRegArgs = serde_json::from_str(json_struct).expect("deserialize structured gate");
+        let args_struct: CaptureRegArgs =
+            serde_json::from_str(json_struct).expect("deserialize structured gate");
         assert!(args_struct.gate.is_some());
         let gate = args_struct.gate.unwrap();
         assert_eq!(gate.cmp, "ne");
@@ -6590,7 +8234,8 @@ cheats: []
             "value_type": "ptr",
             "gate": "{\"cmp\": \"ne\", \"reg\": \"rdi\", \"value\": 0.0, \"value_type\": \"ptr\"}"
         }"#;
-        let args_str: CaptureRegArgs = serde_json::from_str(json_str).expect("deserialize stringified gate");
+        let args_str: CaptureRegArgs =
+            serde_json::from_str(json_str).expect("deserialize stringified gate");
         assert!(args_str.gate.is_some());
         let gate_from_str = args_str.gate.unwrap();
         assert_eq!(gate_from_str.cmp, "ne");
@@ -6602,7 +8247,8 @@ cheats: []
             "target": "sins2.exe+0x5ceda8",
             "reg": "rdi"
         }"#;
-        let args_none: CaptureRegArgs = serde_json::from_str(json_none).expect("deserialize gateless");
+        let args_none: CaptureRegArgs =
+            serde_json::from_str(json_none).expect("deserialize gateless");
         assert!(args_none.gate.is_none());
     }
 
@@ -6617,7 +8263,8 @@ cheats: []
                 { "name": "crystal", "value_type": "f32", "offset": "0x18" }
             ]
         }"#;
-        let args_struct: DumpStructArgs = serde_json::from_str(json_struct).expect("deserialize structured fields");
+        let args_struct: DumpStructArgs =
+            serde_json::from_str(json_struct).expect("deserialize structured fields");
         assert_eq!(args_struct.fields.len(), 3);
         assert_eq!(args_struct.fields[0].name, "credits");
         assert_eq!(args_struct.fields[0].offset, 16);
@@ -6631,7 +8278,8 @@ cheats: []
             "address": "player_base+0x2f0",
             "fields": "[{\"name\": \"credits\", \"value_type\": \"f32\", \"offset\": 16}, {\"name\": \"metal\", \"value_type\": \"f32\", \"offset\": \"0x14\"}]"
         }"#;
-        let args_str: DumpStructArgs = serde_json::from_str(json_str).expect("deserialize stringified fields");
+        let args_str: DumpStructArgs =
+            serde_json::from_str(json_str).expect("deserialize stringified fields");
         assert_eq!(args_str.fields.len(), 2);
         assert_eq!(args_str.fields[0].name, "credits");
         assert_eq!(args_str.fields[0].offset, 16);
@@ -6653,16 +8301,21 @@ cheats: []
         // 2. Add an enabled toggle cheat -> dirty
         let cheat_id = {
             let mut session = s.lock().unwrap();
-            let cid = session.add_cheat("Fast Ships", crate::session::CheatKind::Toggle {
-                hook: trainlab_core::cave_hook::CaveHook::Trampoline {
-                    payload: vec![0x90],
-                    jump: trainlab_core::cave_hook::JumpStyle::Absolute,
+            let cid = session.add_cheat(
+                "Fast Ships",
+                crate::session::CheatKind::Toggle {
+                    hook: trainlab_core::cave_hook::CaveHook::Trampoline {
+                        payload: vec![0x90],
+                        jump: trainlab_core::cave_hook::JumpStyle::Absolute,
+                    },
+                    target: 0x140001000,
+                    enabled: true,
+                    original_bytes: vec![0x90; 14],
+                    cave_addr: 0x150000000,
                 },
-                target: 0x140001000,
-                enabled: true,
-                original_bytes: vec![0x90; 14],
-                cave_addr: 0x150000000,
-            }, None, None);
+                None,
+                None,
+            );
             assert!(session.check_dirty().is_dirty());
             cid
         };
@@ -6674,7 +8327,10 @@ cheats: []
         }));
         assert!(res.is_err());
         let err_msg = res.unwrap_err().message;
-        assert!(err_msg.contains("cannot load profile"), "err was: {err_msg}");
+        assert!(
+            err_msg.contains("cannot load profile"),
+            "err was: {err_msg}"
+        );
         assert!(err_msg.contains("dirty"), "err was: {err_msg}");
 
         // 3. Disable the cheat, but add an undo entry -> still dirty
@@ -6690,7 +8346,10 @@ cheats: []
         }));
         assert!(res2.is_err());
         let err_msg2 = res2.unwrap_err().message;
-        assert!(err_msg2.contains("cannot load profile"), "err was: {err_msg2}");
+        assert!(
+            err_msg2.contains("cannot load profile"),
+            "err was: {err_msg2}"
+        );
 
         // 4. Pop undo -> clean
         {
@@ -6779,26 +8438,34 @@ cheats: []
         let server = TrainlabMcpServer::with_session_and_ctx(s.clone(), None);
 
         // 1. Without frame_pinning capability in DLL -> routes to Tier 2: ExternalTimer
-        let res_tier2 = server.pin_value(Parameters(PinValueArgs {
-            address: "0x140001000".to_string(),
-            value: "9999".to_string(),
-            value_type: Some("i32".to_string()),
-            label: Some("player_hp".to_string()),
-            assert_not_null: Some(true),
-        })).expect("pin_value succeeds");
+        let res_tier2 = server
+            .pin_value(Parameters(PinValueArgs {
+                address: "0x140001000".to_string(),
+                value: "9999".to_string(),
+                value_type: Some("i32".to_string()),
+                label: Some("player_hp".to_string()),
+                assert_not_null: Some(true),
+            }))
+            .expect("pin_value succeeds");
 
         let msg = match &res_tier2.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text block"),
         };
-        assert!(msg.contains("Tier 2: External Timer Cadence"), "Expected Tier 2, got: {msg}");
+        assert!(
+            msg.contains("Tier 2: External Timer Cadence"),
+            "Expected Tier 2, got: {msg}"
+        );
 
         // Verify pin was stored in session
         {
             let lock = s.lock().unwrap();
             let pins = lock.list_pins();
             assert_eq!(pins.len(), 1);
-            assert_eq!(pins[0].provider, trainlab_core::protocol::PinProvider::ExternalTimer);
+            assert_eq!(
+                pins[0].provider,
+                trainlab_core::protocol::PinProvider::ExternalTimer
+            );
             assert_eq!(pins[0].ops.len(), 2); // AssertNotNull + WriteConstant
         }
 
@@ -6808,36 +8475,48 @@ cheats: []
             lock.set_dll_capabilities(vec!["frame_pinning".to_string(), "overlay".to_string()]);
         }
 
-        let res_tier1 = server.pin_value(Parameters(PinValueArgs {
-            address: "0x140002000".to_string(),
-            value: "100.0".to_string(),
-            value_type: Some("f32".to_string()),
-            label: Some("player_shield".to_string()),
-            assert_not_null: Some(true),
-        })).expect("pin_value succeeds");
+        let res_tier1 = server
+            .pin_value(Parameters(PinValueArgs {
+                address: "0x140002000".to_string(),
+                value: "100.0".to_string(),
+                value_type: Some("f32".to_string()),
+                label: Some("player_shield".to_string()),
+                assert_not_null: Some(true),
+            }))
+            .expect("pin_value succeeds");
 
         let msg_tier1 = match &res_tier1.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text block"),
         };
-        assert!(msg_tier1.contains("Tier 1: In-Process DXGI On-Frame"), "Expected Tier 1, got: {msg_tier1}");
+        assert!(
+            msg_tier1.contains("Tier 1: In-Process DXGI On-Frame"),
+            "Expected Tier 1, got: {msg_tier1}"
+        );
 
         {
             let lock = s.lock().unwrap();
             let pins = lock.list_pins();
             assert_eq!(pins.len(), 2);
-            assert_eq!(pins[1].provider, trainlab_core::protocol::PinProvider::InProcessFrame);
+            assert_eq!(
+                pins[1].provider,
+                trainlab_core::protocol::PinProvider::InProcessFrame
+            );
         }
 
         // 3. Test list_pins and unpin
-        let list_res = server.list_pins(Parameters(ListPinsArgs {})).expect("list_pins succeeds");
+        let list_res = server
+            .list_pins(Parameters(ListPinsArgs {}))
+            .expect("list_pins succeeds");
         let list_txt = match &list_res.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text block"),
         };
         assert!(list_txt.contains("Active Pins (2 total)"));
 
-        let unpin_res = server.unpin(Parameters(UnpinArgs { id: 1 })).expect("unpin succeeds");
+        let unpin_res = server
+            .unpin(Parameters(UnpinArgs { id: 1 }))
+            .expect("unpin succeeds");
         let unpin_txt = match &unpin_res.content[0] {
             rmcp::model::ContentBlock::Text(t) => t.text.clone(),
             _ => panic!("expected text block"),
@@ -6850,7 +8529,9 @@ cheats: []
         }
 
         // 4. Test clear_pins
-        server.clear_pins(Parameters(ListPinsArgs {})).expect("clear_pins succeeds");
+        server
+            .clear_pins(Parameters(ListPinsArgs {}))
+            .expect("clear_pins succeeds");
         {
             let lock = s.lock().unwrap();
             assert_eq!(lock.list_pins().len(), 0);
@@ -6865,16 +8546,21 @@ cheats: []
         // Add a toggle cheat with dummy target
         let cheat_id = {
             let mut session = s.lock().unwrap();
-            session.add_cheat("Fast Building", crate::session::CheatKind::Toggle {
-                hook: trainlab_core::cave_hook::CaveHook::Trampoline {
-                    payload: vec![0x90],
-                    jump: trainlab_core::cave_hook::JumpStyle::Absolute,
+            session.add_cheat(
+                "Fast Building",
+                crate::session::CheatKind::Toggle {
+                    hook: trainlab_core::cave_hook::CaveHook::Trampoline {
+                        payload: vec![0x90],
+                        jump: trainlab_core::cave_hook::JumpStyle::Absolute,
+                    },
+                    target: 0x140002000,
+                    enabled: false,
+                    original_bytes: vec![0x90; 14],
+                    cave_addr: 0,
                 },
-                target: 0x140002000,
-                enabled: false,
-                original_bytes: vec![0x90; 14],
-                cave_addr: 0,
-            }, None, None)
+                None,
+                None,
+            )
         };
 
         // Attempting to toggle enable without DLL / game process fails and does NOT set enabled: true
@@ -6889,7 +8575,9 @@ cheats: []
             let session = s.lock().unwrap();
             let c = session.get_cheat(cheat_id).expect("cheat exists");
             match &c.kind {
-                crate::session::CheatKind::Toggle { enabled, .. } => assert!(!*enabled, "cheat should not be enabled after failure"),
+                crate::session::CheatKind::Toggle { enabled, .. } => {
+                    assert!(!*enabled, "cheat should not be enabled after failure")
+                }
                 _ => panic!("expected toggle cheat"),
             }
         }

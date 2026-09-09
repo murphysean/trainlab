@@ -30,16 +30,10 @@ pub enum HookKind {
     /// Transparent hook: run `payload` (default empty), then **replay** the
     /// stolen instructions (relocated to the cave) before jumping back. The
     /// target's original behavior is preserved. Empty payload = pure no-op.
-    Trampoline {
-        payload: Vec<u8>,
-        jump: JumpStyle,
-    },
+    Trampoline { payload: Vec<u8>, jump: JumpStyle },
     /// Replace hook: run `payload` then jump straight back, **skipping** the
     /// stolen instruction(s). The original behavior is replaced.
-    Override {
-        payload: Vec<u8>,
-        jump: JumpStyle,
-    },
+    Override { payload: Vec<u8>, jump: JumpStyle },
 }
 
 /// A live code cave hook installed into the target process.
@@ -94,9 +88,10 @@ where
     A: Fn(usize, bool) -> Result<u64, String>,
 {
     if let HookKind::Override { payload, .. } = &kind
-        && payload.is_empty() {
-            return Err("override hook requires a non-empty payload; an empty override drops stolen instructions without replacement".to_string());
-        }
+        && payload.is_empty()
+    {
+        return Err("override hook requires a non-empty payload; an empty override drops stolen instructions without replacement".to_string());
+    }
 
     let jump_style = match &kind {
         HookKind::Override { jump, .. } | HookKind::Trampoline { jump, .. } => *jump,
@@ -176,11 +171,8 @@ where
             // Jump-back only if the relocated block does not end in a branch.
             if !relocated.ends_in_branch {
                 let jmp_back = emitter::jmp_abs(return_to);
-                write(
-                    reloc_ip + relocated.bytes.len() as u64,
-                    &jmp_back,
-                )
-                .map_err(|e| format!("write jump-back: {e}"))?;
+                write(reloc_ip + relocated.bytes.len() as u64, &jmp_back)
+                    .map_err(|e| format!("write jump-back: {e}"))?;
             }
         }
     }
@@ -198,7 +190,9 @@ where
         JumpStyle::Relative => {
             let rel = (cave as i128) - ((target + 5) as i128);
             if rel < i32::MIN as i128 || rel > i32::MAX as i128 {
-                return Err(format!("cave target {cave:#x} out of ±2GB range for relative jump from {target:#x}"));
+                return Err(format!(
+                    "cave target {cave:#x} out of ±2GB range for relative jump from {target:#x}"
+                ));
             }
             let mut bytes = vec![0xE9];
             bytes.extend_from_slice(&(rel as i32).to_le_bytes());
@@ -260,7 +254,9 @@ where
         write(target + 1, &original[1..]).map_err(|e| format!("restore target operands: {e}"))?;
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     }
-    write(target, &original[..1]).map(|_| ()).map_err(|e| format!("restore target opcode: {e}"))
+    write(target, &original[..1])
+        .map(|_| ())
+        .map_err(|e| format!("restore target opcode: {e}"))
 }
 
 #[cfg(test)]
@@ -330,7 +326,11 @@ mod tests {
         let hook = install(target, kind, fake_read, fake_write, fake_alloc).unwrap();
         assert_eq!(hook.target, 0x4000);
         // Original bytes captured at the target (>= 12, instruction-aligned).
-        assert!(hook.original.len() >= 12, "orig len = {}", hook.original.len());
+        assert!(
+            hook.original.len() >= 12,
+            "orig len = {}",
+            hook.original.len()
+        );
         // Payload written at the cave start (0x100000).
         FAKE.with(|m| assert_eq!(m.bytes_at(0x100000, 3), payload));
         // Jump-back written after the payload.
@@ -342,7 +342,10 @@ mod tests {
         FAKE.with(|m| {
             let patched = m.bytes_at(0x4000, 14);
             assert_eq!(&patched[0..2], &[0xFF, 0x25]); // jmp qword ptr [rip+disp32]
-            assert_eq!(u64::from_le_bytes(patched[6..14].try_into().unwrap()), 0x100000);
+            assert_eq!(
+                u64::from_le_bytes(patched[6..14].try_into().unwrap()),
+                0x100000
+            );
         });
     }
 
@@ -376,7 +379,10 @@ mod tests {
     fn install_trampoline_conditional_branch_appends_jump_back() {
         // Target bytes: cmp dword [rbx+0x30], 2 (4) ; jne +0x7D (2) ; mov eax, 1 (5) ...
         let target = 0x6000u64;
-        let seed = [0x83, 0x7B, 0x30, 0x02, 0x75, 0x7D, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0xC3];
+        let seed = [
+            0x83, 0x7B, 0x30, 0x02, 0x75, 0x7D, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90,
+            0xC3,
+        ];
         fake_write(target, &seed).unwrap();
 
         let kind = HookKind::Trampoline {
@@ -396,7 +402,10 @@ mod tests {
             assert_eq!(cave_bytes[0], 0x90); // payload
             // Verify there is an absolute jump-back (0xFF, 0x25) after the relocated stolen block
             let has_jmp_back = cave_bytes.windows(2).any(|w| w == [0xFF, 0x25]);
-            assert!(has_jmp_back, "cave must contain jump-back for conditional branch fallthrough");
+            assert!(
+                has_jmp_back,
+                "cave must contain jump-back for conditional branch fallthrough"
+            );
         });
     }
 
@@ -423,7 +432,10 @@ mod tests {
     #[test]
     fn install_double_hook_fails_with_error() {
         let target = 0x5000u64;
-        let seed = [0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x90, 0x90];
+        let seed = [
+            0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC,
+            0x20, 0x90, 0x90,
+        ];
         fake_write(target, &seed).unwrap();
 
         let kind = HookKind::Trampoline {
@@ -438,7 +450,10 @@ mod tests {
         let hook2 = install(target, kind, fake_read, fake_write, fake_alloc);
         assert!(hook2.is_err());
         let err_msg = hook2.unwrap_err();
-        assert!(err_msg.contains("already hooked"), "error message was: {err_msg}");
+        assert!(
+            err_msg.contains("already hooked"),
+            "error message was: {err_msg}"
+        );
     }
 
     #[test]
@@ -451,7 +466,10 @@ mod tests {
         let res = install(target, kind, fake_read, fake_write, fake_alloc);
         assert!(res.is_err());
         let err_msg = res.unwrap_err();
-        assert!(err_msg.contains("override hook requires a non-empty payload"), "err: {err_msg}");
+        assert!(
+            err_msg.contains("override hook requires a non-empty payload"),
+            "err: {err_msg}"
+        );
     }
 
     #[test]
@@ -482,7 +500,11 @@ mod tests {
             let patched = m.bytes_at(target, 17);
             assert_eq!(&patched[0..2], &[0xFF, 0x25]); // jmp [rip+0]
             // Bytes 14..17 must be NOPs (0x90)
-            assert_eq!(&patched[14..17], &[0x90, 0x90, 0x90], "remaining bytes in steal window must be NOP padded");
+            assert_eq!(
+                &patched[14..17],
+                &[0x90, 0x90, 0x90],
+                "remaining bytes in steal window must be NOP padded"
+            );
         });
     }
 
@@ -508,10 +530,23 @@ mod tests {
         code[0] = 0x75;
         code[1] = 0x0a;
         // Seed at target (0x900a) with 17-byte instruction sequence
-        code[10] = 0xB8; code[11] = 0x01; code[12] = 0x00; code[13] = 0x00; code[14] = 0x00; // mov eax, 1 (5)
-        code[15] = 0xB9; code[16] = 0x02; code[17] = 0x00; code[18] = 0x00; code[19] = 0x00; // mov ecx, 2 (5)
-        code[20] = 0xBA; code[21] = 0x03; code[22] = 0x00; code[23] = 0x00; code[24] = 0x00; // mov edx, 3 (5)
-        code[25] = 0x90; code[26] = 0xC3; // nop; ret
+        code[10] = 0xB8;
+        code[11] = 0x01;
+        code[12] = 0x00;
+        code[13] = 0x00;
+        code[14] = 0x00; // mov eax, 1 (5)
+        code[15] = 0xB9;
+        code[16] = 0x02;
+        code[17] = 0x00;
+        code[18] = 0x00;
+        code[19] = 0x00; // mov ecx, 2 (5)
+        code[20] = 0xBA;
+        code[21] = 0x03;
+        code[22] = 0x00;
+        code[23] = 0x00;
+        code[24] = 0x00; // mov edx, 3 (5)
+        code[25] = 0x90;
+        code[26] = 0xC3; // nop; ret
         fake_write(base, &code).unwrap();
 
         let kind = HookKind::Trampoline {

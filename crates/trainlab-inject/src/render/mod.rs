@@ -4,20 +4,20 @@
 //! hooks frame presentation (`Present` / `EndScene`), and hooks window messages
 //! (`WndProc`) for hotkeys and input capture.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-#[cfg(windows)]
-mod dxgi;
-#[cfg(windows)]
-mod input;
-#[cfg(windows)]
-pub mod xinput;
 #[cfg(windows)]
 pub mod d3d11;
 #[cfg(windows)]
 pub mod d3d12;
+#[cfg(windows)]
+mod dxgi;
+#[cfg(windows)]
+mod input;
 pub mod overlay;
+#[cfg(windows)]
+pub mod xinput;
 
 /// Global render and overlay state tracked in-process.
 pub struct RenderState {
@@ -134,7 +134,11 @@ pub fn configure(overlay: bool, hook_wndproc: bool, xinput_hooks: bool) {
 
 /// Returns a snapshot of the current render status for the protocol.
 pub fn get_status() -> (String, bool, bool, u64, bool, String, u64, Vec<String>) {
-    let api = STATE.api_name.lock().map(|s| s.clone()).unwrap_or_else(|_| "Unknown".into());
+    let api = STATE
+        .api_name
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "Unknown".into());
     let present_hooked = STATE.present_hooked.load(Ordering::Relaxed);
     let wndproc_hooked = STATE.wndproc_hooked.load(Ordering::Relaxed);
     let frame_count = STATE.frame_count.load(Ordering::Relaxed);
@@ -144,9 +148,22 @@ pub fn get_status() -> (String, bool, bool, u64, bool, String, u64, Vec<String>)
     let input_hook = xinput::get_active_input_hook();
     #[cfg(not(windows))]
     let input_hook = "none (unsupported on non-windows)".to_string();
-    let overlays = STATE.detected_overlays.lock().map(|s| s.clone()).unwrap_or_default();
+    let overlays = STATE
+        .detected_overlays
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
 
-    (api, present_hooked, wndproc_hooked, frame_count, overlay_visible, input_hook, combo_count, overlays)
+    (
+        api,
+        present_hooked,
+        wndproc_hooked,
+        frame_count,
+        overlay_visible,
+        input_hook,
+        combo_count,
+        overlays,
+    )
 }
 
 /// Set overlay visibility.

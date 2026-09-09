@@ -69,6 +69,7 @@ mod watch {
         Err("breakpoints are not supported on this platform".into())
     }
 
+    #[allow(dead_code)]
     pub fn poll_hit() -> Option<HitInfo> {
         None
     }
@@ -94,8 +95,13 @@ pub fn start(port: u16) -> std::io::Result<u16> {
     }
 
     // Default to localhost ("127.0.0.1"), or allow binding to all interfaces ("0.0.0.0") if requested
-    let bind_addr = if std::env::var("TRAINLAB_DLL_BIND_ALL").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
-        || std::env::var("TRAINLAB_DLL_HOST").map(|v| v == "0.0.0.0").unwrap_or(false) {
+    let bind_addr = if std::env::var("TRAINLAB_DLL_BIND_ALL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || std::env::var("TRAINLAB_DLL_HOST")
+            .map(|v| v == "0.0.0.0")
+            .unwrap_or(false)
+    {
         "0.0.0.0"
     } else {
         "127.0.0.1"
@@ -161,20 +167,20 @@ fn handle_client(mut stream: TcpStream) {
                 let outbound = render::overlay::drain_outbound_events();
                 for evt in outbound {
                     let evt_msg = Message::Event(evt);
-                    if let Ok(out) = protocol::encode(&evt_msg) {
-                        if push_stream.write_all(&out).is_err() {
-                            return; // Client disconnected or stream closed
-                        }
+                    if let Ok(out) = protocol::encode(&evt_msg)
+                        && push_stream.write_all(&out).is_err()
+                    {
+                        return; // Client disconnected or stream closed
                     }
                 }
 
                 let net_events = network::drain_network_events();
                 for evt in net_events {
                     let evt_msg = Message::Event(evt);
-                    if let Ok(out) = protocol::encode(&evt_msg) {
-                        if push_stream.write_all(&out).is_err() {
-                            return; // Client disconnected or stream closed
-                        }
+                    if let Ok(out) = protocol::encode(&evt_msg)
+                        && push_stream.write_all(&out).is_err()
+                    {
+                        return; // Client disconnected or stream closed
                     }
                 }
 
@@ -265,7 +271,9 @@ fn uninstall_all_captures() {
     for id in ids {
         match captures::uninstall(id) {
             Ok(()) => tracing::info!(capture_id = id, "auto-uninstalled capture on disconnect"),
-            Err(e) => tracing::warn!(capture_id = id, error = %e, "failed to auto-uninstall capture on disconnect"),
+            Err(e) => {
+                tracing::warn!(capture_id = id, error = %e, "failed to auto-uninstall capture on disconnect")
+            }
         }
     }
     // Disarm any live hardware watchpoint (DR0/DR7) or int3 breakpoint.
@@ -312,10 +320,7 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 "network_capture".to_string(),
             ];
             #[cfg(not(windows))]
-            let capabilities = vec![
-                "memory".to_string(),
-                "caves".to_string(),
-            ];
+            let capabilities = vec!["memory".to_string(), "caves".to_string()];
 
             Response::Pong {
                 version: trainlab_core::VERSION.to_string(),
@@ -324,17 +329,29 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
         }
         Request::Read { address, len } => match mem.read(address, len) {
             Ok(data) => Response::Read { data },
-            Err(e) => Response::Error { message: e.to_string() },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
         },
         Request::Write { address, data } => match mem.write(address, &data) {
             Ok(n) => Response::Write { bytes_written: n },
-            Err(e) => Response::Error { message: e.to_string() },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
         },
-        Request::ScanAob { pattern, start, end } => {
+        Request::ScanAob {
+            pattern,
+            start,
+            end,
+        } => {
             // Scan the game's readable regions for the pattern.
             let regions = match mem.regions() {
                 Ok(r) => r,
-                Err(e) => return Response::Error { message: e.to_string() },
+                Err(e) => {
+                    return Response::Error {
+                        message: e.to_string(),
+                    };
+                }
             };
             let mut matches = Vec::new();
             for r in regions {
@@ -342,13 +359,15 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                     continue;
                 }
                 if let Some(s) = start
-                    && r.end < s {
-                        continue;
-                    }
+                    && r.end < s
+                {
+                    continue;
+                }
                 if let Some(e) = end
-                    && r.start > e {
-                        continue;
-                    }
+                    && r.start > e
+                {
+                    continue;
+                }
                 let lo = start.map_or(r.start, |s| s.max(r.start));
                 let hi = end.map_or(r.end, |e| e.min(r.end));
                 if lo >= hi {
@@ -365,12 +384,12 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             }
             Response::ScanAob { matches }
         }
-        Request::Allocate { size, executable } => {
-            match allocate(size, executable) {
-                Ok(addr) => Response::Allocate { address: addr },
-                Err(e) => Response::Error { message: e.to_string() },
-            }
-        }
+        Request::Allocate { size, executable } => match allocate(size, executable) {
+            Ok(addr) => Response::Allocate { address: addr },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
+        },
         Request::Free { address } => {
             let ok = free(address);
             Response::Free { ok }
@@ -418,7 +437,9 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                     })
                     .collect(),
             },
-            Err(e) => Response::Error { message: e.to_string() },
+            Err(e) => Response::Error {
+                message: e.to_string(),
+            },
         },
         Request::Scan {
             value_type,
@@ -428,14 +449,20 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             // Run a first value scan over the game's readable regions.
             let regions = match mem.regions() {
                 Ok(r) => r,
-                Err(e) => return Response::Error { message: e.to_string() },
+                Err(e) => {
+                    return Response::Error {
+                        message: e.to_string(),
+                    };
+                }
             };
             let mut scan = trainlab_core::scan::Scan::new(value_type).with_alignment(alignment);
             match scan.first_scan(mem, &regions, op) {
                 Ok(_) => Response::ScanResult {
                     matches: scan.matches().to_vec(),
                 },
-                Err(e) => Response::Error { message: e.to_string() },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
             }
         }
         Request::Next {
@@ -449,23 +476,33 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 Ok(_) => Response::ScanResult {
                     matches: scan.matches().to_vec(),
                 },
-                Err(e) => Response::Error { message: e.to_string() },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
             }
         }
         Request::PointerScan { lo, hi } => {
             let regions = match mem.regions() {
                 Ok(r) => r,
-                Err(e) => return Response::Error { message: e.to_string() },
+                Err(e) => {
+                    return Response::Error {
+                        message: e.to_string(),
+                    };
+                }
             };
             match trainlab_core::pointer::reverse_scan(mem, &regions, lo, hi) {
                 Ok(matches) => Response::PointerScan { matches },
-                Err(e) => Response::Error { message: e.to_string() },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
             }
         }
         Request::PointerChase { base, offsets } => {
             match trainlab_core::pointer::chase(mem, base, &offsets) {
                 Ok(hops) => Response::PointerChase { hops },
-                Err(e) => Response::Error { message: e.to_string() },
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
             }
         }
         Request::WatchWrites {
@@ -477,10 +514,7 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             Ok(()) => Response::WatchArmed,
             Err(e) => Response::Error { message: e },
         },
-        Request::BreakOnCode {
-            address,
-            one_shot,
-        } => match watch::arm_break(address, one_shot) {
+        Request::BreakOnCode { address, one_shot } => match watch::arm_break(address, one_shot) {
             Ok(()) => Response::BreakArmed,
             Err(e) => Response::Error { message: e },
         },
@@ -520,8 +554,16 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             Err(e) => Response::Error { message: e },
         },
         Request::GetRenderStatus => {
-            let (api, present_hooked, wndproc_hooked, frame_count, overlay_visible, input_hook, combo_count, detected_overlays) =
-                render::get_status();
+            let (
+                api,
+                present_hooked,
+                wndproc_hooked,
+                frame_count,
+                overlay_visible,
+                input_hook,
+                combo_count,
+                detected_overlays,
+            ) = render::get_status();
             Response::RenderStatus {
                 api,
                 present_hooked,
@@ -542,7 +584,8 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            let (api, present_hooked, _, frame_count, _, input_hook, combo_count, _) = render::get_status();
+            let (api, present_hooked, _, frame_count, _, input_hook, combo_count, _) =
+                render::get_status();
             Response::Ready {
                 api,
                 input_hook,
@@ -560,7 +603,11 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             render::overlay::apply_event(trainlab_core::protocol::Event::SyncCheats { cheats });
             Response::CheatsSynced { count }
         }
-        Request::ConfigureRender { overlay, hook_wndproc, xinput_hooks } => {
+        Request::ConfigureRender {
+            overlay,
+            hook_wndproc,
+            xinput_hooks,
+        } => {
             render::configure(overlay, hook_wndproc, xinput_hooks);
             Response::RenderConfigured {
                 overlay,
@@ -568,28 +615,35 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 xinput_hooks,
             }
         }
-        Request::GetNetworkLog { .. } => {
-            Response::NetworkLog {
-                packets: Vec::new(),
-                total_captured: 0,
-            }
-        }
-        Request::GetNetworkStatus => {
-            Response::NetworkStatus(network::get_stats())
-        }
-        Request::ClearNetworkLog => {
-            Response::NetworkLogCleared { cleared: 0 }
-        }
-        Request::ConfigureNetworkHook { enabled, ignore_ports, capture_loopback, ignore_hosts } => {
+        Request::GetNetworkLog { .. } => Response::NetworkLog {
+            packets: Vec::new(),
+            total_captured: 0,
+        },
+        Request::GetNetworkStatus => Response::NetworkStatus(network::get_stats()),
+        Request::ClearNetworkLog => Response::NetworkLogCleared { cleared: 0 },
+        Request::ConfigureNetworkHook {
+            enabled,
+            ignore_ports,
+            capture_loopback,
+            ignore_hosts,
+        } => {
             network::configure(enabled, &ignore_ports, capture_loopback, &ignore_hosts);
             Response::NetworkHookConfigured { enabled }
         }
         Request::InitializeSession { features } => {
             // 1. Display & Render Hooks
-            render::configure(features.display.overlay, features.input.wndproc, features.input.xinput);
+            render::configure(
+                features.display.overlay,
+                features.input.wndproc,
+                features.input.xinput,
+            );
 
             // 2. Network Hooks
-            if features.network.winsock || features.network.winhttp || features.network.schannel || features.network.steamworks {
+            if features.network.winsock
+                || features.network.winhttp
+                || features.network.schannel
+                || features.network.steamworks
+            {
                 network::init_with_config(
                     features.network.winsock,
                     features.network.winhttp,
@@ -598,7 +652,10 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 );
             }
             network::configure(
-                features.network.winsock || features.network.winhttp || features.network.schannel || features.network.steamworks,
+                features.network.winsock
+                    || features.network.winhttp
+                    || features.network.schannel
+                    || features.network.steamworks,
                 &features.network.ignore_ports,
                 features.network.capture_loopback,
                 &features.network.ignore_hosts,
@@ -656,7 +713,11 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
 
             let diagnostics = trainlab_core::protocol::EnvironmentDiagnostics {
                 target_os,
-                graphics_api: if api.is_empty() { "Pending detection".to_string() } else { api },
+                graphics_api: if api.is_empty() {
+                    "Pending detection".to_string()
+                } else {
+                    api
+                },
                 input_subsystem: input_hook,
                 loaded_network_modules,
                 detected_overlays,
@@ -772,9 +833,9 @@ fn free(address: u64) -> bool {
 }
 
 #[cfg(windows)]
-fn allocate_near(target: u64, size: usize, executable: bool) -> Result<u64, String> {
+pub(crate) fn allocate_near(target: u64, size: usize, executable: bool) -> Result<u64, String> {
     use windows_sys::Win32::System::Memory::{
-        VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
+        MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, VirtualAlloc,
     };
     let prot = if executable {
         PAGE_EXECUTE_READWRITE
@@ -795,7 +856,8 @@ fn allocate_near(target: u64, size: usize, executable: bool) -> Result<u64, Stri
         if target >= offset {
             let addr = (target - offset) & !(STEP - 1);
             if addr >= min_addr && addr > 0x10000 {
-                let ptr = unsafe { VirtualAlloc(addr as *const _, size, MEM_COMMIT | MEM_RESERVE, prot) };
+                let ptr =
+                    unsafe { VirtualAlloc(addr as *const _, size, MEM_COMMIT | MEM_RESERVE, prot) };
                 if !ptr.is_null() {
                     return Ok(ptr as u64);
                 }
@@ -804,7 +866,8 @@ fn allocate_near(target: u64, size: usize, executable: bool) -> Result<u64, Stri
         // Try above target
         let addr = (target + offset) & !(STEP - 1);
         if addr <= max_addr {
-            let ptr = unsafe { VirtualAlloc(addr as *const _, size, MEM_COMMIT | MEM_RESERVE, prot) };
+            let ptr =
+                unsafe { VirtualAlloc(addr as *const _, size, MEM_COMMIT | MEM_RESERVE, prot) };
             if !ptr.is_null() {
                 return Ok(ptr as u64);
             }
@@ -816,15 +879,77 @@ fn allocate_near(target: u64, size: usize, executable: bool) -> Result<u64, Stri
     allocate(size, executable)
 }
 
-#[cfg(not(windows))]
-fn allocate_near(_target: u64, size: usize, executable: bool) -> Result<u64, String> {
+#[cfg(unix)]
+pub(crate) fn allocate_near(target: u64, size: usize, executable: bool) -> Result<u64, String> {
+    let prot = if executable {
+        libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC
+    } else {
+        libc::PROT_READ | libc::PROT_WRITE
+    };
+
+    // Page alignment (typically 4096)
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+    let step = page_size.max(0x10000); // at least 64KB step
+    const TWO_GB: u64 = 0x7FFF0000; // ~2GB
+
+    let min_addr = target.saturating_sub(TWO_GB).max(0x10000);
+    let max_addr = target.saturating_add(TWO_GB);
+
+    let mut offset = step;
+    while offset < TWO_GB {
+        // Try below target
+        if target >= offset {
+            let addr = (target - offset) & !(step - 1);
+            if addr >= min_addr {
+                // SAFETY: MAP_FIXED_NOREPLACE safely probes without overwriting existing mappings.
+                let ptr = unsafe {
+                    libc::mmap(
+                        addr as *mut libc::c_void,
+                        size,
+                        prot,
+                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
+                        -1,
+                        0,
+                    )
+                };
+                if ptr != libc::MAP_FAILED {
+                    return Ok(ptr as u64);
+                }
+            }
+        }
+        // Try above target
+        let addr = (target + offset) & !(step - 1);
+        if addr <= max_addr {
+            let ptr = unsafe {
+                libc::mmap(
+                    addr as *mut libc::c_void,
+                    size,
+                    prot,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
+                    -1,
+                    0,
+                )
+            };
+            if ptr != libc::MAP_FAILED {
+                return Ok(ptr as u64);
+            }
+        }
+        offset += step;
+    }
+
+    // Fall back to unconstrained allocation
+    allocate(size, executable)
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(crate) fn allocate_near(_target: u64, size: usize, executable: bool) -> Result<u64, String> {
     allocate(size, executable)
 }
 
 #[cfg(windows)]
 fn allocate(size: usize, executable: bool) -> Result<u64, String> {
     use windows_sys::Win32::System::Memory::{
-        VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
+        MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, VirtualAlloc,
     };
     // SAFETY: allocating `size` bytes in this process with commit+reserve.
     let prot = if executable {
@@ -832,14 +957,7 @@ fn allocate(size: usize, executable: bool) -> Result<u64, String> {
     } else {
         PAGE_READWRITE
     };
-    let ptr = unsafe {
-        VirtualAlloc(
-            std::ptr::null(),
-            size,
-            MEM_COMMIT | MEM_RESERVE,
-            prot,
-        )
-    };
+    let ptr = unsafe { VirtualAlloc(std::ptr::null(), size, MEM_COMMIT | MEM_RESERVE, prot) };
     if ptr.is_null() {
         return Err(format!("VirtualAlloc failed: {}", last_error()));
     }
@@ -848,7 +966,7 @@ fn allocate(size: usize, executable: bool) -> Result<u64, String> {
 
 #[cfg(windows)]
 fn free(address: u64) -> bool {
-    use windows_sys::Win32::System::Memory::{VirtualFree, MEM_RELEASE};
+    use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
     // SAFETY: freeing a block previously allocated with MEM_RESERVE.
     let ok = unsafe { VirtualFree(address as *mut core::ffi::c_void, 0, MEM_RELEASE) };
     ok != 0
@@ -876,6 +994,20 @@ pub extern "C" fn trainlab_init() -> i32 {
     }
 }
 
+/// Automatic library constructor on Unix/Linux. When loaded via `LD_PRELOAD` or
+/// `dlopen`, this function runs automatically and spawns the listener thread,
+/// perfectly matching `DllMain` behavior on Windows.
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub extern "C" fn trainlab_constructor() {
+    let _ = start(DEFAULT_PORT);
+}
+
+#[cfg(unix)]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static INIT_ARRAY: extern "C" fn() = trainlab_constructor;
+
 /// Windows `DllMain`. On `DLL_PROCESS_ATTACH` we start the listener thread so
 /// that simply `LoadLibrary`-ing the DLL (via injection) brings up the TCP
 /// server automatically.
@@ -902,7 +1034,10 @@ mod tests {
 
     #[test]
     fn protocol_roundtrip() {
-        let req = Request::Read { address: 0x1234, len: 8 };
+        let req = Request::Read {
+            address: 0x1234,
+            len: 8,
+        };
         let frame = protocol::encode(&req).unwrap();
         let back: Request = protocol::decode(&frame).unwrap();
         match back {
@@ -926,7 +1061,11 @@ mod tests {
         let decoded: Request = protocol::decode(&frame).unwrap();
         let resp = handle_request_guarded(&mem, decoded);
         match resp {
-            Response::RenderConfigured { overlay, hook_wndproc, xinput_hooks } => {
+            Response::RenderConfigured {
+                overlay,
+                hook_wndproc,
+                xinput_hooks,
+            } => {
                 assert!(!overlay);
                 assert!(!hook_wndproc);
                 assert!(!xinput_hooks);
@@ -945,7 +1084,10 @@ mod tests {
         let decoded: Request = protocol::decode(&frame).unwrap();
         let resp = handle_request_guarded(&mem, decoded);
         match resp {
-            Response::SessionReady { capabilities, diagnostics } => {
+            Response::SessionReady {
+                capabilities,
+                diagnostics,
+            } => {
                 assert!(capabilities.contains(&"memory".to_string()));
                 assert!(capabilities.contains(&"aob_scan".to_string()));
                 assert!(capabilities.contains(&"overlay".to_string()));
@@ -954,6 +1096,21 @@ mod tests {
             }
             other => panic!("expected SessionReady, got {other:?}"),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_allocate_near_unix() {
+        let dummy_target = 0x555555554000u64;
+        let res = allocate_near(dummy_target, 4096, true);
+        assert!(res.is_ok(), "allocate_near failed: {:?}", res.err());
+        let addr = res.unwrap();
+        assert!(addr > 0);
+        let diff = (addr as i128 - dummy_target as i128).abs();
+        assert!(
+            diff <= 0x7FFF0000,
+            "allocated addr {addr:#x} too far from target {dummy_target:#x} (diff: {diff:#x})"
+        );
     }
 
     /// The request-handler panic guard must convert a panic into a clean
@@ -981,12 +1138,14 @@ mod tests {
             panic!("boom {}", "string payload");
         }));
         // The inner guarded call doesn't panic; the panic is in the test closure.
-        assert!(caught.is_err(), "the outer test closure panic should be caught");
+        assert!(
+            caught.is_err(),
+            "the outer test closure panic should be caught"
+        );
 
         // Directly verify the guard's conversion logic on a synthetic panic.
         let guard = |f: fn() -> Response| {
-            let res =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             match res {
                 Ok(r) => r,
                 Err(p) => {

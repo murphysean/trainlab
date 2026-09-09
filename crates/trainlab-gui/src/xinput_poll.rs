@@ -2,7 +2,7 @@
 //! Translates controller bumpers and stick navigation into GUI tab and focus actions
 //! ONLY when the standalone window is focused.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -51,25 +51,25 @@ pub struct ControllerAction {
 pub fn poll_controller() -> Option<ControllerAction> {
     #[cfg(windows)]
     {
+        use std::sync::atomic::Ordering;
         use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-        static GET_STATE_PTR: std::sync::OnceLock<Option<FnXInputGetState>> = std::sync::OnceLock::new();
+        static GET_STATE_PTR: std::sync::OnceLock<Option<FnXInputGetState>> =
+            std::sync::OnceLock::new();
 
-        let get_state = GET_STATE_PTR.get_or_init(|| {
-            unsafe {
-                let dll = LoadLibraryA(b"xinput1_4.dll\0".as_ptr());
-                let dll = if dll.is_null() {
-                    LoadLibraryA(b"xinput1_3.dll\0".as_ptr())
-                } else {
-                    dll
-                };
-                if !dll.is_null() {
-                    let proc = GetProcAddress(dll, b"XInputGetState\0".as_ptr());
-                    if let Some(p) = proc {
-                        return Some(std::mem::transmute(p));
-                    }
+        let get_state = GET_STATE_PTR.get_or_init(|| unsafe {
+            let dll = LoadLibraryA(b"xinput1_4.dll\0".as_ptr());
+            let dll = if dll.is_null() {
+                LoadLibraryA(b"xinput1_3.dll\0".as_ptr())
+            } else {
+                dll
+            };
+            if !dll.is_null() {
+                let proc = GetProcAddress(dll, b"XInputGetState\0".as_ptr());
+                if let Some(p) = proc {
+                    return Some(std::mem::transmute(p));
                 }
-                None
             }
+            None
         });
 
         if let Some(func) = get_state {

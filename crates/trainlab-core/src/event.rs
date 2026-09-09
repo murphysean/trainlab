@@ -46,10 +46,7 @@ pub enum SessionEvent {
         note: Option<String>,
     },
     /// A memory scan was initiated or refined.
-    ScanUpdated {
-        count: usize,
-        value_type: String,
-    },
+    ScanUpdated { count: usize, value_type: String },
     /// A cheat profile was loaded.
     ProfileLoaded {
         name: String,
@@ -57,18 +54,11 @@ pub enum SessionEvent {
         cheats_count: usize,
     },
     /// A new activity log entry was appended.
-    ActivityLogged {
-        entry: String,
-    },
+    ActivityLogged { entry: String },
     /// A window visibility request was issued ("show" or "hide").
-    WindowVisibility {
-        command: String,
-    },
+    WindowVisibility { command: String },
     /// Connection state changed (connected / disconnected).
-    ConnectionChanged {
-        connected: bool,
-        game_name: String,
-    },
+    ConnectionChanged { connected: bool, game_name: String },
     /// Session lifecycle state changed (Idle, TargetAttached, Injected, Connected, TargetLost).
     LifecycleChanged {
         state: String,
@@ -90,9 +80,7 @@ pub enum SessionEvent {
         payload_len: usize,
     },
     /// The network capture log was cleared.
-    NetworkLogCleared {
-        cleared_count: usize,
-    },
+    NetworkLogCleared { cleared_count: usize },
 }
 
 /// Event bus holding the broadcast sender.
@@ -129,4 +117,3 @@ impl EventBus {
         self.sender.subscribe()
     }
 }
-

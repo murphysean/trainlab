@@ -30,7 +30,11 @@ pub enum Event {
     /// A button cheat or action was triggered (e.g. from in-game overlay).
     CheatTriggered { id: u64 },
     /// A cheat's value or pinned target changed.
-    CheatValueChanged { id: u64, value_str: String, pinned_bytes: Option<Vec<u8>> },
+    CheatValueChanged {
+        id: u64,
+        value_str: String,
+        pinned_bytes: Option<Vec<u8>>,
+    },
     /// A cheat was removed from the session.
     CheatRemoved { id: u64 },
     /// Full snapshot sync of all active cheats.
@@ -46,7 +50,10 @@ pub enum Event {
     /// Real-time captured network packet event from Winsock/WinHTTP hooks.
     NetworkPacket(NetworkPacketDto),
     /// Notification of network hooks installation results from injected DLL.
-    NetworkHooksInstalled { subsystem: String, results: Vec<String> },
+    NetworkHooksInstalled {
+        subsystem: String,
+        results: Vec<String>,
+    },
     /// Acknowledge packet receipt and notify DLL to free any staged buffer in game memory.
     AcknowledgePacket { id: u64, discard: bool },
 }
@@ -125,15 +132,9 @@ pub enum Request {
     },
     /// Reverse-reference scan: find addresses whose pointer value points into
     /// the range `[lo, hi]`.
-    PointerScan {
-        lo: u64,
-        hi: u64,
-    },
+    PointerScan { lo: u64, hi: u64 },
     /// Resolve a known pointer chain against the game's live memory.
-    PointerChase {
-        base: u64,
-        offsets: Vec<u64>,
-    },
+    PointerChase { base: u64, offsets: Vec<u64> },
     /// Arm a hardware watchpoint (DR0/DR7) on `address` so that when the game
     /// *writes* that location we capture the writing code's registers (T-028).
     ///
@@ -151,10 +152,7 @@ pub enum Request {
     /// code address. When execution reaches `address` we capture registers and
     /// a stack trace, restore the original byte, and (unless `one_shot` is
     /// false) re-arm. The hit is reported as a [`Response::WatchHit`] (T-029).
-    BreakOnCode {
-        address: u64,
-        one_shot: bool,
-    },
+    BreakOnCode { address: u64, one_shot: bool },
     /// Arm a **non-stalling, passive register capture** at a code address.
     ///
     /// Installs a transparent trampoline at `target` that records the value of
@@ -230,13 +228,9 @@ pub enum Request {
         ignore_hosts: Vec<String>,
     },
     /// Initialize the injected DLL session with requested features and filters (consolidated capability handshake).
-    InitializeSession {
-        features: InjectFeaturesConfig,
-    },
+    InitializeSession { features: InjectFeaturesConfig },
     /// Sync active dynamic memory pins to the injected DLL's frame-cadence loop.
-    SyncPins {
-        pins: Vec<PinSpec>,
-    },
+    SyncPins { pins: Vec<PinSpec> },
     /// Clear all active dynamic memory pins in the injected DLL.
     ClearPins,
 }
@@ -391,7 +385,7 @@ pub enum Response {
 }
 
 /// Injected DLL feature enablement configuration (permissive/opt-out defaults).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InjectFeaturesConfig {
     #[serde(default)]
     pub display: DisplayFeatures,
@@ -401,17 +395,6 @@ pub struct InjectFeaturesConfig {
     pub network: NetworkFeatures,
     #[serde(default)]
     pub memory: MemoryFeatures,
-}
-
-impl Default for InjectFeaturesConfig {
-    fn default() -> Self {
-        Self {
-            display: DisplayFeatures::default(),
-            input: InputFeatures::default(),
-            network: NetworkFeatures::default(),
-            memory: MemoryFeatures::default(),
-        }
-    }
 }
 
 /// Display and rendering hook features.
@@ -752,11 +735,17 @@ pub struct NetworkStatsDto {
 
 impl NetworkStatsDto {
     pub fn total_inbound_packets(&self) -> u64 {
-        self.tcp.inbound_packets + self.udp.inbound_packets + self.http.inbound_packets + self.steam.inbound_packets
+        self.tcp.inbound_packets
+            + self.udp.inbound_packets
+            + self.http.inbound_packets
+            + self.steam.inbound_packets
     }
 
     pub fn total_outbound_packets(&self) -> u64 {
-        self.tcp.outbound_packets + self.udp.outbound_packets + self.http.outbound_packets + self.steam.outbound_packets
+        self.tcp.outbound_packets
+            + self.udp.outbound_packets
+            + self.http.outbound_packets
+            + self.steam.outbound_packets
     }
 
     pub fn total_packets(&self) -> u64 {
@@ -764,18 +753,23 @@ impl NetworkStatsDto {
     }
 
     pub fn total_inbound_bytes(&self) -> u64 {
-        self.tcp.inbound_bytes + self.udp.inbound_bytes + self.http.inbound_bytes + self.steam.inbound_bytes
+        self.tcp.inbound_bytes
+            + self.udp.inbound_bytes
+            + self.http.inbound_bytes
+            + self.steam.inbound_bytes
     }
 
     pub fn total_outbound_bytes(&self) -> u64 {
-        self.tcp.outbound_bytes + self.udp.outbound_bytes + self.http.outbound_bytes + self.steam.outbound_bytes
+        self.tcp.outbound_bytes
+            + self.udp.outbound_bytes
+            + self.http.outbound_bytes
+            + self.steam.outbound_bytes
     }
 
     pub fn total_bytes(&self) -> u64 {
         self.total_inbound_bytes() + self.total_outbound_bytes()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -818,7 +812,11 @@ mod tests {
         let encoded = encode(&pong).expect("failed to encode Pong");
         let decoded: Response = decode(&encoded).expect("failed to decode Pong");
 
-        if let Response::Pong { version, capabilities } = decoded {
+        if let Response::Pong {
+            version,
+            capabilities,
+        } = decoded
+        {
             assert_eq!(version, "0.1.0");
             assert_eq!(capabilities, vec!["memory", "network_capture"]);
         } else {
@@ -826,4 +824,3 @@ mod tests {
         }
     }
 }
-

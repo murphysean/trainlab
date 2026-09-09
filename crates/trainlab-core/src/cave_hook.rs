@@ -12,8 +12,7 @@ use serde::{Deserialize, Serialize};
 /// installer for semantics). Serialized so an agent can choose the patch
 /// strategy from the MCP tool.
 /// Jump style for the code cave patch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum JumpStyle {
     /// 14-byte absolute jump (`FF 25 rel32` + 8-byte target slot). Needs 14 contiguous bytes.
     #[default]
@@ -21,7 +20,6 @@ pub enum JumpStyle {
     /// 5-byte relative jump (`E9 rel32`). Fits tight patch sites (>= 5 bytes).
     Relative,
 }
-
 
 /// How a code-cave hook redirects a target instruction (see the `trainlab-cave`
 /// installer for semantics). Serialized so an agent can choose the patch
@@ -53,10 +51,7 @@ pub enum CaveHook {
 pub fn is_hook_jump_bytes(bytes: &[u8]) -> bool {
     if bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
         true
-    } else if !bytes.is_empty() && (bytes[0] == 0xE9 || bytes[0] == 0xEB) {
-        true
     } else {
-        false
+        !bytes.is_empty() && (bytes[0] == 0xE9 || bytes[0] == 0xEB)
     }
 }
-

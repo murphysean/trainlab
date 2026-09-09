@@ -33,9 +33,9 @@ impl HotkeySpec {
         for m in mod_parts {
             match m.to_lowercase().as_str() {
                 "ctrl" | "control" => modifiers |= 0x0002, // MOD_CONTROL
-                "alt" => modifiers |= 0x0001,            // MOD_ALT
-                "shift" => modifiers |= 0x0004,          // MOD_SHIFT
-                "win" | "super" => modifiers |= 0x0008,   // MOD_WIN
+                "alt" => modifiers |= 0x0001,              // MOD_ALT
+                "shift" => modifiers |= 0x0004,            // MOD_SHIFT
+                "win" | "super" => modifiers |= 0x0008,    // MOD_WIN
                 _ => return Err(format!("unknown modifier '{m}'")),
             }
         }
@@ -97,7 +97,7 @@ fn parse_virtual_key(key: &str) -> Result<u32, String> {
         "f10" => 0x79,
         "f11" => 0x7A,
         "f12" => 0x7B,
-        "[" | "leftbracket" | "lbrack" => 0xDB, // VK_OEM_4
+        "[" | "leftbracket" | "lbrack" => 0xDB,   // VK_OEM_4
         "`" | "~" | "tilde" | "backtick" => 0xC0, // VK_OEM_3
         s if s.len() == 1 => {
             let ch = s.chars().next().unwrap();
@@ -161,14 +161,7 @@ fn vk_to_name(vk: u32) -> &'static str {
 /// Register a global hotkey with Win32 `RegisterHotKey`.
 #[cfg(target_os = "windows")]
 pub fn register_hotkey(hwnd: isize, id: i32, spec: HotkeySpec) -> Result<(), String> {
-    let res = unsafe {
-        RegisterHotKey(
-            hwnd as _,
-            id,
-            spec.modifiers,
-            spec.vk,
-        )
-    };
+    let res = unsafe { RegisterHotKey(hwnd as _, id, spec.modifiers, spec.vk) };
     if res != 0 {
         Ok(())
     } else {
@@ -190,10 +183,17 @@ pub fn unregister_hotkey(hwnd: isize, id: i32) {
 /// Poll the Win32 thread message queue for WM_HOTKEY events.
 #[cfg(target_os = "windows")]
 pub fn poll_wm_hotkey() -> Option<i32> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_REMOVE, WM_HOTKEY};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW, WM_HOTKEY};
     unsafe {
         let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
-        if PeekMessageW(&mut msg, std::ptr::null_mut(), WM_HOTKEY, WM_HOTKEY, PM_REMOVE) != 0 {
+        if PeekMessageW(
+            &mut msg,
+            std::ptr::null_mut(),
+            WM_HOTKEY,
+            WM_HOTKEY,
+            PM_REMOVE,
+        ) != 0
+        {
             return Some(msg.wParam as i32);
         }
     }

@@ -1,7 +1,7 @@
 //! In-game interactive overlay logic and input translation for `egui`.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use trainlab_core::protocol::{Event, OverlayCheatDto, PinOp, PinSpec};
 
 pub static CHEATS: Mutex<Vec<OverlayCheatDto>> = Mutex::new(Vec::new());
@@ -50,12 +50,17 @@ fn get_categories(cheats: &[OverlayCheatDto]) -> Vec<Option<String>> {
     cats.push(None);
     for c in cheats {
         if (c.kind_str == "toggle" || c.kind_str == "button")
-            && let Some(g) = &c.group {
-                let g_str = g.trim().to_string();
-                if !g_str.is_empty() && !cats.iter().any(|existing| existing.as_deref() == Some(g_str.as_str())) {
-                    cats.push(Some(g_str));
-                }
+            && let Some(g) = &c.group
+        {
+            let g_str = g.trim().to_string();
+            if !g_str.is_empty()
+                && !cats
+                    .iter()
+                    .any(|existing| existing.as_deref() == Some(g_str.as_str()))
+            {
+                cats.push(Some(g_str));
             }
+        }
     }
     cats
 }
@@ -68,12 +73,17 @@ fn get_active_tab_item_count() -> usize {
 
     if (tab as usize) < categories.len() {
         let cat = &categories[tab as usize];
-        cheats.iter().filter(|c| {
-            (c.kind_str == "toggle" || c.kind_str == "button") && match cat {
-                Some(g) => c.group.as_deref() == Some(g),
-                None => true,
-            }
-        }).count().max(1)
+        cheats
+            .iter()
+            .filter(|c| {
+                (c.kind_str == "toggle" || c.kind_str == "button")
+                    && match cat {
+                        Some(g) => c.group.as_deref() == Some(g),
+                        None => true,
+                    }
+            })
+            .count()
+            .max(1)
     } else {
         // Window actions (Show GUI, Hide GUI, Disconnect)
         3
@@ -90,7 +100,11 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
     // 1. Tab Switching via Bumpers (LB / RB across dynamic groups + Window tab)
     if (just_pressed & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0 {
         let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-        let new_tab = if cur_tab == 0 { total_tabs.saturating_sub(1) } else { cur_tab - 1 };
+        let new_tab = if cur_tab == 0 {
+            total_tabs.saturating_sub(1)
+        } else {
+            cur_tab - 1
+        };
         ACTIVE_TAB.store(new_tab, Ordering::Relaxed);
         SELECTED_INDEX.store(0, Ordering::Relaxed);
     }
@@ -142,7 +156,11 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
 
     if move_left {
         let cur_tab = ACTIVE_TAB.load(Ordering::Relaxed);
-        let new_tab = if cur_tab == 0 { total_tabs.saturating_sub(1) } else { cur_tab - 1 };
+        let new_tab = if cur_tab == 0 {
+            total_tabs.saturating_sub(1)
+        } else {
+            cur_tab - 1
+        };
         ACTIVE_TAB.store(new_tab, Ordering::Relaxed);
         SELECTED_INDEX.store(0, Ordering::Relaxed);
     } else if move_right {
@@ -206,12 +224,16 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
         if (cur_tab as usize) < categories.len() {
             let cat = &categories[cur_tab as usize];
             if let Ok(mut cheats) = CHEATS.lock() {
-                let mut toggles: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| {
-                    (c.kind_str == "toggle" || c.kind_str == "button") && match cat {
-                        Some(g) => c.group.as_deref() == Some(g),
-                        None => true,
-                    }
-                }).collect();
+                let mut toggles: Vec<&mut OverlayCheatDto> = cheats
+                    .iter_mut()
+                    .filter(|c| {
+                        (c.kind_str == "toggle" || c.kind_str == "button")
+                            && match cat {
+                                Some(g) => c.group.as_deref() == Some(g),
+                                None => true,
+                            }
+                    })
+                    .collect();
                 if sel < toggles.len() {
                     let cheat = &mut toggles[sel];
                     let id = cheat.id;
@@ -226,7 +248,11 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
                             *tf = Some((id, std::time::Instant::now()));
                         }
                         if let Ok(mut toast) = STATUS_TOAST.lock() {
-                            *toast = Some((format!("Triggered '{}'", cheat.label), true, std::time::Instant::now()));
+                            *toast = Some((
+                                format!("Triggered '{}'", cheat.label),
+                                true,
+                                std::time::Instant::now(),
+                            ));
                         }
                         tracing::info!("Overlay triggered button cheat #{} '{}'", id, cheat.label);
                     } else {
@@ -238,12 +264,21 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
                         }
                         if let Ok(mut toast) = STATUS_TOAST.lock() {
                             *toast = Some((
-                                format!("{} -> {}", cheat.label, if enabled { "ENABLED" } else { "DISABLED" }),
+                                format!(
+                                    "{} -> {}",
+                                    cheat.label,
+                                    if enabled { "ENABLED" } else { "DISABLED" }
+                                ),
                                 enabled,
                                 std::time::Instant::now(),
                             ));
                         }
-                        tracing::info!("Overlay toggled cheat #{} '{}' -> {}", id, cheat.label, enabled);
+                        tracing::info!(
+                            "Overlay toggled cheat #{} '{}' -> {}",
+                            id,
+                            cheat.label,
+                            enabled
+                        );
                     }
                 }
             }
@@ -255,10 +290,16 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
                 _ => "show",
             };
             if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                out.push(Event::WindowCommand { command: cmd.to_string() });
+                out.push(Event::WindowCommand {
+                    command: cmd.to_string(),
+                });
             }
             if let Ok(mut toast) = STATUS_TOAST.lock() {
-                *toast = Some((format!("Executed Window: {cmd}"), true, std::time::Instant::now()));
+                *toast = Some((
+                    format!("Executed Window: {cmd}"),
+                    true,
+                    std::time::Instant::now(),
+                ));
             }
             tracing::info!("Overlay requested main window command: {}", cmd);
         }
@@ -277,9 +318,10 @@ pub fn push_controller_input(just_pressed: u16, thumb_ly: i16, thumb_lx: i16) {
     }
 
     if !events.is_empty()
-        && let Ok(mut queue) = PENDING_EGUI_EVENTS.lock() {
-            queue.extend(events);
-        }
+        && let Ok(mut queue) = PENDING_EGUI_EVENTS.lock()
+    {
+        queue.extend(events);
+    }
 }
 
 /// Push mouse move and pointer button events from Touchscreen / Trackpad / Mouse.
@@ -324,16 +366,22 @@ pub fn apply_event(event: Event) {
         }
         Event::CheatToggled { id, enabled } => {
             if let Ok(mut lock) = CHEATS.lock()
-                && let Some(cheat) = lock.iter_mut().find(|c| c.id == id) {
-                    cheat.enabled = enabled;
-                }
+                && let Some(cheat) = lock.iter_mut().find(|c| c.id == id)
+            {
+                cheat.enabled = enabled;
+            }
         }
-        Event::CheatValueChanged { id, value_str, pinned_bytes } => {
+        Event::CheatValueChanged {
+            id,
+            value_str,
+            pinned_bytes,
+        } => {
             if let Ok(mut lock) = CHEATS.lock()
-                && let Some(cheat) = lock.iter_mut().find(|c| c.id == id) {
-                    cheat.current_value = Some(value_str);
-                    cheat.pinned_bytes = pinned_bytes;
-                }
+                && let Some(cheat) = lock.iter_mut().find(|c| c.id == id)
+            {
+                cheat.current_value = Some(value_str);
+                cheat.pinned_bytes = pinned_bytes;
+            }
         }
         Event::CheatRemoved { id } => {
             if let Ok(mut lock) = CHEATS.lock() {
@@ -374,9 +422,11 @@ pub fn execute_pinning_cadence() {
         for c in cheats.iter() {
             if c.enabled
                 && let Some(pinned_bytes) = &c.pinned_bytes
-                    && c.address != 0 && !pinned_bytes.is_empty() {
-                        let _ = mem.write(c.address, pinned_bytes);
-                    }
+                && c.address != 0
+                && !pinned_bytes.is_empty()
+            {
+                let _ = mem.write(c.address, pinned_bytes);
+            }
         }
     }
 
@@ -395,17 +445,14 @@ pub fn execute_pinning_cadence() {
                 match op {
                     PinOp::AssertNotNull { address } => {
                         if *address == 0 {
-                            abort_pin = true;
                             break;
                         }
                         // Check if pointer at address or the address itself is readable and non-null
                         if let Ok(buf) = mem.read(*address, 8) {
                             if buf.iter().all(|&b| b == 0) {
-                                abort_pin = true;
                                 break;
                             }
                         } else {
-                            abort_pin = true;
                             break;
                         }
                     }
@@ -414,7 +461,13 @@ pub fn execute_pinning_cadence() {
                             let _ = mem.write(*address, data);
                         }
                     }
-                    PinOp::CopyValue { src_address, dst_address, value_type, addend, max_only } => {
+                    PinOp::CopyValue {
+                        src_address,
+                        dst_address,
+                        value_type,
+                        addend,
+                        max_only,
+                    } => {
                         if *src_address == 0 || *dst_address == 0 {
                             abort_pin = true;
                             continue;
@@ -424,33 +477,51 @@ pub fn execute_pinning_cadence() {
                             let val_f64 = match value_type {
                                 trainlab_core::scan::ValueType::I32 => {
                                     if src_bytes.len() >= 4 {
-                                        i32::from_le_bytes(src_bytes[..4].try_into().unwrap()) as f64
-                                    } else { 0.0 }
+                                        i32::from_le_bytes(src_bytes[..4].try_into().unwrap())
+                                            as f64
+                                    } else {
+                                        0.0
+                                    }
                                 }
                                 trainlab_core::scan::ValueType::U32 => {
                                     if src_bytes.len() >= 4 {
-                                        u32::from_le_bytes(src_bytes[..4].try_into().unwrap()) as f64
-                                    } else { 0.0 }
+                                        u32::from_le_bytes(src_bytes[..4].try_into().unwrap())
+                                            as f64
+                                    } else {
+                                        0.0
+                                    }
                                 }
                                 trainlab_core::scan::ValueType::F32 => {
                                     if src_bytes.len() >= 4 {
-                                        f32::from_le_bytes(src_bytes[..4].try_into().unwrap()) as f64
-                                    } else { 0.0 }
+                                        f32::from_le_bytes(src_bytes[..4].try_into().unwrap())
+                                            as f64
+                                    } else {
+                                        0.0
+                                    }
                                 }
                                 trainlab_core::scan::ValueType::I64 => {
                                     if src_bytes.len() >= 8 {
-                                        i64::from_le_bytes(src_bytes[..8].try_into().unwrap()) as f64
-                                    } else { 0.0 }
+                                        i64::from_le_bytes(src_bytes[..8].try_into().unwrap())
+                                            as f64
+                                    } else {
+                                        0.0
+                                    }
                                 }
-                                trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => {
+                                trainlab_core::scan::ValueType::U64
+                                | trainlab_core::scan::ValueType::Ptr => {
                                     if src_bytes.len() >= 8 {
-                                        u64::from_le_bytes(src_bytes[..8].try_into().unwrap()) as f64
-                                    } else { 0.0 }
+                                        u64::from_le_bytes(src_bytes[..8].try_into().unwrap())
+                                            as f64
+                                    } else {
+                                        0.0
+                                    }
                                 }
                                 trainlab_core::scan::ValueType::F64 => {
                                     if src_bytes.len() >= 8 {
                                         f64::from_le_bytes(src_bytes[..8].try_into().unwrap())
-                                    } else { 0.0 }
+                                    } else {
+                                        0.0
+                                    }
                                 }
                             };
 
@@ -460,29 +531,58 @@ pub fn execute_pinning_cadence() {
                                 val_f64
                             };
 
-                            if *max_only {
-                                if let Ok(dst_bytes) = mem.read(*dst_address, size) {
-                                    let cur_dst = match value_type {
-                                        trainlab_core::scan::ValueType::I32 => i32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
-                                        trainlab_core::scan::ValueType::U32 => u32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
-                                        trainlab_core::scan::ValueType::F32 => f32::from_le_bytes(dst_bytes[..4].try_into().unwrap_or_default()) as f64,
-                                        trainlab_core::scan::ValueType::I64 => i64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()) as f64,
-                                        trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => u64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()) as f64,
-                                        trainlab_core::scan::ValueType::F64 => f64::from_le_bytes(dst_bytes[..8].try_into().unwrap_or_default()),
-                                    };
-                                    if cur_dst >= final_val {
-                                        continue;
-                                    }
+                            if *max_only && let Ok(dst_bytes) = mem.read(*dst_address, size) {
+                                let cur_dst = match value_type {
+                                    trainlab_core::scan::ValueType::I32 => i32::from_le_bytes(
+                                        dst_bytes[..4].try_into().unwrap_or_default(),
+                                    )
+                                        as f64,
+                                    trainlab_core::scan::ValueType::U32 => u32::from_le_bytes(
+                                        dst_bytes[..4].try_into().unwrap_or_default(),
+                                    )
+                                        as f64,
+                                    trainlab_core::scan::ValueType::F32 => f32::from_le_bytes(
+                                        dst_bytes[..4].try_into().unwrap_or_default(),
+                                    )
+                                        as f64,
+                                    trainlab_core::scan::ValueType::I64 => i64::from_le_bytes(
+                                        dst_bytes[..8].try_into().unwrap_or_default(),
+                                    )
+                                        as f64,
+                                    trainlab_core::scan::ValueType::U64
+                                    | trainlab_core::scan::ValueType::Ptr => u64::from_le_bytes(
+                                        dst_bytes[..8].try_into().unwrap_or_default(),
+                                    )
+                                        as f64,
+                                    trainlab_core::scan::ValueType::F64 => f64::from_le_bytes(
+                                        dst_bytes[..8].try_into().unwrap_or_default(),
+                                    ),
+                                };
+                                if cur_dst >= final_val {
+                                    continue;
                                 }
                             }
 
                             let write_bytes = match value_type {
-                                trainlab_core::scan::ValueType::I32 => (final_val as i32).to_le_bytes().to_vec(),
-                                trainlab_core::scan::ValueType::U32 => (final_val as u32).to_le_bytes().to_vec(),
-                                trainlab_core::scan::ValueType::F32 => (final_val as f32).to_le_bytes().to_vec(),
-                                trainlab_core::scan::ValueType::I64 => (final_val as i64).to_le_bytes().to_vec(),
-                                trainlab_core::scan::ValueType::U64 | trainlab_core::scan::ValueType::Ptr => (final_val as u64).to_le_bytes().to_vec(),
-                                trainlab_core::scan::ValueType::F64 => final_val.to_le_bytes().to_vec(),
+                                trainlab_core::scan::ValueType::I32 => {
+                                    (final_val as i32).to_le_bytes().to_vec()
+                                }
+                                trainlab_core::scan::ValueType::U32 => {
+                                    (final_val as u32).to_le_bytes().to_vec()
+                                }
+                                trainlab_core::scan::ValueType::F32 => {
+                                    (final_val as f32).to_le_bytes().to_vec()
+                                }
+                                trainlab_core::scan::ValueType::I64 => {
+                                    (final_val as i64).to_le_bytes().to_vec()
+                                }
+                                trainlab_core::scan::ValueType::U64
+                                | trainlab_core::scan::ValueType::Ptr => {
+                                    (final_val as u64).to_le_bytes().to_vec()
+                                }
+                                trainlab_core::scan::ValueType::F64 => {
+                                    final_val.to_le_bytes().to_vec()
+                                }
                             };
                             let _ = mem.write(*dst_address, &write_bytes);
                         } else {
@@ -502,7 +602,11 @@ static EGUI_CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
 pub fn render_in_game_egui(
     screen_width: f32,
     screen_height: f32,
-) -> Option<(egui::Context, Vec<egui::ClippedPrimitive>, egui::TexturesDelta)> {
+) -> Option<(
+    egui::Context,
+    Vec<egui::ClippedPrimitive>,
+    egui::TexturesDelta,
+)> {
     let ctx = {
         let mut lock = EGUI_CTX.lock().ok()?;
         if lock.is_none() {
@@ -511,7 +615,10 @@ pub fn render_in_game_egui(
             visuals.window_rounding = egui::Rounding::same(10.0);
             visuals.window_fill = egui::Color32::from_rgba_premultiplied(12, 16, 24, 210);
             visuals.panel_fill = egui::Color32::from_rgba_premultiplied(16, 22, 34, 180);
-            visuals.window_stroke = egui::Stroke::new(1.5_f32, egui::Color32::from_rgba_premultiplied(30, 160, 240, 200));
+            visuals.window_stroke = egui::Stroke::new(
+                1.5_f32,
+                egui::Color32::from_rgba_premultiplied(30, 160, 240, 200),
+            );
             visuals.window_shadow = egui::epaint::Shadow {
                 offset: egui::vec2(0.0, 8.0),
                 blur: 16.0,
@@ -538,7 +645,10 @@ pub fn render_in_game_egui(
         egui::Window::new("🎮 Trainlab In-Game Overlay")
             .fixed_pos(egui::pos2(30.0, 30.0))
             .fixed_size(egui::vec2(360.0, 500.0))
-            .frame(egui::Frame::window(&ctx.style()).fill(egui::Color32::from_rgba_premultiplied(12, 16, 24, 205)))
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(egui::Color32::from_rgba_premultiplied(12, 16, 24, 205)),
+            )
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -590,14 +700,34 @@ pub fn render_in_game_egui(
                     if elapsed < 2.5 {
                         let alpha = ((2.5 - elapsed) / 0.5).clamp(0.0, 1.0);
                         let bg_color = if is_ok {
-                            egui::Color32::from_rgba_premultiplied(10, 80, 40, (180.0 * alpha) as u8)
+                            egui::Color32::from_rgba_premultiplied(
+                                10,
+                                80,
+                                40,
+                                (180.0 * alpha) as u8,
+                            )
                         } else {
-                            egui::Color32::from_rgba_premultiplied(120, 30, 30, (180.0 * alpha) as u8)
+                            egui::Color32::from_rgba_premultiplied(
+                                120,
+                                30,
+                                30,
+                                (180.0 * alpha) as u8,
+                            )
                         };
                         let text_color = if is_ok {
-                            egui::Color32::from_rgba_premultiplied(150, 255, 180, (255.0 * alpha) as u8)
+                            egui::Color32::from_rgba_premultiplied(
+                                150,
+                                255,
+                                180,
+                                (255.0 * alpha) as u8,
+                            )
                         } else {
-                            egui::Color32::from_rgba_premultiplied(255, 180, 180, (255.0 * alpha) as u8)
+                            egui::Color32::from_rgba_premultiplied(
+                                255,
+                                180,
+                                180,
+                                (255.0 * alpha) as u8,
+                            )
                         };
 
                         egui::Frame::none()
@@ -621,15 +751,22 @@ pub fn render_in_game_egui(
                     ui.label("• LB/RB: Switch Category | D-Pad: Move | A: Toggle/Trigger");
                     ui.separator();
 
-                    let mut toggle_cheats: Vec<&mut OverlayCheatDto> = cheats.iter_mut().filter(|c| {
-                        (c.kind_str == "toggle" || c.kind_str == "button") && match cat {
-                            Some(g) => c.group.as_deref() == Some(g),
-                            None => true,
-                        }
-                    }).collect();
+                    let mut toggle_cheats: Vec<&mut OverlayCheatDto> = cheats
+                        .iter_mut()
+                        .filter(|c| {
+                            (c.kind_str == "toggle" || c.kind_str == "button")
+                                && match cat {
+                                    Some(g) => c.group.as_deref() == Some(g),
+                                    None => true,
+                                }
+                        })
+                        .collect();
 
                     if toggle_cheats.is_empty() {
-                        ui.colored_label(egui::Color32::GRAY, "No cheats or buttons registered yet.");
+                        ui.colored_label(
+                            egui::Color32::GRAY,
+                            "No cheats or buttons registered yet.",
+                        );
                         ui.label("Add cheats in trainlab-gui, load a profile, or use an AI agent.");
                     } else {
                         // Check if an item is actively flashing from a trigger
@@ -642,10 +779,7 @@ pub fn render_in_game_egui(
                             let cur_enabled = cheat.enabled;
 
                             // Calculate flash animation (0.6s flash duration)
-                            let is_flashing = match active_flash {
-                                Some((id, t)) if id == cheat_id && t.elapsed().as_secs_f32() < 0.6 => true,
-                                _ => false,
-                            };
+                            let is_flashing = matches!(active_flash, Some((id, t)) if id == cheat_id && t.elapsed().as_secs_f32() < 0.6);
 
                             let icon = if is_flashing {
                                 "⚡"
@@ -663,12 +797,18 @@ pub fn render_in_game_egui(
                             let (fill_col, stroke) = if is_flashing {
                                 (
                                     egui::Color32::from_rgba_premultiplied(40, 200, 100, 180),
-                                    egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(100, 255, 180)),
+                                    egui::Stroke::new(
+                                        2.5_f32,
+                                        egui::Color32::from_rgb(100, 255, 180),
+                                    ),
                                 )
                             } else if is_selected {
                                 (
                                     egui::Color32::from_rgba_premultiplied(30, 140, 230, 100),
-                                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)),
+                                    egui::Stroke::new(
+                                        2.0_f32,
+                                        egui::Color32::from_rgb(0, 220, 255),
+                                    ),
                                 )
                             } else {
                                 (
@@ -685,10 +825,19 @@ pub fn render_in_game_egui(
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         if is_flashing {
-                                            ui.colored_label(egui::Color32::WHITE, egui::RichText::new(&text).strong());
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                ui.colored_label(egui::Color32::LIGHT_GREEN, "FIRED!");
-                                            });
+                                            ui.colored_label(
+                                                egui::Color32::WHITE,
+                                                egui::RichText::new(&text).strong(),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.colored_label(
+                                                        egui::Color32::LIGHT_GREEN,
+                                                        "FIRED!",
+                                                    );
+                                                },
+                                            );
                                         } else {
                                             ui.label(text);
                                         }
@@ -711,23 +860,43 @@ pub fn render_in_game_egui(
                                         *tf = Some((cheat_id, std::time::Instant::now()));
                                     }
                                     if let Ok(mut toast) = STATUS_TOAST.lock() {
-                                        *toast = Some((format!("Triggered '{}'", cheat.label), true, std::time::Instant::now()));
+                                        *toast = Some((
+                                            format!("Triggered '{}'", cheat.label),
+                                            true,
+                                            std::time::Instant::now(),
+                                        ));
                                     }
-                                    tracing::info!("Overlay clicked button cheat #{} '{}'", cheat_id, cheat.label);
+                                    tracing::info!(
+                                        "Overlay clicked button cheat #{} '{}'",
+                                        cheat_id,
+                                        cheat.label
+                                    );
                                 } else {
                                     cheat.enabled = !cur_enabled;
                                     let new_en = cheat.enabled;
                                     if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                                        out.push(Event::CheatToggled { id: cheat_id, enabled: new_en });
+                                        out.push(Event::CheatToggled {
+                                            id: cheat_id,
+                                            enabled: new_en,
+                                        });
                                     }
                                     if let Ok(mut toast) = STATUS_TOAST.lock() {
                                         *toast = Some((
-                                            format!("{} -> {}", cheat.label, if new_en { "ENABLED" } else { "DISABLED" }),
+                                            format!(
+                                                "{} -> {}",
+                                                cheat.label,
+                                                if new_en { "ENABLED" } else { "DISABLED" }
+                                            ),
                                             new_en,
                                             std::time::Instant::now(),
                                         ));
                                     }
-                                    tracing::info!("Overlay clicked toggle cheat #{} '{}' -> {}", cheat_id, cheat.label, new_en);
+                                    tracing::info!(
+                                        "Overlay clicked toggle cheat #{} '{}' -> {}",
+                                        cheat_id,
+                                        cheat.label,
+                                        new_en
+                                    );
                                 }
                             }
                             ui.separator();
@@ -735,14 +904,26 @@ pub fn render_in_game_egui(
                     }
                 } else {
                     // TAB 1: Window Actions
-                    ui.colored_label(egui::Color32::from_rgb(255, 180, 0), "● GUI Window Controls");
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 180, 0),
+                        "● GUI Window Controls",
+                    );
                     ui.label("• LB/RB: Switch Tab | D-Pad: Move | A: Execute");
                     ui.separator();
 
                     let actions = [
-                        ("👁 Reveal / Show GUI Window", "Restore the standalone Trainlab GUI window"),
-                        ("🙈 Hide / Background GUI Window", "Minimize GUI to background for zero overhead"),
-                        ("🔄 Restore GUI to Front", "Bring GUI window to foreground focus"),
+                        (
+                            "👁 Reveal / Show GUI Window",
+                            "Restore the standalone Trainlab GUI window",
+                        ),
+                        (
+                            "🙈 Hide / Background GUI Window",
+                            "Minimize GUI to background for zero overhead",
+                        ),
+                        (
+                            "🔄 Restore GUI to Front",
+                            "Bring GUI window to foreground focus",
+                        ),
                     ];
 
                     for (idx, (title, desc)) in actions.iter().enumerate() {
@@ -750,7 +931,11 @@ pub fn render_in_game_egui(
                         let row_content = |ui: &mut egui::Ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new(*title).strong());
-                                ui.label(egui::RichText::new(*desc).color(egui::Color32::GRAY).small());
+                                ui.label(
+                                    egui::RichText::new(*desc)
+                                        .color(egui::Color32::GRAY)
+                                        .small(),
+                                );
                             });
                         };
 
@@ -758,7 +943,10 @@ pub fn render_in_game_egui(
                         if is_selected {
                             let resp = egui::Frame::none()
                                 .fill(egui::Color32::from_rgba_premultiplied(30, 140, 230, 100))
-                                .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(0, 220, 255)))
+                                .stroke(egui::Stroke::new(
+                                    2.0_f32,
+                                    egui::Color32::from_rgb(0, 220, 255),
+                                ))
                                 .rounding(egui::Rounding::same(6.0))
                                 .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                                 .show(ui, |ui| {
@@ -788,10 +976,16 @@ pub fn render_in_game_egui(
                                 _ => "show",
                             };
                             if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
-                                out.push(Event::WindowCommand { command: cmd.to_string() });
+                                out.push(Event::WindowCommand {
+                                    command: cmd.to_string(),
+                                });
                             }
                             if let Ok(mut toast) = STATUS_TOAST.lock() {
-                                *toast = Some((format!("Executed Window: {cmd}"), true, std::time::Instant::now()));
+                                *toast = Some((
+                                    format!("Executed Window: {cmd}"),
+                                    true,
+                                    std::time::Instant::now(),
+                                ));
                             }
                             tracing::info!("Overlay clicked window action #{} -> '{}'", idx, cmd);
                         }

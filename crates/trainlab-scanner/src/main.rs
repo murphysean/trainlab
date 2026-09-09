@@ -29,13 +29,16 @@ use anyhow::{Context, Result};
 #[cfg(unix)]
 use clap::{Parser, Subcommand};
 #[cfg(unix)]
-use trainlab_core::process;
-#[cfg(unix)]
 use trainlab_core::memory::{LinuxProcess, ProcessMemory};
+#[cfg(unix)]
+use trainlab_core::process;
 
 #[cfg(unix)]
 #[derive(Parser)]
-#[command(name = "trainlab-scan", about = "Memory hunting/scanning for game training")]
+#[command(
+    name = "trainlab-scan",
+    about = "Memory hunting/scanning for game training"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -153,9 +156,12 @@ fn cmd_wine_check(pid: i32) -> Result<()> {
 
 #[cfg(unix)]
 fn cmd_wine_regions(pid: i32) -> Result<()> {
-    use trainlab_core::wine::{regions_of_kind, tag_regions, RegionKind};
+    use trainlab_core::wine::{RegionKind, regions_of_kind, tag_regions};
     let tagged = tag_regions(pid).context("failed to read /proc/pid/maps")?;
-    println!("{:<18} {:<18}  {:<4}  {:<8}  NAME", "START", "END", "PERMS", "KIND");
+    println!(
+        "{:<18} {:<18}  {:<4}  {:<8}  NAME",
+        "START", "END", "PERMS", "KIND"
+    );
     for t in &tagged {
         if !t.region.readable {
             continue;
@@ -179,7 +185,10 @@ fn cmd_wine_regions(pid: i32) -> Result<()> {
     let heap_total: u64 = regions_of_kind(&tagged, RegionKind::Heap)
         .map(|t| t.region.len())
         .sum();
-    eprintln!("{} heap region(s), {heap_total} bytes total", regions_of_kind(&tagged, RegionKind::Heap).count());
+    eprintln!(
+        "{} heap region(s), {heap_total} bytes total",
+        regions_of_kind(&tagged, RegionKind::Heap).count()
+    );
     Ok(())
 }
 
@@ -357,7 +366,11 @@ fn parse_number_as_f64(s: &str, vt: trainlab_core::scan::ValueType) -> Result<f6
 
 /// Parse a `next` operation string into a [`ScanOp`].
 #[cfg(unix)]
-fn parse_op(op: &str, value: Option<&str>, vt: trainlab_core::scan::ValueType) -> Result<trainlab_core::scan::ScanOp> {
+fn parse_op(
+    op: &str,
+    value: Option<&str>,
+    vt: trainlab_core::scan::ValueType,
+) -> Result<trainlab_core::scan::ScanOp> {
     use trainlab_core::scan::ScanOp;
     Ok(match op.to_lowercase().as_str() {
         "changed" => ScanOp::Changed,
@@ -366,19 +379,21 @@ fn parse_op(op: &str, value: Option<&str>, vt: trainlab_core::scan::ValueType) -
         "decreased" => ScanOp::Decreased,
         "exact" => {
             let v = value.context("exact requires a value")?;
-            ScanOp::Exact { value: parse_number_as_f64(v, vt)? }
+            ScanOp::Exact {
+                value: parse_number_as_f64(v, vt)?,
+            }
         }
         "range" => {
             let v = value.context("range requires 'min,max'")?;
-            let (min, max) = v
-                .split_once(',')
-                .context("range requires 'min,max'")?;
+            let (min, max) = v.split_once(',').context("range requires 'min,max'")?;
             ScanOp::Range {
                 min: parse_number_as_f64(min, vt)?,
                 max: parse_number_as_f64(max, vt)?,
             }
         }
-        other => bail!("unknown op '{other}' (expected changed/unchanged/increased/decreased/exact/range)"),
+        other => bail!(
+            "unknown op '{other}' (expected changed/unchanged/increased/decreased/exact/range)"
+        ),
     })
 }
 
@@ -395,8 +410,7 @@ fn state_path(pid: i32) -> std::path::PathBuf {
 fn save_state(pid: i32, scan: &trainlab_core::scan::Scan) -> Result<()> {
     let path = state_path(pid);
     let bytes = trainlab_core::protocol::encode(scan)?;
-    std::fs::write(&path, bytes)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -410,8 +424,8 @@ fn load_state(pid: i32) -> Result<trainlab_core::scan::Scan> {
             path.display()
         );
     }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let bytes =
+        std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let scan: trainlab_core::scan::Scan = trainlab_core::protocol::decode(&bytes)?;
     Ok(scan)
 }
@@ -449,7 +463,13 @@ fn hexdump(start: u64, data: &[u8]) {
         let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
         let ascii: String = chunk
             .iter()
-            .map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '.' })
+            .map(|&b| {
+                if b.is_ascii_graphic() || b == b' ' {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         println!("0x{addr:016x}  {:<48}  {}", hex.join(" "), ascii);
     }

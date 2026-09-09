@@ -244,15 +244,36 @@ pub struct Gate {
 impl Gate {
     /// A single-constant comparison (eq/ne/gt/lt/ge/le).
     pub fn compare(reg: Register, cmp: GateCmp, value: f64) -> Self {
-        Self { reg, cmp, value_type: ValueType::U64, value, min: 0.0, max: 0.0 }
+        Self {
+            reg,
+            cmp,
+            value_type: ValueType::U64,
+            value,
+            min: 0.0,
+            max: 0.0,
+        }
     }
     /// A range comparison.
     pub fn range(reg: Register, min: f64, max: f64) -> Self {
-        Self { reg, cmp: GateCmp::Range, value_type: ValueType::U64, value: 0.0, min, max }
+        Self {
+            reg,
+            cmp: GateCmp::Range,
+            value_type: ValueType::U64,
+            value: 0.0,
+            min,
+            max,
+        }
     }
     /// A whole-number (no fractional part) gate.
     pub fn whole(reg: Register) -> Self {
-        Self { reg, cmp: GateCmp::Whole, value_type: ValueType::F64, value: 0.0, min: 0.0, max: 0.0 }
+        Self {
+            reg,
+            cmp: GateCmp::Whole,
+            value_type: ValueType::F64,
+            value: 0.0,
+            min: 0.0,
+            max: 0.0,
+        }
     }
     /// Override the gate register's value type (defaults to U64 for compare/range
     /// gates, F64 for whole). Use this when the gate register holds a Lua/script
@@ -279,7 +300,12 @@ pub struct CaptureRegSpec {
 
 impl CaptureRegSpec {
     pub fn new(reg: Register, value_type: ValueType) -> Self {
-        Self { reg, value_type, gate: None, jump: crate::cave_hook::JumpStyle::Absolute }
+        Self {
+            reg,
+            value_type,
+            gate: None,
+            jump: crate::cave_hook::JumpStyle::Absolute,
+        }
     }
     pub fn with_gate(mut self, gate: Gate) -> Self {
         self.gate = Some(gate);
@@ -574,8 +600,8 @@ fn emit_gate_check(gate: &Gate, value_type: ValueType) -> Vec<GateCheck> {
     let fail_op = |cmp: GateCmp, signed: bool| -> u8 {
         use GateCmp::*;
         match cmp {
-            Eq => 0x75,             // jne (ZF=0)
-            Ne => 0x74,             // je (ZF=1)
+            Eq => 0x75, // jne (ZF=0)
+            Ne => 0x74, // je (ZF=1)
             Gt => {
                 if signed { 0x7E } else { 0x76 } // jle / jbe
             }
@@ -612,7 +638,10 @@ fn emit_gate_check(gate: &Gate, value_type: ValueType) -> Vec<GateCheck> {
                 }
                 prefix.extend_from_slice(&[0xDF, 0xE9]); // fucomip
                 prefix.extend_from_slice(&[0xDD, 0xD8]); // fstp st0
-                checks.push(GateCheck { prefix, fail_jcc: 0x75 }); // jne on not-whole
+                checks.push(GateCheck {
+                    prefix,
+                    fail_jcc: 0x75,
+                }); // jne on not-whole
             }
         }
         GateCmp::Range => {
@@ -824,10 +853,21 @@ mod tests {
 
     #[test]
     fn payload_starts_and_ends_with_balanced_save_restore() {
-        let p = emit_capture_payload(0x5000, 0x1401b42e9, Register::Rcx, None, ValueType::U64, true);
+        let p = emit_capture_payload(
+            0x5000,
+            0x1401b42e9,
+            Register::Rcx,
+            None,
+            ValueType::U64,
+            true,
+        );
         // Must begin with push r13 (41 55) and end with pop r13 (41 5D).
         assert_eq!(&p[0..2], &[0x41, 0x55], "starts by pushing volatile regs");
-        assert_eq!(&p[p.len() - 2..], &[0x41, 0x5D], "ends by popping volatile regs");
+        assert_eq!(
+            &p[p.len() - 2..],
+            &[0x41, 0x5D],
+            "ends by popping volatile regs"
+        );
         // Contains the ring base immediate.
         assert!(
             p.windows(8).any(|w| w == 0x5000u64.to_le_bytes()),
@@ -865,7 +905,10 @@ mod tests {
     #[test]
     fn encode_gate_const_roundtrips() {
         assert_eq!(encode_gate_const(3.5, ValueType::F64), 3.5f64.to_bits());
-        assert_eq!(encode_gate_const(3.5, ValueType::F32), (3.5f32).to_bits() as u64);
+        assert_eq!(
+            encode_gate_const(3.5, ValueType::F32),
+            (3.5f32).to_bits() as u64
+        );
         assert_eq!(encode_gate_const(42.0, ValueType::U64), 42);
         assert_eq!(encode_gate_const(-5.0, ValueType::I64), (-5i64) as u64);
         assert_eq!(encode_gate_const(0x7777u64 as f64, ValueType::Ptr), 0x7777);

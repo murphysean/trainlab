@@ -8,10 +8,10 @@
 //! handler, so an agent can set markers, list them, and (once mutating tools
 //! exist) record/apply undo operations.
 
+use crate::{cave_hook, protocol, scan};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
-use serde::{Deserialize, Serialize};
-use crate::{cave_hook, protocol, scan};
 
 /// The semantic kind of a [`Marker`], describing what the marked address represents.
 ///
@@ -276,7 +276,11 @@ pub struct ClientContext {
 }
 
 impl ClientContext {
-    pub fn new(id: impl Into<String>, kind: ClientKind, event_bus: &crate::event::EventBus) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        kind: ClientKind,
+        event_bus: &crate::event::EventBus,
+    ) -> Self {
         Self {
             id: id.into(),
             kind,
@@ -287,17 +291,13 @@ impl ClientContext {
 }
 
 /// Explicit lifecycle state of the target game process and injector connection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SessionLifecycle {
     /// No target game process is selected.
     #[default]
     Idle,
     /// A target game process is identified; external memory ops (Read/WriteProcessMemory) are active.
-    TargetAttached {
-        pid: u32,
-        exe_name: String,
-    },
+    TargetAttached { pid: u32, exe_name: String },
     /// DLL injected into game process; IPC listener initialized.
     Injected {
         pid: u32,
@@ -311,12 +311,8 @@ pub enum SessionLifecycle {
         dll_version: Option<String>,
     },
     /// Target process terminated or crashed.
-    TargetLost {
-        pid: u32,
-        exe_name: String,
-    },
+    TargetLost { pid: u32, exe_name: String },
 }
-
 
 /// A tracked memory allocation inside the target process memory (caves, scratch, strings).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,22 +359,41 @@ impl DirtyReport {
             reasons.push(format!("operation '{op}' is currently in progress"));
         }
         if !self.active_cheats.is_empty() {
-            reasons.push(format!("{} active cheat(s) enabled: [{}]", self.active_cheats.len(), self.active_cheats.join(", ")));
+            reasons.push(format!(
+                "{} active cheat(s) enabled: [{}]",
+                self.active_cheats.len(),
+                self.active_cheats.join(", ")
+            ));
         }
         if self.unreverted_undo_count > 0 {
-            reasons.push(format!("{} unreverted mutation(s) in undo log", self.unreverted_undo_count));
+            reasons.push(format!(
+                "{} unreverted mutation(s) in undo log",
+                self.unreverted_undo_count
+            ));
         }
         if self.pending_op_count > 0 {
-            reasons.push(format!("{} pending staged mutation(s)", self.pending_op_count));
+            reasons.push(format!(
+                "{} pending staged mutation(s)",
+                self.pending_op_count
+            ));
         }
         if !self.active_allocations.is_empty() {
-            reasons.push(format!("{} unfreed memory allocation(s)", self.active_allocations.len()));
+            reasons.push(format!(
+                "{} unfreed memory allocation(s)",
+                self.active_allocations.len()
+            ));
         }
         if !self.active_captures.is_empty() {
-            reasons.push(format!("{} active register capture(s)", self.active_captures.len()));
+            reasons.push(format!(
+                "{} active register capture(s)",
+                self.active_captures.len()
+            ));
         }
         if !self.active_breakpoints.is_empty() {
-            reasons.push(format!("{} active breakpoint(s)", self.active_breakpoints.len()));
+            reasons.push(format!(
+                "{} active breakpoint(s)",
+                self.active_breakpoints.len()
+            ));
         }
         if reasons.is_empty() {
             "session is clean".to_string()
@@ -496,13 +511,19 @@ impl SessionState {
 
     /// Check if the session is currently dirty (holds live modifications, active caves, or unfreed buffers).
     pub fn check_dirty(&self) -> DirtyReport {
-        let active_cheats: Vec<String> = self.cheats.iter().filter_map(|c| {
-            match &c.kind {
-                CheatKind::Toggle { enabled, .. } if *enabled => Some(format!("#{} '{}' (toggle)", c.id, c.label)),
-                CheatKind::Patch { enabled, .. } if *enabled => Some(format!("#{} '{}' (patch)", c.id, c.label)),
+        let active_cheats: Vec<String> = self
+            .cheats
+            .iter()
+            .filter_map(|c| match &c.kind {
+                CheatKind::Toggle { enabled, .. } if *enabled => {
+                    Some(format!("#{} '{}' (toggle)", c.id, c.label))
+                }
+                CheatKind::Patch { enabled, .. } if *enabled => {
+                    Some(format!("#{} '{}' (patch)", c.id, c.label))
+                }
                 _ => None,
-            }
-        }).collect();
+            })
+            .collect();
 
         DirtyReport {
             active_cheats,
@@ -526,7 +547,13 @@ impl SessionState {
     }
 
     /// Record a memory buffer allocation made inside the target process.
-    pub fn record_allocation(&mut self, address: u64, size: usize, description: impl Into<String>, marker: Option<String>) {
+    pub fn record_allocation(
+        &mut self,
+        address: u64,
+        size: usize,
+        description: impl Into<String>,
+        marker: Option<String>,
+    ) {
         self.allocated_buffers.push(AllocatedBuffer {
             address,
             size,
@@ -537,7 +564,10 @@ impl SessionState {
 
     /// Remove a recorded memory buffer allocation.
     pub fn remove_allocation(&mut self, address: u64) -> Option<AllocatedBuffer> {
-        let idx = self.allocated_buffers.iter().position(|a| a.address == address)?;
+        let idx = self
+            .allocated_buffers
+            .iter()
+            .position(|a| a.address == address)?;
         Some(self.allocated_buffers.remove(idx))
     }
 
@@ -596,11 +626,12 @@ impl SessionState {
         };
 
         self.lifecycle = lifecycle;
-        self.event_bus.emit_session(crate::event::SessionEvent::LifecycleChanged {
-            state: state_name.to_string(),
-            pid,
-            exe,
-        });
+        self.event_bus
+            .emit_session(crate::event::SessionEvent::LifecycleChanged {
+                state: state_name.to_string(),
+                pid,
+                exe,
+            });
     }
 
     /// Validate if the target process is still running; transitions to TargetLost if it terminated.
@@ -609,7 +640,10 @@ impl SessionState {
             let is_alive = crate::process::is_pid_alive(pid);
             if !is_alive {
                 let exe = self.game_name.clone();
-                self.log_activity("SYSTEM", format!("target process '{exe}' (PID {pid}) terminated"));
+                self.log_activity(
+                    "SYSTEM",
+                    format!("target process '{exe}' (PID {pid}) terminated"),
+                );
                 self.set_lifecycle(SessionLifecycle::TargetLost { pid, exe_name: exe });
                 self.game_pid = None;
                 self.connected = false;
@@ -646,7 +680,7 @@ impl SessionState {
         if self.activity_log.len() > 1000 {
             self.activity_log.remove(0);
         }
-        
+
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -657,7 +691,9 @@ impl SessionState {
             message: msg_str,
             timestamp_ms: now_ms,
         }));
-        self.publish_event(crate::event::BusEvent::Session(crate::event::SessionEvent::ActivityLogged { entry: formatted }));
+        self.publish_event(crate::event::BusEvent::Session(
+            crate::event::SessionEvent::ActivityLogged { entry: formatted },
+        ));
     }
 
     /// Access the event bus for subscribing or emitting events.
@@ -673,8 +709,14 @@ impl SessionState {
     /// Request a window visibility command ("show" or "hide").
     pub fn request_window_cmd(&mut self, cmd: impl Into<String>) {
         let cmd_str = cmd.into();
-        self.log_activity("WINDOW", format!("remote requested window command: {cmd_str}"));
-        self.event_bus.emit_session(crate::event::SessionEvent::WindowVisibility { command: cmd_str.clone() });
+        self.log_activity(
+            "WINDOW",
+            format!("remote requested window command: {cmd_str}"),
+        );
+        self.event_bus
+            .emit_session(crate::event::SessionEvent::WindowVisibility {
+                command: cmd_str.clone(),
+            });
         self.pending_window_cmd = Some(cmd_str);
     }
 
@@ -689,9 +731,17 @@ impl SessionState {
         let path_str = path.map(|p| p.trim().to_string());
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
 
-        if let Some(existing) = self.tracked_apps.iter_mut().find(|a| a.name.eq_ignore_ascii_case(&name_str)) {
-            if pid.is_some() { existing.pid = pid; }
-            if path_str.is_some() { existing.path = path_str; }
+        if let Some(existing) = self
+            .tracked_apps
+            .iter_mut()
+            .find(|a| a.name.eq_ignore_ascii_case(&name_str))
+        {
+            if pid.is_some() {
+                existing.pid = pid;
+            }
+            if path_str.is_some() {
+                existing.path = path_str;
+            }
             existing.last_seen = now;
         } else {
             self.tracked_apps.push(DiscoveredApp {
@@ -715,11 +765,16 @@ impl SessionState {
             return Err("application path cannot be empty".into());
         }
 
-        self.log_activity("LAUNCH", format!("launching binary '{app_path}' with args {:?}", args));
+        self.log_activity(
+            "LAUNCH",
+            format!("launching binary '{app_path}' with args {:?}", args),
+        );
 
         let mut cmd = std::process::Command::new(app_path);
         cmd.args(args);
-        let child = cmd.spawn().map_err(|e| format!("failed to spawn '{app_path}': {e}"))?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn '{app_path}': {e}"))?;
         let pid = child.id();
 
         let name = std::path::Path::new(app_path)
@@ -729,13 +784,17 @@ impl SessionState {
             .to_string();
 
         self.record_tracked_app(&name, Some(pid), Some(app_path));
-        self.log_activity("LAUNCH", format!("successfully spawned '{name}' (PID {pid})"));
+        self.log_activity(
+            "LAUNCH",
+            format!("successfully spawned '{name}' (PID {pid})"),
+        );
 
-        self.event_bus.emit_session(crate::event::SessionEvent::AppLaunched {
-            name: name.clone(),
-            path: app_path.to_string(),
-            pid: Some(pid),
-        });
+        self.event_bus
+            .emit_session(crate::event::SessionEvent::AppLaunched {
+                name: name.clone(),
+                path: app_path.to_string(),
+                pid: Some(pid),
+            });
 
         Ok(pid)
     }
@@ -743,14 +802,20 @@ impl SessionState {
     pub fn set_game_pid(&mut self, pid: Option<u32>) {
         self.game_pid = pid;
         if let Some(p) = pid {
-            if matches!(self.lifecycle, SessionLifecycle::Idle | SessionLifecycle::TargetLost { .. }) {
+            if matches!(
+                self.lifecycle,
+                SessionLifecycle::Idle | SessionLifecycle::TargetLost { .. }
+            ) {
                 let name = self.game_name.clone();
                 self.set_lifecycle(SessionLifecycle::TargetAttached {
                     pid: p,
                     exe_name: name,
                 });
             }
-        } else if matches!(self.lifecycle, SessionLifecycle::TargetAttached { .. } | SessionLifecycle::Connected { .. }) {
+        } else if matches!(
+            self.lifecycle,
+            SessionLifecycle::TargetAttached { .. } | SessionLifecycle::Connected { .. }
+        ) {
             self.set_lifecycle(SessionLifecycle::Idle);
         }
     }
@@ -801,10 +866,11 @@ impl SessionState {
                 self.set_lifecycle(SessionLifecycle::Idle);
             }
         }
-        self.event_bus.emit_session(crate::event::SessionEvent::ConnectionChanged {
-            connected,
-            game_name: self.game_name.clone(),
-        });
+        self.event_bus
+            .emit_session(crate::event::SessionEvent::ConnectionChanged {
+                connected,
+                game_name: self.game_name.clone(),
+            });
     }
 
     /// Whether we have a live connection to the DLL.
@@ -817,7 +883,10 @@ impl SessionState {
         let name_str = name.into();
         self.game_name = name_str.clone();
         if let SessionLifecycle::TargetAttached { pid, .. } = self.lifecycle {
-            self.set_lifecycle(SessionLifecycle::TargetAttached { pid, exe_name: name_str });
+            self.set_lifecycle(SessionLifecycle::TargetAttached {
+                pid,
+                exe_name: name_str,
+            });
         }
     }
 
@@ -867,7 +936,9 @@ impl SessionState {
 
     /// Check whether the connected DLL advertises a given capability (e.g. "network_capture").
     pub fn has_capability(&self, cap: &str) -> bool {
-        self.dll_capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap))
+        self.dll_capabilities
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(cap))
     }
 
     /// Record a captured network packet into the session ring buffer.
@@ -879,7 +950,11 @@ impl SessionState {
             self.next_network_packet_id = packet.id + 1;
         }
 
-        let cap = if self.network_packets_capacity == 0 { 2000 } else { self.network_packets_capacity };
+        let cap = if self.network_packets_capacity == 0 {
+            2000
+        } else {
+            self.network_packets_capacity
+        };
         if self.network_packets.len() >= cap {
             self.network_packets.remove(0);
         }
@@ -897,24 +972,38 @@ impl SessionState {
         filter_endpoint: Option<&str>,
     ) -> (Vec<crate::protocol::NetworkPacketDto>, usize) {
         let ep_lower = filter_endpoint.map(|e| e.trim().to_lowercase());
-        let filtered: Vec<crate::protocol::NetworkPacketDto> = self.network_packets.iter().filter(|p| {
-            if let Some(proto) = filter_proto {
-                if p.kind != proto {
+        let filtered: Vec<crate::protocol::NetworkPacketDto> = self
+            .network_packets
+            .iter()
+            .filter(|p| {
+                if let Some(proto) = filter_proto
+                    && p.kind != proto
+                {
                     return false;
                 }
-            }
-            if let Some(ref ep) = ep_lower {
-                if !ep.is_empty() {
-                    let remote_match = p.remote_endpoint.as_deref().map_or(false, |r| r.to_lowercase().contains(ep));
-                    let local_match = p.local_endpoint.as_deref().map_or(false, |l| l.to_lowercase().contains(ep));
-                    let url_match = p.url.as_deref().map_or(false, |u| u.to_lowercase().contains(ep));
+                if let Some(ref ep) = ep_lower
+                    && !ep.is_empty()
+                {
+                    let remote_match = p
+                        .remote_endpoint
+                        .as_deref()
+                        .is_some_and(|r| r.to_lowercase().contains(ep));
+                    let local_match = p
+                        .local_endpoint
+                        .as_deref()
+                        .is_some_and(|l| l.to_lowercase().contains(ep));
+                    let url_match = p
+                        .url
+                        .as_deref()
+                        .is_some_and(|u| u.to_lowercase().contains(ep));
                     if !remote_match && !local_match && !url_match {
                         return false;
                     }
                 }
-            }
-            true
-        }).cloned().collect();
+                true
+            })
+            .cloned()
+            .collect();
 
         let total = filtered.len();
         let off = offset.unwrap_or(0);
@@ -1040,14 +1129,18 @@ impl SessionState {
                 note: note.map(|s| s.to_string()),
             },
         );
-        self.event_bus.emit_session(crate::event::SessionEvent::MarkerSet {
-            name: label.clone(),
-            address: match size {
-                Some(sz) => format!("{address:#x}..{:#x} (+{sz:#x})", address.saturating_add(sz as u64)),
-                None => format!("{address:#x}"),
-            },
-            note: note.map(|s| s.to_string()),
-        });
+        self.event_bus
+            .emit_session(crate::event::SessionEvent::MarkerSet {
+                name: label.clone(),
+                address: match size {
+                    Some(sz) => format!(
+                        "{address:#x}..{:#x} (+{sz:#x})",
+                        address.saturating_add(sz as u64)
+                    ),
+                    None => format!("{address:#x}"),
+                },
+                note: note.map(|s| s.to_string()),
+            });
         Ok(())
     }
 
@@ -1093,7 +1186,12 @@ impl SessionState {
 
     /// Record a mutation and return its undo id.
     #[allow(dead_code)] // used once mutating tools exist (T-030+)
-    pub fn record_undo(&mut self, address: u64, original_bytes: Vec<u8>, description: String) -> u64 {
+    pub fn record_undo(
+        &mut self,
+        address: u64,
+        original_bytes: Vec<u8>,
+        description: String,
+    ) -> u64 {
         let id = self.next_undo_id;
         self.next_undo_id += 1;
         self.undo_log.push(UndoEntry {
@@ -1174,12 +1272,7 @@ impl SessionState {
     /// This does *not* apply anything; the caller is expected to show the
     /// returned [`PendingOp`] (its `preview`) to a human for approval before
     /// applying via `confirm_pending`. See D8.
-    pub fn stage_op(
-        &mut self,
-        address: u64,
-        kind: PendingKind,
-        preview: String,
-    ) -> u64 {
+    pub fn stage_op(&mut self, address: u64, kind: PendingKind, preview: String) -> u64 {
         self.stage_op_with_cheat(address, kind, preview, None)
     }
 
@@ -1266,8 +1359,12 @@ impl SessionState {
             id,
             label: label.trim().to_string(),
             kind,
-            group: group.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-            hotkey: hotkey.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            group: group
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            hotkey: hotkey
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             hidden,
             note: note.map(|s| s.to_string()),
         });
@@ -1277,14 +1374,22 @@ impl SessionState {
     /// Set a cheat's hotkey string.
     pub fn set_cheat_hotkey(&mut self, id: u64, hotkey: Option<String>) -> bool {
         if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
-            c.hotkey = hotkey.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            c.hotkey = hotkey
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
             return true;
         }
         false
     }
 
     /// Update a cheat's label, group, and optional note metadata.
-    pub fn set_cheat_metadata(&mut self, id: u64, label: Option<String>, group: Option<String>, note: Option<String>) -> bool {
+    pub fn set_cheat_metadata(
+        &mut self,
+        id: u64,
+        label: Option<String>,
+        group: Option<String>,
+        note: Option<String>,
+    ) -> bool {
         if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id) {
             if let Some(lbl) = label {
                 let trimmed = lbl.trim();
@@ -1294,11 +1399,19 @@ impl SessionState {
             }
             if let Some(grp) = group {
                 let trimmed = grp.trim();
-                c.group = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+                c.group = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
             }
             if let Some(n) = note {
                 let trimmed = n.trim();
-                c.note = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+                c.note = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
             }
             return true;
         }
@@ -1334,22 +1447,24 @@ impl SessionState {
             match &mut c.kind {
                 CheatKind::Toggle { enabled: e, .. } => {
                     *e = enabled;
-                    self.event_bus.emit_session(crate::event::SessionEvent::CheatUpdated {
-                        id,
-                        label,
-                        enabled: Some(enabled),
-                        value: None,
-                    });
+                    self.event_bus
+                        .emit_session(crate::event::SessionEvent::CheatUpdated {
+                            id,
+                            label,
+                            enabled: Some(enabled),
+                            value: None,
+                        });
                     return true;
                 }
                 CheatKind::Patch { enabled: e, .. } => {
                     *e = enabled;
-                    self.event_bus.emit_session(crate::event::SessionEvent::CheatUpdated {
-                        id,
-                        label,
-                        enabled: Some(enabled),
-                        value: None,
-                    });
+                    self.event_bus
+                        .emit_session(crate::event::SessionEvent::CheatUpdated {
+                            id,
+                            label,
+                            enabled: Some(enabled),
+                            value: None,
+                        });
                     return true;
                 }
                 _ => {}
@@ -1360,13 +1475,23 @@ impl SessionState {
 
     /// Update a toggle cheat's cave installation info (original bytes + cave address).
     /// Called after a cave is successfully installed for this toggle.
-    pub fn set_toggle_cave_info(&mut self, id: u64, original_bytes: Vec<u8>, cave_addr: u64) -> bool {
+    pub fn set_toggle_cave_info(
+        &mut self,
+        id: u64,
+        original_bytes: Vec<u8>,
+        cave_addr: u64,
+    ) -> bool {
         if let Some(c) = self.cheats.iter_mut().find(|c| c.id == id)
-            && let CheatKind::Toggle { original_bytes: ob, cave_addr: ca, .. } = &mut c.kind {
-                *ob = original_bytes;
-                *ca = cave_addr;
-                return true;
-            }
+            && let CheatKind::Toggle {
+                original_bytes: ob,
+                cave_addr: ca,
+                ..
+            } = &mut c.kind
+        {
+            *ob = original_bytes;
+            *ca = cave_addr;
+            return true;
+        }
         false
     }
 
@@ -1375,14 +1500,24 @@ impl SessionState {
     pub fn get_toggle_restore_info(&self, id: u64) -> Option<(Vec<u8>, u64)> {
         let c = self.cheats.iter().find(|c| c.id == id)?;
         match &c.kind {
-            CheatKind::Toggle { original_bytes, target, enabled, .. } => {
+            CheatKind::Toggle {
+                original_bytes,
+                target,
+                enabled,
+                ..
+            } => {
                 if *enabled && !original_bytes.is_empty() {
                     Some((original_bytes.clone(), *target))
                 } else {
                     None
                 }
             }
-            CheatKind::Patch { original_bytes, target, enabled, .. } => {
+            CheatKind::Patch {
+                original_bytes,
+                target,
+                enabled,
+                ..
+            } => {
                 if *enabled && !original_bytes.is_empty() {
                     Some((original_bytes.clone(), *target))
                 } else {
@@ -1401,9 +1536,15 @@ impl SessionState {
             .map(|c| {
                 let (address, kind_str, enabled) = match &c.kind {
                     CheatKind::Value { address, .. } => (*address, "value".to_string(), false),
-                    CheatKind::Struct { base_address, .. } => (*base_address, "struct".to_string(), false),
-                    CheatKind::Toggle { target, enabled, .. } => (*target, "toggle".to_string(), *enabled),
-                    CheatKind::Patch { target, enabled, .. } => (*target, "toggle".to_string(), *enabled),
+                    CheatKind::Struct { base_address, .. } => {
+                        (*base_address, "struct".to_string(), false)
+                    }
+                    CheatKind::Toggle {
+                        target, enabled, ..
+                    } => (*target, "toggle".to_string(), *enabled),
+                    CheatKind::Patch {
+                        target, enabled, ..
+                    } => (*target, "toggle".to_string(), *enabled),
                     CheatKind::Button { .. } => (0, "button".to_string(), false),
                 };
                 crate::protocol::OverlayCheatDto {
@@ -1426,10 +1567,11 @@ impl SessionState {
         let count = scan.len();
         let vt = format!("{:?}", scan.value_type());
         self.scan = Some(scan);
-        self.event_bus.emit_session(crate::event::SessionEvent::ScanUpdated {
-            count,
-            value_type: vt,
-        });
+        self.event_bus
+            .emit_session(crate::event::SessionEvent::ScanUpdated {
+                count,
+                value_type: vt,
+            });
     }
 
     /// Get a mutable reference to the active scan, if any.
@@ -1450,7 +1592,12 @@ impl SessionState {
     }
 
     /// Add or register a dynamic value pin in the session.
-    pub fn add_pin(&mut self, label: impl Into<String>, ops: Vec<crate::protocol::PinOp>, provider: crate::protocol::PinProvider) -> u64 {
+    pub fn add_pin(
+        &mut self,
+        label: impl Into<String>,
+        ops: Vec<crate::protocol::PinOp>,
+        provider: crate::protocol::PinProvider,
+    ) -> u64 {
         self.next_pin_id = self.next_pin_id.saturating_add(1);
         let id = self.next_pin_id;
         let pin = crate::protocol::PinSpec {
@@ -1551,7 +1698,11 @@ mod tests {
         // No pending ops to start.
         assert!(s.list_pending().is_empty());
         // Stage two ops; ids are distinct and monotonic.
-        let id1 = s.stage_op(0x100, PendingKind::Write { data: vec![0xAA] }, "write 1 byte".into());
+        let id1 = s.stage_op(
+            0x100,
+            PendingKind::Write { data: vec![0xAA] },
+            "write 1 byte".into(),
+        );
         let id2 = s.stage_op(
             0x200,
             PendingKind::InstallCave {
@@ -1688,8 +1839,18 @@ mod tests {
         assert_eq!(*s.lifecycle(), SessionLifecycle::Idle);
 
         // Register client contexts
-        let mut ctx_mcp = s.create_context("mcp-agent-1", ClientKind::Mcp { agent_name: Some("test-bot".into()) });
-        let ctx_web = s.create_context("web-session-42", ClientKind::Web { session_id: "tab-1".into() });
+        let mut ctx_mcp = s.create_context(
+            "mcp-agent-1",
+            ClientKind::Mcp {
+                agent_name: Some("test-bot".into()),
+            },
+        );
+        let ctx_web = s.create_context(
+            "web-session-42",
+            ClientKind::Web {
+                session_id: "tab-1".into(),
+            },
+        );
 
         assert_eq!(ctx_mcp.id, "mcp-agent-1");
         assert_eq!(ctx_web.id, "web-session-42");
@@ -1720,7 +1881,12 @@ mod tests {
         // Contexts receive broadcast events
         let mut got_lifecycle = false;
         while let Ok(event) = ctx_mcp.event_rx.recv().await {
-            if let crate::event::BusEvent::Session(crate::event::SessionEvent::LifecycleChanged { state, pid, exe }) = event {
+            if let crate::event::BusEvent::Session(crate::event::SessionEvent::LifecycleChanged {
+                state,
+                pid,
+                exe,
+            }) = event
+            {
                 assert_eq!(state, "target_attached");
                 assert_eq!(pid, Some(12345));
                 assert_eq!(exe, "DRGSurvivor.exe");
@@ -1747,7 +1913,15 @@ mod tests {
     #[test]
     fn marker_kind_object_with_struct_type() {
         let mut s = SessionState::new();
-        s.set_marker_full("sel_mgr", 0x2000, None, MarkerKind::Object, Some("SelectionManager".into()), Some("live instance")).unwrap();
+        s.set_marker_full(
+            "sel_mgr",
+            0x2000,
+            None,
+            MarkerKind::Object,
+            Some("SelectionManager".into()),
+            Some("live instance"),
+        )
+        .unwrap();
         let m = s.get_marker("sel_mgr").unwrap();
         assert_eq!(m.kind, MarkerKind::Object);
         assert_eq!(m.struct_type.as_deref(), Some("SelectionManager"));
@@ -1757,7 +1931,15 @@ mod tests {
     #[test]
     fn marker_kind_buffer_auto() {
         let mut s = SessionState::new();
-        s.set_marker_full("heap", 0x3000, Some(0x100000), MarkerKind::Buffer, None, None).unwrap();
+        s.set_marker_full(
+            "heap",
+            0x3000,
+            Some(0x100000),
+            MarkerKind::Buffer,
+            None,
+            None,
+        )
+        .unwrap();
         let m = s.get_marker("heap").unwrap();
         assert_eq!(m.kind, MarkerKind::Buffer);
         assert_eq!(m.size, Some(0x100000));
@@ -1772,8 +1954,16 @@ mod tests {
             name: "ShipEntity".into(),
             size: Some(0x200),
             fields: vec![
-                StructField { label: "Health".into(), offset_expr: "0x38".into(), value_type: crate::scan::ValueType::F32 },
-                StructField { label: "Shield".into(), offset_expr: "0x40".into(), value_type: crate::scan::ValueType::F32 },
+                StructField {
+                    label: "Health".into(),
+                    offset_expr: "0x38".into(),
+                    value_type: crate::scan::ValueType::F32,
+                },
+                StructField {
+                    label: "Shield".into(),
+                    offset_expr: "0x40".into(),
+                    value_type: crate::scan::ValueType::F32,
+                },
             ],
             note: Some("main ship struct".into()),
         });
@@ -1792,7 +1982,12 @@ mod tests {
         assert_eq!(def.fields[0].label, "Health");
 
         // Overwrite
-        s.register_struct_def(StructDef { name: "ShipEntity".into(), size: Some(0x210), fields: vec![], note: None });
+        s.register_struct_def(StructDef {
+            name: "ShipEntity".into(),
+            size: Some(0x210),
+            fields: vec![],
+            note: None,
+        });
         assert_eq!(s.get_struct_def("ShipEntity").unwrap().size, Some(0x210));
 
         // Remove
@@ -1847,13 +2042,15 @@ mod tests {
         assert_eq!(id2, 2);
 
         // Filter by protocol
-        let (udp_packets, total_udp) = s.list_network_packets(None, None, Some(PacketKind::Udp), None);
+        let (udp_packets, total_udp) =
+            s.list_network_packets(None, None, Some(PacketKind::Udp), None);
         assert_eq!(total_udp, 1);
         assert_eq!(udp_packets.len(), 1);
         assert_eq!(udp_packets[0].id, 1);
 
         // Filter by endpoint / URL
-        let (api_packets, total_api) = s.list_network_packets(None, None, None, Some("gamebackend"));
+        let (api_packets, total_api) =
+            s.list_network_packets(None, None, None, Some("gamebackend"));
         assert_eq!(total_api, 1);
         assert_eq!(api_packets.len(), 1);
         assert_eq!(api_packets[0].kind, PacketKind::Http);
@@ -1865,4 +2062,3 @@ mod tests {
         assert!(all.is_empty());
     }
 }
-

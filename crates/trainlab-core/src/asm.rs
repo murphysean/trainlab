@@ -75,7 +75,10 @@ pub fn assemble_text(
         }
 
         // Data Directives: `dd (float)4.0`, `dd 100`, `dq 0x...`, `db 90 90`
-        if let Some(rest) = line.strip_prefix("dd ").or_else(|| line.strip_prefix("DD ")) {
+        if let Some(rest) = line
+            .strip_prefix("dd ")
+            .or_else(|| line.strip_prefix("DD "))
+        {
             let b = parse_dd(rest.trim(), symbols)?;
             current_offset += b.len() as u64;
             a.db(&b).map_err(|e| format!("db emit: {e}"))?;
@@ -83,7 +86,10 @@ pub fn assemble_text(
             pending_labels.clear();
             continue;
         }
-        if let Some(rest) = line.strip_prefix("dq ").or_else(|| line.strip_prefix("DQ ")) {
+        if let Some(rest) = line
+            .strip_prefix("dq ")
+            .or_else(|| line.strip_prefix("DQ "))
+        {
             let b = parse_dq(rest.trim(), symbols)?;
             current_offset += b.len() as u64;
             a.db(&b).map_err(|e| format!("db emit: {e}"))?;
@@ -91,7 +97,10 @@ pub fn assemble_text(
             pending_labels.clear();
             continue;
         }
-        if let Some(rest) = line.strip_prefix("db ").or_else(|| line.strip_prefix("DB ")) {
+        if let Some(rest) = line
+            .strip_prefix("db ")
+            .or_else(|| line.strip_prefix("DB "))
+        {
             let b = parse_db(rest.trim())?;
             current_offset += b.len() as u64;
             a.db(&b).map_err(|e| format!("db emit: {e}"))?;
@@ -102,18 +111,35 @@ pub fn assemble_text(
 
         // Parse standard instruction: mnemonic op1, op2
         // Assemble single instruction in temporary CodeAssembler to determine encoded byte length
-        let mut temp_asm = CodeAssembler::new(64).map_err(|e| format!("temp assembler init: {e}"))?;
+        let mut temp_asm =
+            CodeAssembler::new(64).map_err(|e| format!("temp assembler init: {e}"))?;
         let mut temp_labels = labels_map.clone();
         let mut temp_ref = referenced_labels.clone();
-        let instr_len = if parse_and_emit_instruction(&mut temp_asm, line, origin_rip + current_offset, symbols, &mut temp_labels, &mut temp_ref).is_ok()
-            && let Ok(encoded) = temp_asm.assemble(origin_rip + current_offset) {
-                encoded.len() as u64
-            } else {
-                // Fallback estimate if temp assemble had unresolved branches
-                5
-            };
+        let instr_len = if parse_and_emit_instruction(
+            &mut temp_asm,
+            line,
+            origin_rip + current_offset,
+            symbols,
+            &mut temp_labels,
+            &mut temp_ref,
+        )
+        .is_ok()
+            && let Ok(encoded) = temp_asm.assemble(origin_rip + current_offset)
+        {
+            encoded.len() as u64
+        } else {
+            // Fallback estimate if temp assemble had unresolved branches
+            5
+        };
 
-        parse_and_emit_instruction(&mut a, line, origin_rip, symbols, &mut labels_map, &mut referenced_labels)?;
+        parse_and_emit_instruction(
+            &mut a,
+            line,
+            origin_rip,
+            symbols,
+            &mut labels_map,
+            &mut referenced_labels,
+        )?;
         current_offset += instr_len;
         total_instructions += 1;
         pending_labels.clear();
@@ -154,7 +180,9 @@ pub fn assemble_text(
         }
         Err(e) if e.to_string().contains("Unused label") => {
             let _ = a.nop();
-            let result = a.assemble_options(origin_rip, options).map_err(format_assemble_error)?;
+            let result = a
+                .assemble_options(origin_rip, options)
+                .map_err(format_assemble_error)?;
             for (name, lbl) in &labels_map {
                 if let Ok(label_ip) = result.label_ip(lbl) {
                     let offset = label_ip.saturating_sub(origin_rip);
@@ -166,7 +194,11 @@ pub fn assemble_text(
         Err(e) => return Err(format_assemble_error(e)),
     };
 
-    let hex = assembled.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let hex = assembled
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     Ok(AssembledBlock {
         bytes: assembled,
@@ -186,9 +218,9 @@ pub fn assemble_text(
 pub fn check_trampoline_data_fallthrough(asm_code: &str) -> Result<(), String> {
     #[derive(Debug, PartialEq, Eq)]
     enum ItemKind {
-        TerminatingInstr,   // jmp, ret
-        NonTerminatingInstr,// push, pop, mov, add, cmp, etc.
-        DataDirective,      // db, dd, dq
+        TerminatingInstr,    // jmp, ret
+        NonTerminatingInstr, // push, pop, mov, add, cmp, etc.
+        DataDirective,       // db, dd, dq
     }
 
     let lines: Vec<&str> = asm_code.lines().collect();
@@ -201,8 +233,13 @@ pub fn check_trampoline_data_fallthrough(asm_code: &str) -> Result<(), String> {
             continue;
         }
         let lower = line.to_lowercase();
-        if lower.starts_with("db ") || lower.starts_with("dd ") || lower.starts_with("dq ")
-            || lower == "db" || lower == "dd" || lower == "dq" {
+        if lower.starts_with("db ")
+            || lower.starts_with("dd ")
+            || lower.starts_with("dq ")
+            || lower == "db"
+            || lower == "dd"
+            || lower == "dq"
+        {
             items.push((line_num, line.to_string(), ItemKind::DataDirective));
         } else {
             let mnemonic = lower.split_whitespace().next().unwrap_or("");
@@ -291,7 +328,8 @@ pub fn check_position_dependent_external_refs(asm_code: &str) -> Result<(), Stri
             let target = operand.trim().trim_end_matches(',').trim();
 
             // Ignore register indirect calls: e.g. "call rax", "jmp r10", "call [r10]"
-            if parse_gpr64(target).is_ok() || parse_gpr32(target).is_ok() || target.starts_with('[') {
+            if parse_gpr64(target).is_ok() || parse_gpr32(target).is_ok() || target.starts_with('[')
+            {
                 continue;
             }
 
@@ -326,22 +364,35 @@ fn strip_comments(s: &str) -> &str {
 
 fn parse_dd(s: &str, symbols: &HashMap<String, u64>) -> Result<Vec<u8>, String> {
     let s = s.trim();
-    if let Some(f_str) = s.strip_prefix("(float)").or_else(|| s.strip_prefix("(FLOAT)")) {
-        let f: f32 = f_str.trim().parse().map_err(|e| format!("invalid float '{f_str}': {e}"))?;
+    if let Some(f_str) = s
+        .strip_prefix("(float)")
+        .or_else(|| s.strip_prefix("(FLOAT)"))
+    {
+        let f: f32 = f_str
+            .trim()
+            .parse()
+            .map_err(|e| format!("invalid float '{f_str}': {e}"))?;
         return Ok(f.to_le_bytes().to_vec());
     }
     if s.contains('.')
-        && let Ok(f) = s.parse::<f32>() {
-            return Ok(f.to_le_bytes().to_vec());
-        }
+        && let Ok(f) = s.parse::<f32>()
+    {
+        return Ok(f.to_le_bytes().to_vec());
+    }
     let val = parse_u64_expr(s, symbols)?;
     Ok((val as u32).to_le_bytes().to_vec())
 }
 
 fn parse_dq(s: &str, symbols: &HashMap<String, u64>) -> Result<Vec<u8>, String> {
     let s = s.trim();
-    if let Some(f_str) = s.strip_prefix("(double)").or_else(|| s.strip_prefix("(DOUBLE)")) {
-        let f: f64 = f_str.trim().parse().map_err(|e| format!("invalid double '{f_str}': {e}"))?;
+    if let Some(f_str) = s
+        .strip_prefix("(double)")
+        .or_else(|| s.strip_prefix("(DOUBLE)"))
+    {
+        let f: f64 = f_str
+            .trim()
+            .parse()
+            .map_err(|e| format!("invalid double '{f_str}': {e}"))?;
         return Ok(f.to_le_bytes().to_vec());
     }
     let val = parse_u64_expr(s, symbols)?;
@@ -375,7 +426,8 @@ fn parse_u64_expr(s: &str, symbols: &HashMap<String, u64>) -> Result<u64, String
     } else if let Ok(n) = s.parse::<i64>() {
         Ok(n as u64)
     } else {
-        s.parse::<u64>().map_err(|e| format!("invalid int '{s}': {e}"))
+        s.parse::<u64>()
+            .map_err(|e| format!("invalid int '{s}': {e}"))
     }
 }
 
@@ -387,8 +439,6 @@ fn parse_and_emit_instruction(
     labels: &mut HashMap<String, iced_x86::code_asm::CodeLabel>,
     referenced_labels: &mut std::collections::HashSet<String>,
 ) -> Result<(), String> {
-    
-
     let line = line.trim();
     let (mnemonic, args_str) = match line.find(|c: char| c.is_whitespace()) {
         Some(idx) => (line[..idx].trim().to_lowercase(), line[idx..].trim()),
@@ -402,34 +452,49 @@ fn parse_and_emit_instruction(
     };
 
     match mnemonic.as_str() {
-        "nop" => { a.nop().map_err(|e| e.to_string())?; }
-        "ret" => { a.ret().map_err(|e| e.to_string())?; }
+        "nop" => {
+            a.nop().map_err(|e| e.to_string())?;
+        }
+        "ret" => {
+            a.ret().map_err(|e| e.to_string())?;
+        }
         "pushfq" => {
-            if !args.is_empty() { return Err("pushfq takes no operands".into()); }
+            if !args.is_empty() {
+                return Err("pushfq takes no operands".into());
+            }
             a.pushfq().map_err(|e| e.to_string())?;
         }
         "popfq" => {
-            if !args.is_empty() { return Err("popfq takes no operands".into()); }
+            if !args.is_empty() {
+                return Err("popfq takes no operands".into());
+            }
             a.popfq().map_err(|e| e.to_string())?;
         }
         "push" => {
-            if args.len() != 1 { return Err("push requires 1 operand".into()); }
+            if args.len() != 1 {
+                return Err("push requires 1 operand".into());
+            }
             let reg = parse_gpr64(args[0])?;
             a.push(reg).map_err(|e| e.to_string())?;
         }
         "pop" => {
-            if args.len() != 1 { return Err("pop requires 1 operand".into()); }
+            if args.len() != 1 {
+                return Err("pop requires 1 operand".into());
+            }
             let reg = parse_gpr64(args[0])?;
             a.pop(reg).map_err(|e| e.to_string())?;
         }
         "jmp" => {
-            if args.len() != 1 { return Err("jmp requires 1 operand".into()); }
+            if args.len() != 1 {
+                return Err("jmp requires 1 operand".into());
+            }
             let target = args[0].trim();
             if let Some(sym) = target.strip_prefix('$')
-                && let Some(target_addr) = symbols.get(sym) {
-                    a.jmp(*target_addr).map_err(|e| e.to_string())?;
-                    return Ok(());
-                }
+                && let Some(target_addr) = symbols.get(sym)
+            {
+                a.jmp(*target_addr).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
             if let Ok(reg) = parse_gpr64(target) {
                 a.jmp(reg).map_err(|e| e.to_string())?;
                 return Ok(());
@@ -447,11 +512,15 @@ fn parse_and_emit_instruction(
             }
             // Local label
             referenced_labels.insert(name.clone());
-            let lbl = *labels.entry(name.clone()).or_insert_with(|| a.create_label());
+            let lbl = *labels
+                .entry(name.clone())
+                .or_insert_with(|| a.create_label());
             a.jmp(lbl).map_err(|e| e.to_string())?;
         }
         "mulss" => {
-            if args.len() != 2 { return Err("mulss requires 2 operands (e.g. mulss xmm1, [rax+0x10])".into()); }
+            if args.len() != 2 {
+                return Err("mulss requires 2 operands (e.g. mulss xmm1, [rax+0x10])".into());
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 a.mulss(dst, src).map_err(|e| e.to_string())?;
@@ -461,7 +530,9 @@ fn parse_and_emit_instruction(
             }
         }
         "divss" => {
-            if args.len() != 2 { return Err("divss requires 2 operands (e.g. divss xmm2, [rax+0x10])".into()); }
+            if args.len() != 2 {
+                return Err("divss requires 2 operands (e.g. divss xmm2, [rax+0x10])".into());
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 a.divss(dst, src).map_err(|e| e.to_string())?;
@@ -471,7 +542,9 @@ fn parse_and_emit_instruction(
             }
         }
         "addss" => {
-            if args.len() != 2 { return Err("addss requires 2 operands".into()); }
+            if args.len() != 2 {
+                return Err("addss requires 2 operands".into());
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 a.addss(dst, src).map_err(|e| e.to_string())?;
@@ -481,7 +554,9 @@ fn parse_and_emit_instruction(
             }
         }
         "subss" => {
-            if args.len() != 2 { return Err("subss requires 2 operands".into()); }
+            if args.len() != 2 {
+                return Err("subss requires 2 operands".into());
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 a.subss(dst, src).map_err(|e| e.to_string())?;
@@ -491,36 +566,49 @@ fn parse_and_emit_instruction(
             }
         }
         "movss" => {
-            if args.len() != 2 { return Err("movss requires 2 operands".into()); }
+            if args.len() != 2 {
+                return Err("movss requires 2 operands".into());
+            }
             if let Ok(dst) = parse_xmm(args[0]) {
                 if let Ok(src) = parse_xmm(args[1]) {
                     a.movss(dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.movss(dst, mem).map_err(|e| e.to_string())?;
                 }
             } else {
-                let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                let dst_mem =
+                    parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
                 let src = parse_xmm(args[1])?;
                 a.movss(dst_mem, src).map_err(|e| e.to_string())?;
             }
         }
         "mov" | "movabs" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands")); }
+            if args.len() != 2 {
+                return Err(format!("{mnemonic} requires 2 operands"));
+            }
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.mov(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.mov(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.mov(dst, imm).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for {mnemonic}: {}", args[1]));
+                    return Err(format!(
+                        "unknown source operand for {mnemonic}: {}",
+                        args[1]
+                    ));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.mov(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.mov(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.mov(dst, imm as u32).map_err(|e| e.to_string())?;
@@ -530,14 +618,18 @@ fn parse_and_emit_instruction(
             } else if let Ok(dst) = parse_gpr8(args[0]) {
                 if let Ok(src) = parse_gpr8(args[1]) {
                     a.mov(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.mov(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.mov(dst, imm as u32).map_err(|e| e.to_string())?;
                 } else {
                     return Err(format!("unknown source operand for mov: {}", args[1]));
                 }
-            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+            } else if let Ok(dst_mem) =
+                parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)
+            {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.mov(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr32(args[1]) {
@@ -554,45 +646,70 @@ fn parse_and_emit_instruction(
                         a.mov(dst_mem, imm as u32).map_err(|e| e.to_string())?;
                     }
                 } else {
-                    return Err(format!("unknown source operand for mov to mem: {}", args[1]));
+                    return Err(format!(
+                        "unknown source operand for mov to mem: {}",
+                        args[1]
+                    ));
                 }
             } else {
-                return Err(format!("unsupported mov operands: {}, {}", args[0], args[1]));
+                return Err(format!(
+                    "unsupported mov operands: {}, {}",
+                    args[0], args[1]
+                ));
             }
         }
         "cmp" => {
-            if args.len() != 2 { return Err("cmp requires 2 operands".into()); }
+            if args.len() != 2 {
+                return Err("cmp requires 2 operands".into());
+            }
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.cmp(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.cmp(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.cmp(dst, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for cmp {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for cmp {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.cmp(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.cmp(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.cmp(dst, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for cmp {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for cmp {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else if let Ok(dst) = parse_gpr8(args[0]) {
                 if let Ok(src) = parse_gpr8(args[1]) {
                     a.cmp(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.cmp(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.cmp(dst, imm as u32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for cmp {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for cmp {}: {}",
+                        args[0], args[1]
+                    ));
                 }
-            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+            } else if let Ok(dst_mem) =
+                parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)
+            {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.cmp(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr32(args[1]) {
@@ -609,43 +726,81 @@ fn parse_and_emit_instruction(
                         a.cmp(dst_mem, imm as i32).map_err(|e| e.to_string())?;
                     }
                 } else {
-                    return Err(format!("unknown source operand for cmp {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for cmp {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else {
-                return Err(format!("unsupported cmp operands: {}, {}", args[0], args[1]));
+                return Err(format!(
+                    "unsupported cmp operands: {}, {}",
+                    args[0], args[1]
+                ));
             }
         }
-        "je" | "jz" | "jne" | "jnz" | "jg" | "jge" | "jl" | "jle" | "ja" | "jae" | "jb" | "jbe" | "js" | "jns" => {
-            if args.len() != 1 { return Err(format!("{mnemonic} requires 1 operand")); }
+        "je" | "jz" | "jne" | "jnz" | "jg" | "jge" | "jl" | "jle" | "ja" | "jae" | "jb" | "jbe"
+        | "js" | "jns" => {
+            if args.len() != 1 {
+                return Err(format!("{mnemonic} requires 1 operand"));
+            }
             let target = args[0];
             let name = target.trim().trim_start_matches('$').to_lowercase();
             referenced_labels.insert(name.clone());
             let lbl = *labels.entry(name).or_insert_with(|| a.create_label());
             match mnemonic.as_str() {
-                "je" | "jz" => { a.je(lbl).map_err(|e| e.to_string())?; }
-                "jne" | "jnz" => { a.jne(lbl).map_err(|e| e.to_string())?; }
-                "jg" => { a.jg(lbl).map_err(|e| e.to_string())?; }
-                "jge" => { a.jge(lbl).map_err(|e| e.to_string())?; }
-                "jl" => { a.jl(lbl).map_err(|e| e.to_string())?; }
-                "jle" => { a.jle(lbl).map_err(|e| e.to_string())?; }
-                "ja" => { a.ja(lbl).map_err(|e| e.to_string())?; }
-                "jae" => { a.jae(lbl).map_err(|e| e.to_string())?; }
-                "jb" => { a.jb(lbl).map_err(|e| e.to_string())?; }
-                "jbe" => { a.jbe(lbl).map_err(|e| e.to_string())?; }
-                "js" => { a.js(lbl).map_err(|e| e.to_string())?; }
-                "jns" => { a.jns(lbl).map_err(|e| e.to_string())?; }
+                "je" | "jz" => {
+                    a.je(lbl).map_err(|e| e.to_string())?;
+                }
+                "jne" | "jnz" => {
+                    a.jne(lbl).map_err(|e| e.to_string())?;
+                }
+                "jg" => {
+                    a.jg(lbl).map_err(|e| e.to_string())?;
+                }
+                "jge" => {
+                    a.jge(lbl).map_err(|e| e.to_string())?;
+                }
+                "jl" => {
+                    a.jl(lbl).map_err(|e| e.to_string())?;
+                }
+                "jle" => {
+                    a.jle(lbl).map_err(|e| e.to_string())?;
+                }
+                "ja" => {
+                    a.ja(lbl).map_err(|e| e.to_string())?;
+                }
+                "jae" => {
+                    a.jae(lbl).map_err(|e| e.to_string())?;
+                }
+                "jb" => {
+                    a.jb(lbl).map_err(|e| e.to_string())?;
+                }
+                "jbe" => {
+                    a.jbe(lbl).map_err(|e| e.to_string())?;
+                }
+                "js" => {
+                    a.js(lbl).map_err(|e| e.to_string())?;
+                }
+                "jns" => {
+                    a.jns(lbl).map_err(|e| e.to_string())?;
+                }
                 _ => {}
             }
         }
         "test" => {
-            if args.len() != 2 { return Err("test requires 2 operands".into()); }
+            if args.len() != 2 {
+                return Err("test requires 2 operands".into());
+            }
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.test(dst, src).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.test(dst, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for test {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for test {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
@@ -653,7 +808,10 @@ fn parse_and_emit_instruction(
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.test(dst, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for test {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for test {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else if let Ok(dst) = parse_gpr8(args[0]) {
                 if let Ok(src) = parse_gpr8(args[1]) {
@@ -661,14 +819,22 @@ fn parse_and_emit_instruction(
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.test(dst, imm as u32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for test {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for test {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else {
-                return Err(format!("unsupported test operands: {}, {}", args[0], args[1]));
+                return Err(format!(
+                    "unsupported test operands: {}, {}",
+                    args[0], args[1]
+                ));
             }
         }
         "xor" | "xorps" => {
-            if args.len() != 2 { return Err("xor/xorps requires 2 operands".into()); }
+            if args.len() != 2 {
+                return Err("xor/xorps requires 2 operands".into());
+            }
             if let Ok(dst) = parse_xmm(args[0]) {
                 let src = parse_xmm(args[1])?;
                 a.xorps(dst, src).map_err(|e| e.to_string())?;
@@ -682,32 +848,49 @@ fn parse_and_emit_instruction(
                 let src = parse_gpr8(args[1])?;
                 a.xor(dst, src).map_err(|e| e.to_string())?;
             } else {
-                return Err(format!("unsupported xor operands: {}, {}", args[0], args[1]));
+                return Err(format!(
+                    "unsupported xor operands: {}, {}",
+                    args[0], args[1]
+                ));
             }
         }
         "add" => {
-            if args.len() != 2 { return Err("add requires 2 operands".into()); }
+            if args.len() != 2 {
+                return Err("add requires 2 operands".into());
+            }
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.add(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.add(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.add(dst, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for add {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for add {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.add(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.add(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.add(dst, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for add {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for add {}: {}",
+                        args[0], args[1]
+                    ));
                 }
-            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+            } else if let Ok(dst_mem) =
+                parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)
+            {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.add(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr32(args[1]) {
@@ -715,35 +898,55 @@ fn parse_and_emit_instruction(
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.add(dst_mem, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for add {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for add {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else {
-                return Err(format!("unsupported add operands: {}, {}", args[0], args[1]));
+                return Err(format!(
+                    "unsupported add operands: {}, {}",
+                    args[0], args[1]
+                ));
             }
         }
         "sub" => {
-            if args.len() != 2 { return Err("sub requires 2 operands".into()); }
+            if args.len() != 2 {
+                return Err("sub requires 2 operands".into());
+            }
             if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.sub(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.sub(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.sub(dst, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for sub {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for sub {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.sub(dst, src).map_err(|e| e.to_string())?;
-                } else if let Ok(mem) = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels) {
+                } else if let Ok(mem) =
+                    parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)
+                {
                     a.sub(dst, mem).map_err(|e| e.to_string())?;
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.sub(dst, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for sub {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for sub {}: {}",
+                        args[0], args[1]
+                    ));
                 }
-            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+            } else if let Ok(dst_mem) =
+                parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)
+            {
                 if let Ok(src) = parse_gpr64(args[1]) {
                     a.sub(dst_mem, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr32(args[1]) {
@@ -751,38 +954,113 @@ fn parse_and_emit_instruction(
                 } else if let Ok(imm) = parse_u64_expr(args[1], symbols) {
                     a.sub(dst_mem, imm as i32).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unknown source operand for sub {}: {}", args[0], args[1]));
+                    return Err(format!(
+                        "unknown source operand for sub {}: {}",
+                        args[0], args[1]
+                    ));
                 }
             } else {
-                return Err(format!("unsupported sub operands: {}, {}", args[0], args[1]));
+                return Err(format!(
+                    "unsupported sub operands: {}, {}",
+                    args[0], args[1]
+                ));
             }
         }
         "sar" | "shl" | "sal" | "shr" | "rol" | "ror" => {
             use iced_x86::code_asm::*;
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. sar rax, 3)")); }
+            if args.len() != 2 {
+                return Err(format!("{mnemonic} requires 2 operands (e.g. sar rax, 3)"));
+            }
             let is_cl = args[1].trim().eq_ignore_ascii_case("cl");
-            let imm = if is_cl { 0u32 } else { parse_u64_expr(args[1], symbols)? as u32 };
+            let imm = if is_cl {
+                0u32
+            } else {
+                parse_u64_expr(args[1], symbols)? as u32
+            };
 
             if let Ok(dst) = parse_gpr64(args[0]) {
                 match mnemonic.as_str() {
-                    "sar" => { if is_cl { a.sar(dst, cl).map_err(|e| e.to_string())?; } else { a.sar(dst, imm).map_err(|e| e.to_string())?; } }
-                    "shl" | "sal" => { if is_cl { a.shl(dst, cl).map_err(|e| e.to_string())?; } else { a.shl(dst, imm).map_err(|e| e.to_string())?; } }
-                    "shr" => { if is_cl { a.shr(dst, cl).map_err(|e| e.to_string())?; } else { a.shr(dst, imm).map_err(|e| e.to_string())?; } }
-                    "rol" => { if is_cl { a.rol(dst, cl).map_err(|e| e.to_string())?; } else { a.rol(dst, imm).map_err(|e| e.to_string())?; } }
-                    "ror" => { if is_cl { a.ror(dst, cl).map_err(|e| e.to_string())?; } else { a.ror(dst, imm).map_err(|e| e.to_string())?; } }
+                    "sar" => {
+                        if is_cl {
+                            a.sar(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.sar(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    "shl" | "sal" => {
+                        if is_cl {
+                            a.shl(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.shl(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    "shr" => {
+                        if is_cl {
+                            a.shr(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.shr(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    "rol" => {
+                        if is_cl {
+                            a.rol(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.rol(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    "ror" => {
+                        if is_cl {
+                            a.ror(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.ror(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
                     _ => {}
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 match mnemonic.as_str() {
-                    "sar" => { if is_cl { a.sar(dst, cl).map_err(|e| e.to_string())?; } else { a.sar(dst, imm).map_err(|e| e.to_string())?; } }
-                    "shl" | "sal" => { if is_cl { a.shl(dst, cl).map_err(|e| e.to_string())?; } else { a.shl(dst, imm).map_err(|e| e.to_string())?; } }
-                    "shr" => { if is_cl { a.shr(dst, cl).map_err(|e| e.to_string())?; } else { a.shr(dst, imm).map_err(|e| e.to_string())?; } }
-                    "rol" => { if is_cl { a.rol(dst, cl).map_err(|e| e.to_string())?; } else { a.rol(dst, imm).map_err(|e| e.to_string())?; } }
-                    "ror" => { if is_cl { a.ror(dst, cl).map_err(|e| e.to_string())?; } else { a.ror(dst, imm).map_err(|e| e.to_string())?; } }
+                    "sar" => {
+                        if is_cl {
+                            a.sar(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.sar(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    "shl" | "sal" => {
+                        if is_cl {
+                            a.shl(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.shl(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    "shr" => {
+                        if is_cl {
+                            a.shr(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.shr(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    "rol" => {
+                        if is_cl {
+                            a.rol(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.rol(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
+                    "ror" => {
+                        if is_cl {
+                            a.ror(dst, cl).map_err(|e| e.to_string())?;
+                        } else {
+                            a.ror(dst, imm).map_err(|e| e.to_string())?;
+                        }
+                    }
                     _ => {}
                 }
             } else {
-                return Err(format!("unsupported destination register for {mnemonic}: '{}'", args[0]));
+                return Err(format!(
+                    "unsupported destination register for {mnemonic}: '{}'",
+                    args[0]
+                ));
             }
         }
         "cld" => {
@@ -792,17 +1070,22 @@ fn parse_and_emit_instruction(
             if args_str.eq_ignore_ascii_case("movsb") {
                 a.rep().movsb().map_err(|e| e.to_string())?;
             } else {
-                return Err(format!("unsupported rep suffix '{args_str}' in assemble_asm (expected 'rep movsb')"));
+                return Err(format!(
+                    "unsupported rep suffix '{args_str}' in assemble_asm (expected 'rep movsb')"
+                ));
             }
         }
         "call" => {
-            if args.len() != 1 { return Err("call requires 1 operand".into()); }
+            if args.len() != 1 {
+                return Err("call requires 1 operand".into());
+            }
             let target = args[0];
             if let Some(sym) = target.strip_prefix('$')
-                && let Some(target_addr) = symbols.get(sym) {
-                    a.call(*target_addr).map_err(|e| e.to_string())?;
-                    return Ok(());
-                }
+                && let Some(target_addr) = symbols.get(sym)
+            {
+                a.call(*target_addr).map_err(|e| e.to_string())?;
+                return Ok(());
+            }
             if let Ok(reg) = parse_gpr64(target) {
                 a.call(reg).map_err(|e| e.to_string())?;
                 return Ok(());
@@ -814,11 +1097,15 @@ fn parse_and_emit_instruction(
             // Local label
             let name = target.trim().trim_start_matches('$').to_lowercase();
             referenced_labels.insert(name.clone());
-            let lbl = *labels.entry(name.clone()).or_insert_with(|| a.create_label());
+            let lbl = *labels
+                .entry(name.clone())
+                .or_insert_with(|| a.create_label());
             a.call(lbl).map_err(|e| e.to_string())?;
         }
         "lea" => {
-            if args.len() != 2 { return Err("lea requires 2 operands (e.g. lea r8, [rip + result_len])".into()); }
+            if args.len() != 2 {
+                return Err("lea requires 2 operands (e.g. lea r8, [rip + result_len])".into());
+            }
             if let Ok(dst) = parse_gpr64(args[0]) {
                 let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                 a.lea(dst, mem).map_err(|e| e.to_string())?;
@@ -826,62 +1113,89 @@ fn parse_and_emit_instruction(
                 let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                 a.lea(dst, mem).map_err(|e| e.to_string())?;
             } else {
-                return Err(format!("unsupported destination register for lea: '{}'", args[0]));
+                return Err(format!(
+                    "unsupported destination register for lea: '{}'",
+                    args[0]
+                ));
             }
         }
         "movd" => {
-            if args.len() != 2 { return Err("movd requires 2 operands (e.g. movd xmm0, eax)".into()); }
+            if args.len() != 2 {
+                return Err("movd requires 2 operands (e.g. movd xmm0, eax)".into());
+            }
             if let Ok(dst) = parse_xmm(args[0]) {
                 if let Ok(src) = parse_gpr32(args[1]) {
                     a.movd(dst, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr64(args[1]) {
                     a.movq(dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.movd(dst, mem).map_err(|e| e.to_string())?;
                 }
             } else if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_xmm(args[1]) {
                     a.movd(dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unsupported movd operands: {}, {}", args[0], args[1]));
+                    return Err(format!(
+                        "unsupported movd operands: {}, {}",
+                        args[0], args[1]
+                    ));
                 }
             } else if let Ok(dst) = parse_gpr64(args[0]) {
                 if let Ok(src) = parse_xmm(args[1]) {
                     a.movq(dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    return Err(format!("unsupported movd/movq operands: {}, {}", args[0], args[1]));
+                    return Err(format!(
+                        "unsupported movd/movq operands: {}, {}",
+                        args[0], args[1]
+                    ));
                 }
-            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+            } else if let Ok(dst_mem) =
+                parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)
+            {
                 let src = parse_xmm(args[1])?;
                 a.movd(dst_mem, src).map_err(|e| e.to_string())?;
             } else {
-                return Err(format!("unsupported movd operands: {}, {}", args[0], args[1]));
+                return Err(format!(
+                    "unsupported movd operands: {}, {}",
+                    args[0], args[1]
+                ));
             }
         }
         "movq" => {
-            if args.len() != 2 { return Err("movq requires 2 operands (e.g. movq xmm0, rax)".into()); }
+            if args.len() != 2 {
+                return Err("movq requires 2 operands (e.g. movq xmm0, rax)".into());
+            }
             if let Ok(dst) = parse_xmm(args[0]) {
                 if let Ok(src) = parse_xmm(args[1]) {
                     a.movq(dst, src).map_err(|e| e.to_string())?;
                 } else if let Ok(src) = parse_gpr64(args[1]) {
                     a.movq(dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.movq(dst, mem).map_err(|e| e.to_string())?;
                 }
             } else if let Ok(dst) = parse_gpr64(args[0]) {
                 let src = parse_xmm(args[1])?;
                 a.movq(dst, src).map_err(|e| e.to_string())?;
-            } else if let Ok(dst_mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+            } else if let Ok(dst_mem) =
+                parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)
+            {
                 let src = parse_xmm(args[1])?;
                 a.movq(dst_mem, src).map_err(|e| e.to_string())?;
             } else {
-                return Err(format!("unsupported movq operands: {}, {}", args[0], args[1]));
+                return Err(format!(
+                    "unsupported movq operands: {}, {}",
+                    args[0], args[1]
+                ));
             }
         }
         "cvtsi2ss" => {
-            if args.len() != 2 { return Err("cvtsi2ss requires 2 operands (e.g. cvtsi2ss xmm0, eax)".into()); }
+            if args.len() != 2 {
+                return Err("cvtsi2ss requires 2 operands (e.g. cvtsi2ss xmm0, eax)".into());
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_gpr32(args[1]) {
                 a.cvtsi2ss(dst, src).map_err(|e| e.to_string())?;
@@ -893,7 +1207,9 @@ fn parse_and_emit_instruction(
             }
         }
         "cvtsi2sd" => {
-            if args.len() != 2 { return Err("cvtsi2sd requires 2 operands (e.g. cvtsi2sd xmm0, rax)".into()); }
+            if args.len() != 2 {
+                return Err("cvtsi2sd requires 2 operands (e.g. cvtsi2sd xmm0, rax)".into());
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_gpr32(args[1]) {
                 a.cvtsi2sd(dst, src).map_err(|e| e.to_string())?;
@@ -905,7 +1221,11 @@ fn parse_and_emit_instruction(
             }
         }
         "cvttss2si" | "cvtss2si" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} eax, xmm0)")); }
+            if args.len() != 2 {
+                return Err(format!(
+                    "{mnemonic} requires 2 operands (e.g. {mnemonic} eax, xmm0)"
+                ));
+            }
             if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_xmm(args[1]) {
                     if mnemonic == "cvttss2si" {
@@ -914,7 +1234,8 @@ fn parse_and_emit_instruction(
                         a.cvtss2si(dst, src).map_err(|e| e.to_string())?;
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     if mnemonic == "cvttss2si" {
                         a.cvttss2si(dst, mem).map_err(|e| e.to_string())?;
                     } else {
@@ -929,7 +1250,8 @@ fn parse_and_emit_instruction(
                         a.cvtss2si(dst, src).map_err(|e| e.to_string())?;
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     if mnemonic == "cvttss2si" {
                         a.cvttss2si(dst, mem).map_err(|e| e.to_string())?;
                     } else {
@@ -937,11 +1259,18 @@ fn parse_and_emit_instruction(
                     }
                 }
             } else {
-                return Err(format!("unsupported destination for {mnemonic}: {}", args[0]));
+                return Err(format!(
+                    "unsupported destination for {mnemonic}: {}",
+                    args[0]
+                ));
             }
         }
         "comiss" | "ucomiss" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)")); }
+            if args.len() != 2 {
+                return Err(format!(
+                    "{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)"
+                ));
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 if mnemonic == "comiss" {
@@ -959,7 +1288,11 @@ fn parse_and_emit_instruction(
             }
         }
         "maxss" | "minss" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)")); }
+            if args.len() != 2 {
+                return Err(format!(
+                    "{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)"
+                ));
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 if mnemonic == "maxss" {
@@ -977,7 +1310,9 @@ fn parse_and_emit_instruction(
             }
         }
         "pxor" => {
-            if args.len() != 2 { return Err("pxor requires 2 operands (e.g. pxor xmm0, xmm0)".into()); }
+            if args.len() != 2 {
+                return Err("pxor requires 2 operands (e.g. pxor xmm0, xmm0)".into());
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 a.pxor(dst, src).map_err(|e| e.to_string())?;
@@ -987,7 +1322,9 @@ fn parse_and_emit_instruction(
             }
         }
         "por" | "pand" | "pandn" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands")); }
+            if args.len() != 2 {
+                return Err(format!("{mnemonic} requires 2 operands"));
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 match mnemonic.as_str() {
@@ -1007,28 +1344,36 @@ fn parse_and_emit_instruction(
             }
         }
         "inc" => {
-            if args.len() != 1 { return Err("inc requires 1 operand".into()); }
+            if args.len() != 1 {
+                return Err("inc requires 1 operand".into());
+            }
             if let Ok(reg) = parse_gpr64(args[0]) {
                 a.inc(reg).map_err(|e| e.to_string())?;
             } else if let Ok(reg) = parse_gpr32(args[0]) {
                 a.inc(reg).map_err(|e| e.to_string())?;
             } else if let Ok(reg) = parse_gpr8(args[0]) {
                 a.inc(reg).map_err(|e| e.to_string())?;
-            } else if let Ok(mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+            } else if let Ok(mem) =
+                parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)
+            {
                 a.inc(mem).map_err(|e| e.to_string())?;
             } else {
                 return Err(format!("unsupported operand for inc: '{}'", args[0]));
             }
         }
         "dec" => {
-            if args.len() != 1 { return Err("dec requires 1 operand".into()); }
+            if args.len() != 1 {
+                return Err("dec requires 1 operand".into());
+            }
             if let Ok(reg) = parse_gpr64(args[0]) {
                 a.dec(reg).map_err(|e| e.to_string())?;
             } else if let Ok(reg) = parse_gpr32(args[0]) {
                 a.dec(reg).map_err(|e| e.to_string())?;
             } else if let Ok(reg) = parse_gpr8(args[0]) {
                 a.dec(reg).map_err(|e| e.to_string())?;
-            } else if let Ok(mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+            } else if let Ok(mem) =
+                parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)
+            {
                 a.dec(mem).map_err(|e| e.to_string())?;
             } else {
                 return Err(format!("unsupported operand for dec: '{}'", args[0]));
@@ -1040,11 +1385,13 @@ fn parse_and_emit_instruction(
                     if let Ok(src) = parse_xmm(args[1]) {
                         a.vmovss_3(dst, dst, src).map_err(|e| e.to_string())?;
                     } else {
-                        let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                        let mem =
+                            parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                         a.vmovss(dst, mem).map_err(|e| e.to_string())?;
                     }
                 } else {
-                    let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let dst_mem =
+                        parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
                     let src = parse_xmm(args[1])?;
                     a.vmovss(dst_mem, src).map_err(|e| e.to_string())?;
                 }
@@ -1054,7 +1401,8 @@ fn parse_and_emit_instruction(
                 if let Ok(src2) = parse_xmm(args[2]) {
                     a.vmovss_3(dst, src1, src2).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.vmovss(dst, mem).map_err(|e| e.to_string())?;
                 }
             } else {
@@ -1067,11 +1415,13 @@ fn parse_and_emit_instruction(
                     if let Ok(src) = parse_xmm(args[1]) {
                         a.vmovsd_3(dst, dst, src).map_err(|e| e.to_string())?;
                     } else {
-                        let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                        let mem =
+                            parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                         a.vmovsd(dst, mem).map_err(|e| e.to_string())?;
                     }
                 } else {
-                    let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let dst_mem =
+                        parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
                     let src = parse_xmm(args[1])?;
                     a.vmovsd(dst_mem, src).map_err(|e| e.to_string())?;
                 }
@@ -1081,7 +1431,8 @@ fn parse_and_emit_instruction(
                 if let Ok(src2) = parse_xmm(args[2]) {
                     a.vmovsd_3(dst, src1, src2).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.vmovsd(dst, mem).map_err(|e| e.to_string())?;
                 }
             } else {
@@ -1089,7 +1440,9 @@ fn parse_and_emit_instruction(
             }
         }
         "vmovaps" | "vmovups" | "vmovdqa" | "vmovdqu" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands")); }
+            if args.len() != 2 {
+                return Err(format!("{mnemonic} requires 2 operands"));
+            }
             if let Ok(dst) = parse_xmm(args[0]) {
                 if let Ok(src) = parse_xmm(args[1]) {
                     match mnemonic.as_str() {
@@ -1100,7 +1453,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vmovaps" => a.vmovaps(dst, mem).map_err(|e| e.to_string())?,
                         "vmovups" => a.vmovups(dst, mem).map_err(|e| e.to_string())?,
@@ -1119,7 +1473,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vmovaps" => a.vmovaps(dst, mem).map_err(|e| e.to_string())?,
                         "vmovups" => a.vmovups(dst, mem).map_err(|e| e.to_string())?,
@@ -1129,7 +1484,8 @@ fn parse_and_emit_instruction(
                     }
                 }
             } else {
-                let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                let dst_mem =
+                    parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
                 if let Ok(src) = parse_xmm(args[1]) {
                     match mnemonic.as_str() {
                         "vmovaps" => a.vmovaps(dst_mem, src).map_err(|e| e.to_string())?,
@@ -1147,12 +1503,17 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    return Err(format!("unknown source register for {mnemonic}: '{}'", args[1]));
+                    return Err(format!(
+                        "unknown source register for {mnemonic}: '{}'",
+                        args[1]
+                    ));
                 }
             }
         }
         "vmovapd" | "vmovupd" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands")); }
+            if args.len() != 2 {
+                return Err(format!("{mnemonic} requires 2 operands"));
+            }
             if let Ok(dst) = parse_xmm(args[0]) {
                 if let Ok(src) = parse_xmm(args[1]) {
                     match mnemonic.as_str() {
@@ -1161,7 +1522,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vmovapd" => a.vmovapd(dst, mem).map_err(|e| e.to_string())?,
                         "vmovupd" => a.vmovupd(dst, mem).map_err(|e| e.to_string())?,
@@ -1176,7 +1538,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vmovapd" => a.vmovapd(dst, mem).map_err(|e| e.to_string())?,
                         "vmovupd" => a.vmovupd(dst, mem).map_err(|e| e.to_string())?,
@@ -1184,7 +1547,8 @@ fn parse_and_emit_instruction(
                     }
                 }
             } else {
-                let dst_mem = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
+                let dst_mem =
+                    parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels)?;
                 if let Ok(src) = parse_xmm(args[1]) {
                     match mnemonic.as_str() {
                         "vmovapd" => a.vmovapd(dst_mem, src).map_err(|e| e.to_string())?,
@@ -1198,11 +1562,15 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    return Err(format!("unknown source register for {mnemonic}: '{}'", args[1]));
+                    return Err(format!(
+                        "unknown source register for {mnemonic}: '{}'",
+                        args[1]
+                    ));
                 }
             }
         }
-        "vxorps" | "vandps" | "vandnps" | "vorps" | "vaddss" | "vsubss" | "vmulss" | "vdivss" | "vmaxss" | "vminss" => {
+        "vxorps" | "vandps" | "vandnps" | "vorps" | "vaddss" | "vsubss" | "vmulss" | "vdivss"
+        | "vmaxss" | "vminss" => {
             if args.len() == 2 {
                 let dst = parse_xmm(args[0])?;
                 if let Ok(src) = parse_xmm(args[1]) {
@@ -1220,7 +1588,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vxorps" => a.vxorps(dst, dst, mem).map_err(|e| e.to_string())?,
                         "vandps" => a.vandps(dst, dst, mem).map_err(|e| e.to_string())?,
@@ -1253,7 +1622,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vxorps" => a.vxorps(dst, src1, mem).map_err(|e| e.to_string())?,
                         "vandps" => a.vandps(dst, src1, mem).map_err(|e| e.to_string())?,
@@ -1269,10 +1639,13 @@ fn parse_and_emit_instruction(
                     }
                 }
             } else {
-                return Err(format!("{mnemonic} requires 2 or 3 operands (e.g. {mnemonic} xmm0, xmm1 or {mnemonic} xmm0, xmm1, xmm2)"));
+                return Err(format!(
+                    "{mnemonic} requires 2 or 3 operands (e.g. {mnemonic} xmm0, xmm1 or {mnemonic} xmm0, xmm1, xmm2)"
+                ));
             }
         }
-        "vxorpd" | "vandpd" | "vandnpd" | "vorpd" | "vaddsd" | "vsubsd" | "vmulsd" | "vdivsd" | "vmaxsd" | "vminsd" => {
+        "vxorpd" | "vandpd" | "vandnpd" | "vorpd" | "vaddsd" | "vsubsd" | "vmulsd" | "vdivsd"
+        | "vmaxsd" | "vminsd" => {
             if args.len() == 2 {
                 let dst = parse_xmm(args[0])?;
                 if let Ok(src) = parse_xmm(args[1]) {
@@ -1290,7 +1663,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vxorpd" => a.vxorpd(dst, dst, mem).map_err(|e| e.to_string())?,
                         "vandpd" => a.vandpd(dst, dst, mem).map_err(|e| e.to_string())?,
@@ -1323,7 +1697,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vxorpd" => a.vxorpd(dst, src1, mem).map_err(|e| e.to_string())?,
                         "vandpd" => a.vandpd(dst, src1, mem).map_err(|e| e.to_string())?,
@@ -1343,7 +1718,11 @@ fn parse_and_emit_instruction(
             }
         }
         "vcomiss" | "vucomiss" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)")); }
+            if args.len() != 2 {
+                return Err(format!(
+                    "{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)"
+                ));
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 if mnemonic == "vcomiss" {
@@ -1361,7 +1740,11 @@ fn parse_and_emit_instruction(
             }
         }
         "vcomisd" | "vucomisd" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)")); }
+            if args.len() != 2 {
+                return Err(format!(
+                    "{mnemonic} requires 2 operands (e.g. {mnemonic} xmm0, xmm1)"
+                ));
+            }
             let dst = parse_xmm(args[0])?;
             if let Ok(src) = parse_xmm(args[1]) {
                 if mnemonic == "vcomisd" {
@@ -1386,7 +1769,8 @@ fn parse_and_emit_instruction(
                 } else if let Ok(src) = parse_gpr64(args[1]) {
                     a.vcvtsi2ss(dst, dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.vcvtsi2ss(dst, dst, mem).map_err(|e| e.to_string())?;
                 }
             } else if args.len() == 3 {
@@ -1397,7 +1781,8 @@ fn parse_and_emit_instruction(
                 } else if let Ok(src2) = parse_gpr64(args[2]) {
                     a.vcvtsi2ss(dst, src1, src2).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.vcvtsi2ss(dst, src1, mem).map_err(|e| e.to_string())?;
                 }
             } else {
@@ -1412,7 +1797,8 @@ fn parse_and_emit_instruction(
                 } else if let Ok(src) = parse_gpr64(args[1]) {
                     a.vcvtsi2sd(dst, dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.vcvtsi2sd(dst, dst, mem).map_err(|e| e.to_string())?;
                 }
             } else if args.len() == 3 {
@@ -1423,7 +1809,8 @@ fn parse_and_emit_instruction(
                 } else if let Ok(src2) = parse_gpr64(args[2]) {
                     a.vcvtsi2sd(dst, src1, src2).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.vcvtsi2sd(dst, src1, mem).map_err(|e| e.to_string())?;
                 }
             } else {
@@ -1431,7 +1818,11 @@ fn parse_and_emit_instruction(
             }
         }
         "vcvttss2si" | "vcvtss2si" => {
-            if args.len() != 2 { return Err(format!("{mnemonic} requires 2 operands (e.g. {mnemonic} eax, xmm0)")); }
+            if args.len() != 2 {
+                return Err(format!(
+                    "{mnemonic} requires 2 operands (e.g. {mnemonic} eax, xmm0)"
+                ));
+            }
             if let Ok(dst) = parse_gpr32(args[0]) {
                 if let Ok(src) = parse_xmm(args[1]) {
                     if mnemonic == "vcvttss2si" {
@@ -1440,7 +1831,8 @@ fn parse_and_emit_instruction(
                         a.vcvtss2si(dst, src).map_err(|e| e.to_string())?;
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     if mnemonic == "vcvttss2si" {
                         a.vcvttss2si(dst, mem).map_err(|e| e.to_string())?;
                     } else {
@@ -1455,7 +1847,8 @@ fn parse_and_emit_instruction(
                         a.vcvtss2si(dst, src).map_err(|e| e.to_string())?;
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     if mnemonic == "vcvttss2si" {
                         a.vcvttss2si(dst, mem).map_err(|e| e.to_string())?;
                     } else {
@@ -1463,7 +1856,10 @@ fn parse_and_emit_instruction(
                     }
                 }
             } else {
-                return Err(format!("unsupported destination for {mnemonic}: {}", args[0]));
+                return Err(format!(
+                    "unsupported destination for {mnemonic}: {}",
+                    args[0]
+                ));
             }
         }
         "vpxor" => {
@@ -1472,7 +1868,8 @@ fn parse_and_emit_instruction(
                 if let Ok(src) = parse_xmm(args[1]) {
                     a.vpxor(dst, dst, src).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.vpxor(dst, dst, mem).map_err(|e| e.to_string())?;
                 }
             } else if args.len() == 3 {
@@ -1481,7 +1878,8 @@ fn parse_and_emit_instruction(
                 if let Ok(src2) = parse_xmm(args[2]) {
                     a.vpxor(dst, src1, src2).map_err(|e| e.to_string())?;
                 } else {
-                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
                     a.vpxor(dst, src1, mem).map_err(|e| e.to_string())?;
                 }
             } else {
@@ -1499,7 +1897,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[1], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vpor" => a.vpor(dst, dst, mem).map_err(|e| e.to_string())?,
                         "vpand" => a.vpand(dst, dst, mem).map_err(|e| e.to_string())?,
@@ -1518,7 +1917,8 @@ fn parse_and_emit_instruction(
                         _ => {}
                     }
                 } else {
-                    let mem = parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
+                    let mem =
+                        parse_mem(args[2], symbols, origin_rip, labels, a, referenced_labels)?;
                     match mnemonic.as_str() {
                         "vpor" => a.vpor(dst, src1, mem).map_err(|e| e.to_string())?,
                         "vpand" => a.vpand(dst, src1, mem).map_err(|e| e.to_string())?,
@@ -1533,14 +1933,16 @@ fn parse_and_emit_instruction(
         "vzeroupper" => {
             a.vzeroupper().map_err(|e| e.to_string())?;
         }
-        other => return Err(format!(
-            "unsupported mnemonic '{other}' in assemble_asm. Supported families:\n\
+        other => {
+            return Err(format!(
+                "unsupported mnemonic '{other}' in assemble_asm. Supported families:\n\
              - Control flow: jmp, call, ret, je/jz, jne/jnz, jg, jge, jl, jle, ja, jae, jb, jbe, js, jns\n\
              - Integer arithmetic/logic: mov, movabs, add, sub, inc, dec, xor, cmp, test, lea, push, pop, pushfq, popfq, sar, shl, sal, shr, rol, ror\n\
              - Legacy SSE scalar/packed: movss, movsd, mulss, divss, addss, subss, maxss, minss, comiss, ucomiss, xorps, pxor, por, pand, pandn, movd, movq, cvtsi2ss, cvtsi2sd, cvttss2si, cvtss2si\n\
              - VEX/AVX scalar/packed: vmovss, vmovsd, vmovaps, vmovups, vmovdqa, vmovdqu, vmovapd, vmovupd, vxorps, vandps, vandnps, vorps, vaddss, vsubss, vmulss, vdivss, vmaxss, vminss, vxorpd, vandpd, vandnpd, vorpd, vaddsd, vsubsd, vmulsd, vdivsd, vmaxsd, vminsd, vcomiss, vucomiss, vcomisd, vucomisd, vcvtsi2ss, vcvtsi2sd, vcvttss2si, vcvtss2si, vpxor, vpor, vpand, vpandn, vzeroupper\n\
              - Directives & strings: nop, cld, rep movsb, db, dd, dq"
-        )),
+            ));
+        }
     }
 
     Ok(())
@@ -1549,10 +1951,22 @@ fn parse_and_emit_instruction(
 fn parse_ymm(s: &str) -> Result<iced_x86::code_asm::AsmRegisterYmm, String> {
     use iced_x86::code_asm::*;
     match s.trim().to_lowercase().as_str() {
-        "ymm0" => Ok(ymm0), "ymm1" => Ok(ymm1), "ymm2" => Ok(ymm2), "ymm3" => Ok(ymm3),
-        "ymm4" => Ok(ymm4), "ymm5" => Ok(ymm5), "ymm6" => Ok(ymm6), "ymm7" => Ok(ymm7),
-        "ymm8" => Ok(ymm8), "ymm9" => Ok(ymm9), "ymm10" => Ok(ymm10), "ymm11" => Ok(ymm11),
-        "ymm12" => Ok(ymm12), "ymm13" => Ok(ymm13), "ymm14" => Ok(ymm14), "ymm15" => Ok(ymm15),
+        "ymm0" => Ok(ymm0),
+        "ymm1" => Ok(ymm1),
+        "ymm2" => Ok(ymm2),
+        "ymm3" => Ok(ymm3),
+        "ymm4" => Ok(ymm4),
+        "ymm5" => Ok(ymm5),
+        "ymm6" => Ok(ymm6),
+        "ymm7" => Ok(ymm7),
+        "ymm8" => Ok(ymm8),
+        "ymm9" => Ok(ymm9),
+        "ymm10" => Ok(ymm10),
+        "ymm11" => Ok(ymm11),
+        "ymm12" => Ok(ymm12),
+        "ymm13" => Ok(ymm13),
+        "ymm14" => Ok(ymm14),
+        "ymm15" => Ok(ymm15),
         other => Err(format!("not a ymm register: '{other}'")),
     }
 }
@@ -1560,10 +1974,22 @@ fn parse_ymm(s: &str) -> Result<iced_x86::code_asm::AsmRegisterYmm, String> {
 fn parse_xmm(s: &str) -> Result<iced_x86::code_asm::AsmRegisterXmm, String> {
     use iced_x86::code_asm::*;
     match s.trim().to_lowercase().as_str() {
-        "xmm0" => Ok(xmm0), "xmm1" => Ok(xmm1), "xmm2" => Ok(xmm2), "xmm3" => Ok(xmm3),
-        "xmm4" => Ok(xmm4), "xmm5" => Ok(xmm5), "xmm6" => Ok(xmm6), "xmm7" => Ok(xmm7),
-        "xmm8" => Ok(xmm8), "xmm9" => Ok(xmm9), "xmm10" => Ok(xmm10), "xmm11" => Ok(xmm11),
-        "xmm12" => Ok(xmm12), "xmm13" => Ok(xmm13), "xmm14" => Ok(xmm14), "xmm15" => Ok(xmm15),
+        "xmm0" => Ok(xmm0),
+        "xmm1" => Ok(xmm1),
+        "xmm2" => Ok(xmm2),
+        "xmm3" => Ok(xmm3),
+        "xmm4" => Ok(xmm4),
+        "xmm5" => Ok(xmm5),
+        "xmm6" => Ok(xmm6),
+        "xmm7" => Ok(xmm7),
+        "xmm8" => Ok(xmm8),
+        "xmm9" => Ok(xmm9),
+        "xmm10" => Ok(xmm10),
+        "xmm11" => Ok(xmm11),
+        "xmm12" => Ok(xmm12),
+        "xmm13" => Ok(xmm13),
+        "xmm14" => Ok(xmm14),
+        "xmm15" => Ok(xmm15),
         other => Err(format!("not an xmm register: '{other}'")),
     }
 }
@@ -1571,10 +1997,22 @@ fn parse_xmm(s: &str) -> Result<iced_x86::code_asm::AsmRegisterXmm, String> {
 fn parse_gpr64(s: &str) -> Result<iced_x86::code_asm::AsmRegister64, String> {
     use iced_x86::code_asm::*;
     match s.trim().to_lowercase().as_str() {
-        "rax" => Ok(rax), "rcx" => Ok(rcx), "rdx" => Ok(rdx), "rbx" => Ok(rbx),
-        "rsp" => Ok(rsp), "rbp" => Ok(rbp), "rsi" => Ok(rsi), "rdi" => Ok(rdi),
-        "r8" => Ok(r8), "r9" => Ok(r9), "r10" => Ok(r10), "r11" => Ok(r11),
-        "r12" => Ok(r12), "r13" => Ok(r13), "r14" => Ok(r14), "r15" => Ok(r15),
+        "rax" => Ok(rax),
+        "rcx" => Ok(rcx),
+        "rdx" => Ok(rdx),
+        "rbx" => Ok(rbx),
+        "rsp" => Ok(rsp),
+        "rbp" => Ok(rbp),
+        "rsi" => Ok(rsi),
+        "rdi" => Ok(rdi),
+        "r8" => Ok(r8),
+        "r9" => Ok(r9),
+        "r10" => Ok(r10),
+        "r11" => Ok(r11),
+        "r12" => Ok(r12),
+        "r13" => Ok(r13),
+        "r14" => Ok(r14),
+        "r15" => Ok(r15),
         other => Err(format!("not a 64-bit register: '{other}'")),
     }
 }
@@ -1582,10 +2020,22 @@ fn parse_gpr64(s: &str) -> Result<iced_x86::code_asm::AsmRegister64, String> {
 fn parse_gpr32(s: &str) -> Result<iced_x86::code_asm::AsmRegister32, String> {
     use iced_x86::code_asm::*;
     match s.trim().to_lowercase().as_str() {
-        "eax" => Ok(eax), "ecx" => Ok(ecx), "edx" => Ok(edx), "ebx" => Ok(ebx),
-        "esp" => Ok(esp), "ebp" => Ok(ebp), "esi" => Ok(esi), "edi" => Ok(edi),
-        "r8d" => Ok(r8d), "r9d" => Ok(r9d), "r10d" => Ok(r10d), "r11d" => Ok(r11d),
-        "r12d" => Ok(r12d), "r13d" => Ok(r13d), "r14d" => Ok(r14d), "r15d" => Ok(r15d),
+        "eax" => Ok(eax),
+        "ecx" => Ok(ecx),
+        "edx" => Ok(edx),
+        "ebx" => Ok(ebx),
+        "esp" => Ok(esp),
+        "ebp" => Ok(ebp),
+        "esi" => Ok(esi),
+        "edi" => Ok(edi),
+        "r8d" => Ok(r8d),
+        "r9d" => Ok(r9d),
+        "r10d" => Ok(r10d),
+        "r11d" => Ok(r11d),
+        "r12d" => Ok(r12d),
+        "r13d" => Ok(r13d),
+        "r14d" => Ok(r14d),
+        "r15d" => Ok(r15d),
         other => Err(format!("not a 32-bit register: '{other}'")),
     }
 }
@@ -1593,11 +2043,26 @@ fn parse_gpr32(s: &str) -> Result<iced_x86::code_asm::AsmRegister32, String> {
 fn parse_gpr8(s: &str) -> Result<iced_x86::code_asm::AsmRegister8, String> {
     use iced_x86::code_asm::*;
     match s.trim().to_lowercase().as_str() {
-        "al" => Ok(al), "cl" => Ok(cl), "dl" => Ok(dl), "bl" => Ok(bl),
-        "ah" => Ok(ah), "ch" => Ok(ch), "dh" => Ok(dh), "bh" => Ok(bh),
-        "spl" => Ok(spl), "bpl" => Ok(bpl), "sil" => Ok(sil), "dil" => Ok(dil),
-        "r8b" => Ok(r8b), "r9b" => Ok(r9b), "r10b" => Ok(r10b), "r11b" => Ok(r11b),
-        "r12b" => Ok(r12b), "r13b" => Ok(r13b), "r14b" => Ok(r14b), "r15b" => Ok(r15b),
+        "al" => Ok(al),
+        "cl" => Ok(cl),
+        "dl" => Ok(dl),
+        "bl" => Ok(bl),
+        "ah" => Ok(ah),
+        "ch" => Ok(ch),
+        "dh" => Ok(dh),
+        "bh" => Ok(bh),
+        "spl" => Ok(spl),
+        "bpl" => Ok(bpl),
+        "sil" => Ok(sil),
+        "dil" => Ok(dil),
+        "r8b" => Ok(r8b),
+        "r9b" => Ok(r9b),
+        "r10b" => Ok(r10b),
+        "r11b" => Ok(r11b),
+        "r12b" => Ok(r12b),
+        "r13b" => Ok(r13b),
+        "r14b" => Ok(r14b),
+        "r15b" => Ok(r15b),
         other => Err(format!("not an 8-bit register: '{other}'")),
     }
 }
@@ -1621,38 +2086,67 @@ fn parse_mem(
     let is_ymmword = s_lower.starts_with("ymmword ptr [") || s_lower.starts_with("ymmword [");
 
     let inner = if let Some(stripped) = s
-        .strip_prefix("dword ptr [").or_else(|| s.strip_prefix("DWORD PTR [")).or_else(|| s.strip_prefix("dword [")).or_else(|| s.strip_prefix("DWORD ["))
-        .or_else(|| s.strip_prefix("qword ptr [")).or_else(|| s.strip_prefix("QWORD PTR [")).or_else(|| s.strip_prefix("qword [")).or_else(|| s.strip_prefix("QWORD ["))
-        .or_else(|| s.strip_prefix("xmmword ptr [")).or_else(|| s.strip_prefix("XMMWORD PTR [")).or_else(|| s.strip_prefix("xmmword [")).or_else(|| s.strip_prefix("XMMWORD ["))
-        .or_else(|| s.strip_prefix("ymmword ptr [")).or_else(|| s.strip_prefix("YMMWORD PTR [")).or_else(|| s.strip_prefix("ymmword [")).or_else(|| s.strip_prefix("YMMWORD ["))
-        .or_else(|| s.strip_prefix("word ptr [")).or_else(|| s.strip_prefix("WORD PTR [")).or_else(|| s.strip_prefix("word [")).or_else(|| s.strip_prefix("WORD ["))
-        .or_else(|| s.strip_prefix("byte ptr [")).or_else(|| s.strip_prefix("BYTE PTR [")).or_else(|| s.strip_prefix("byte [")).or_else(|| s.strip_prefix("BYTE ["))
-        .or_else(|| s.strip_prefix('[')) {
-        stripped.strip_suffix(']').ok_or_else(|| format!("unclosed bracket in '{s}'"))?
+        .strip_prefix("dword ptr [")
+        .or_else(|| s.strip_prefix("DWORD PTR ["))
+        .or_else(|| s.strip_prefix("dword ["))
+        .or_else(|| s.strip_prefix("DWORD ["))
+        .or_else(|| s.strip_prefix("qword ptr ["))
+        .or_else(|| s.strip_prefix("QWORD PTR ["))
+        .or_else(|| s.strip_prefix("qword ["))
+        .or_else(|| s.strip_prefix("QWORD ["))
+        .or_else(|| s.strip_prefix("xmmword ptr ["))
+        .or_else(|| s.strip_prefix("XMMWORD PTR ["))
+        .or_else(|| s.strip_prefix("xmmword ["))
+        .or_else(|| s.strip_prefix("XMMWORD ["))
+        .or_else(|| s.strip_prefix("ymmword ptr ["))
+        .or_else(|| s.strip_prefix("YMMWORD PTR ["))
+        .or_else(|| s.strip_prefix("ymmword ["))
+        .or_else(|| s.strip_prefix("YMMWORD ["))
+        .or_else(|| s.strip_prefix("word ptr ["))
+        .or_else(|| s.strip_prefix("WORD PTR ["))
+        .or_else(|| s.strip_prefix("word ["))
+        .or_else(|| s.strip_prefix("WORD ["))
+        .or_else(|| s.strip_prefix("byte ptr ["))
+        .or_else(|| s.strip_prefix("BYTE PTR ["))
+        .or_else(|| s.strip_prefix("byte ["))
+        .or_else(|| s.strip_prefix("BYTE ["))
+        .or_else(|| s.strip_prefix('['))
+    {
+        stripped
+            .strip_suffix(']')
+            .ok_or_else(|| format!("unclosed bracket in '{s}'"))?
     } else {
-        return Err(format!("expected memory operand with brackets '[...]', got '{s}'"));
+        return Err(format!(
+            "expected memory operand with brackets '[...]', got '{s}'"
+        ));
     };
 
     let inner = inner.trim();
 
-    let wrap_mem = |mem: iced_x86::code_asm::AsmMemoryOperand| -> iced_x86::code_asm::AsmMemoryOperand {
-        if is_byte {
-            byte_ptr(mem)
-        } else if is_word {
-            word_ptr(mem)
-        } else if is_qword {
-            qword_ptr(mem)
-        } else if is_xmmword {
-            xmmword_ptr(mem)
-        } else if is_ymmword {
-            ymmword_ptr(mem)
-        } else {
-            dword_ptr(mem)
-        }
-    };
+    let wrap_mem =
+        |mem: iced_x86::code_asm::AsmMemoryOperand| -> iced_x86::code_asm::AsmMemoryOperand {
+            if is_byte {
+                byte_ptr(mem)
+            } else if is_word {
+                word_ptr(mem)
+            } else if is_qword {
+                qword_ptr(mem)
+            } else if is_xmmword {
+                xmmword_ptr(mem)
+            } else if is_ymmword {
+                ymmword_ptr(mem)
+            } else {
+                dword_ptr(mem)
+            }
+        };
 
     // Check for RIP-relative addressing: `[rip + ...]` or `[rip - ...]`
-    if let Some(stripped) = inner.strip_prefix("rip +").or_else(|| inner.strip_prefix("RIP +")).or_else(|| inner.strip_prefix("rip+")).or_else(|| inner.strip_prefix("RIP+")) {
+    if let Some(stripped) = inner
+        .strip_prefix("rip +")
+        .or_else(|| inner.strip_prefix("RIP +"))
+        .or_else(|| inner.strip_prefix("rip+"))
+        .or_else(|| inner.strip_prefix("RIP+"))
+    {
         let trimmed = stripped.trim();
         if let Ok(disp) = parse_u64_expr(trimmed, symbols) {
             let target_addr = origin_rip.wrapping_add(disp);
@@ -1663,7 +2157,12 @@ fn parse_mem(
         let lbl = *labels.entry(sym_name).or_insert_with(|| a.create_label());
         return Ok(wrap_mem(dword_ptr(lbl)));
     }
-    if let Some(stripped) = inner.strip_prefix("rip -").or_else(|| inner.strip_prefix("RIP -")).or_else(|| inner.strip_prefix("rip-")).or_else(|| inner.strip_prefix("RIP-")) {
+    if let Some(stripped) = inner
+        .strip_prefix("rip -")
+        .or_else(|| inner.strip_prefix("RIP -"))
+        .or_else(|| inner.strip_prefix("rip-"))
+        .or_else(|| inner.strip_prefix("RIP-"))
+    {
         let trimmed = stripped.trim();
         if let Ok(disp) = parse_u64_expr(trimmed, symbols) {
             let target_addr = origin_rip.wrapping_sub(disp);
@@ -1691,7 +2190,10 @@ fn parse_mem(
 
 /// Helper to parse complex SIB and displacement expressions within brackets:
 /// `base + index*scale + disp` or variants
-fn parse_sib_expression(inner: &str, symbols: &HashMap<String, u64>) -> Result<iced_x86::code_asm::AsmMemoryOperand, String> {
+fn parse_sib_expression(
+    inner: &str,
+    symbols: &HashMap<String, u64>,
+) -> Result<iced_x86::code_asm::AsmMemoryOperand, String> {
     use iced_x86::code_asm::*;
 
     let mut tokens = Vec::new();
@@ -1723,7 +2225,10 @@ fn parse_sib_expression(inner: &str, symbols: &HashMap<String, u64>) -> Result<i
         if let Some((idx_str, scale_str)) = tok.split_once('*') {
             // Index * Scale, e.g. `rdx*4`
             let idx_reg = parse_gpr64(idx_str.trim())?;
-            let scale: u32 = scale_str.trim().parse().map_err(|_| format!("invalid SIB scale '{scale_str}'"))?;
+            let scale: u32 = scale_str
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid SIB scale '{scale_str}'"))?;
             if !matches!(scale, 1 | 2 | 4 | 8) {
                 return Err(format!("SIB scale must be 1, 2, 4, or 8, got {scale}"));
             }
@@ -1747,27 +2252,77 @@ fn parse_sib_expression(inner: &str, symbols: &HashMap<String, u64>) -> Result<i
             let d = (val as i32) * s_sign;
             disp = disp.wrapping_add(d);
         } else {
-            return Err(format!("unrecognized token '{tok}' in memory expression '{inner}'"));
+            return Err(format!(
+                "unrecognized token '{tok}' in memory expression '{inner}'"
+            ));
         }
     }
 
     match (base_reg, index_scale) {
         (Some(b), Some((idx, scale))) => {
             let mem = match scale {
-                1 => if disp == 0 { dword_ptr(b + idx * 1) } else { dword_ptr(b + idx * 1 + disp) },
-                2 => if disp == 0 { dword_ptr(b + idx * 2) } else { dword_ptr(b + idx * 2 + disp) },
-                4 => if disp == 0 { dword_ptr(b + idx * 4) } else { dword_ptr(b + idx * 4 + disp) },
-                8 => if disp == 0 { dword_ptr(b + idx * 8) } else { dword_ptr(b + idx * 8 + disp) },
+                1 => {
+                    if disp == 0 {
+                        dword_ptr(b + idx * 1)
+                    } else {
+                        dword_ptr(b + idx * 1 + disp)
+                    }
+                }
+                2 => {
+                    if disp == 0 {
+                        dword_ptr(b + idx * 2)
+                    } else {
+                        dword_ptr(b + idx * 2 + disp)
+                    }
+                }
+                4 => {
+                    if disp == 0 {
+                        dword_ptr(b + idx * 4)
+                    } else {
+                        dword_ptr(b + idx * 4 + disp)
+                    }
+                }
+                8 => {
+                    if disp == 0 {
+                        dword_ptr(b + idx * 8)
+                    } else {
+                        dword_ptr(b + idx * 8 + disp)
+                    }
+                }
                 _ => unreachable!(),
             };
             Ok(mem)
         }
         (None, Some((idx, scale))) => {
             let mem = match scale {
-                1 => if disp == 0 { dword_ptr(idx * 1) } else { dword_ptr(idx * 1 + disp) },
-                2 => if disp == 0 { dword_ptr(idx * 2) } else { dword_ptr(idx * 2 + disp) },
-                4 => if disp == 0 { dword_ptr(idx * 4) } else { dword_ptr(idx * 4 + disp) },
-                8 => if disp == 0 { dword_ptr(idx * 8) } else { dword_ptr(idx * 8 + disp) },
+                1 => {
+                    if disp == 0 {
+                        dword_ptr(idx * 1)
+                    } else {
+                        dword_ptr(idx * 1 + disp)
+                    }
+                }
+                2 => {
+                    if disp == 0 {
+                        dword_ptr(idx * 2)
+                    } else {
+                        dword_ptr(idx * 2 + disp)
+                    }
+                }
+                4 => {
+                    if disp == 0 {
+                        dword_ptr(idx * 4)
+                    } else {
+                        dword_ptr(idx * 4 + disp)
+                    }
+                }
+                8 => {
+                    if disp == 0 {
+                        dword_ptr(idx * 8)
+                    } else {
+                        dword_ptr(idx * 8 + disp)
+                    }
+                }
                 _ => unreachable!(),
             };
             Ok(mem)
@@ -1779,13 +2334,9 @@ fn parse_sib_expression(inner: &str, symbols: &HashMap<String, u64>) -> Result<i
                 Ok(dword_ptr(b + disp))
             }
         }
-        (None, None) => {
-            Ok(dword_ptr(disp as u64))
-        }
+        (None, None) => Ok(dword_ptr(disp as u64)),
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1837,10 +2388,10 @@ mod tests {
         // Disassemble the instructions starting after the constant at 0x140001004:
         let disasm = crate::disasm::disassemble(0x140001004, &block.bytes[4..], None);
         println!("Disasm lines:\n{}", disasm.join("\n"));
-        assert!(disasm.iter().any(|line| line.contains("mulss") && (line.contains("[rel") || line.contains("[rip") || line.contains("[140001000"))));
+        assert!(disasm.iter().any(|line| line.contains("mulss")
+            && (line.contains("[rel") || line.contains("[rip") || line.contains("[140001000"))));
     }
 }
-
 
 /// Porting Cheat Engine auto-assembler scripts VERBATIM.
 ///
@@ -1862,12 +2413,25 @@ mod ce_verbatim_porting {
     ///  - and, for the instruction-first case only, the disassembly shows a clean [rel] operand
     ///    (when the instruction leads, disassembly is aligned so this is meaningful).
     fn check(label: &str, hex: &str, const_bytes: &str, expect_clean_disasm: bool) {
-        assert!(hex.contains(const_bytes), "[{label}] missing constant {const_bytes}: {hex}");
-        assert!(!hex.starts_with("67"), "[{label}] 0x67 address-size prefix (label not resolved): {hex}");
+        assert!(
+            hex.contains(const_bytes),
+            "[{label}] missing constant {const_bytes}: {hex}"
+        );
+        assert!(
+            !hex.starts_with("67"),
+            "[{label}] 0x67 address-size prefix (label not resolved): {hex}"
+        );
         if expect_clean_disasm {
-            let bytes: Vec<u8> = hex.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect();
+            let bytes: Vec<u8> = hex
+                .split_whitespace()
+                .map(|b| u8::from_str_radix(b, 16).unwrap())
+                .collect();
             let dis = crate::disasm::disassemble(0x140000000, &bytes, None);
-            assert!(dis.iter().any(|l| l.contains("[rel")), "[{label}] no [rel] operand:\n{}", dis.join("\n"));
+            assert!(
+                dis.iter().any(|l| l.contains("[rel")),
+                "[{label}] no [rel] operand:\n{}",
+                dis.join("\n")
+            );
         }
     }
 
@@ -1875,48 +2439,80 @@ mod ce_verbatim_porting {
         // CE-verbatim: instruction references the constant label BEFORE its `dd` definition.
         let fwd = assemble_text(
             &format!("{instr}\n{label}:\n  {dd_line}"),
-            0x140000000, &HashMap::new(),
-        ).unwrap_or_else(|e| panic!("[{name}_fwd] failed: {e}"));
+            0x140000000,
+            &HashMap::new(),
+        )
+        .unwrap_or_else(|e| panic!("[{name}_fwd] failed: {e}"));
         // const-first (our recommended layout).
         let bwd = assemble_text(
             &format!("{label}:\n  {dd_line}\n{instr}"),
-            0x140000000, &HashMap::new(),
-        ).unwrap_or_else(|e| panic!("[{name}_bwd] failed: {e}"));
-        check(&format!("{name}_fwd"), &fwd.hex, const_bytes, true);   // instruction first -> clean disasm
-        check(&format!("{name}_bwd"), &bwd.hex, const_bytes, false);  // data first -> skip disasm align check
+            0x140000000,
+            &HashMap::new(),
+        )
+        .unwrap_or_else(|e| panic!("[{name}_bwd] failed: {e}"));
+        check(&format!("{name}_fwd"), &fwd.hex, const_bytes, true); // instruction first -> clean disasm
+        check(&format!("{name}_bwd"), &bwd.hex, const_bytes, false); // data first -> skip disasm align check
     }
 
     #[test]
     fn mining_speed_ce_verbatim() {
-        both_orders("mining_speed", "miningSpeedValue",
+        both_orders(
+            "mining_speed",
+            "miningSpeedValue",
             "divss xmm2, [rip + miningSpeedValue]\naddss xmm2, xmm0",
-            "dd (float)4.0", "00 00 80 40");
+            "dd (float)4.0",
+            "00 00 80 40",
+        );
     }
     #[test]
     fn xp_mult_ce_verbatim() {
-        both_orders("xp_mult", "xpMultValue",
-            "mulss xmm1, [rip + xpMultValue]", "dd (float)3.0", "00 00 40 40");
+        both_orders(
+            "xp_mult",
+            "xpMultValue",
+            "mulss xmm1, [rip + xpMultValue]",
+            "dd (float)3.0",
+            "00 00 40 40",
+        );
     }
     #[test]
     fn one_hit_ce_verbatim() {
-        both_orders("one_hit", "oneHitValue",
-            "mov edx, [rip + oneHitValue]", "dd 99999", "9f 86 01 00");
+        both_orders(
+            "one_hit",
+            "oneHitValue",
+            "mov edx, [rip + oneHitValue]",
+            "dd 99999",
+            "9f 86 01 00",
+        );
     }
     #[test]
     fn attack_speed_ce_verbatim() {
-        both_orders("attack_speed", "attackSpeedValue",
-            "mulss xmm1, [rip + attackSpeedValue]", "dd (float)20.0", "00 00 a0 41");
+        both_orders(
+            "attack_speed",
+            "attackSpeedValue",
+            "mulss xmm1, [rip + attackSpeedValue]",
+            "dd (float)20.0",
+            "00 00 a0 41",
+        );
     }
     #[test]
     fn instant_reload_ce_verbatim() {
-        both_orders("instant_reload", "reloadTimeValue",
-            "mov eax, [rip + reloadTimeValue]", "dd (float)0.1", "cd cc cc 3d");
+        both_orders(
+            "instant_reload",
+            "reloadTimeValue",
+            "mov eax, [rip + reloadTimeValue]",
+            "dd (float)0.1",
+            "cd cc cc 3d",
+        );
     }
     #[test]
     fn no_spread_ce_verbatim() {
-        both_orders("no_spread", "spreadValue",
+        both_orders(
+            "no_spread",
+            "spreadValue",
             "movss xmm0, [rip + spreadValue]\nmovss xmm1, [rip + spreadValue]",
-            "dd (float)1.0", "00 00 80 3f");
+            "dd (float)1.0",
+            "00 00 80 3f",
+        );
     }
     #[test]
     fn freeze_droppod_single_instruction() {
@@ -1933,9 +2529,16 @@ mod ce_verbatim_porting {
             divss xmm2, [rip + miningSpeedValTypo]
         "#;
         let r = assemble_text(code, 0x140000000, &HashMap::new());
-        assert!(r.is_err(), "expected unresolved label error, but succeeded with hex: {:?}", r.unwrap().hex);
+        assert!(
+            r.is_err(),
+            "expected unresolved label error, but succeeded with hex: {:?}",
+            r.unwrap().hex
+        );
         let err_msg = r.unwrap_err();
-        assert!(err_msg.contains("unresolved label or marker 'miningspeedvaltypo'"), "unexpected error msg: {err_msg}");
+        assert!(
+            err_msg.contains("unresolved label or marker 'miningspeedvaltypo'"),
+            "unexpected error msg: {err_msg}"
+        );
     }
 
     #[test]
@@ -1955,7 +2558,11 @@ mod ce_verbatim_porting {
             replay:
         "#;
         let r = assemble_text(code, 0x140000000, &HashMap::new());
-        assert!(r.is_ok(), "failed to assemble cmp/je payload: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "failed to assemble cmp/je payload: {:?}",
+            r.err()
+        );
         let block = r.unwrap();
         assert!(!block.bytes.is_empty());
     }
@@ -1969,7 +2576,11 @@ mod ce_verbatim_porting {
             pop rax
         "#;
         let r = assemble_text(code, 0x140000000, &HashMap::new());
-        assert!(r.is_ok(), "failed to assemble mov dword payload: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "failed to assemble mov dword payload: {:?}",
+            r.err()
+        );
         let block = r.unwrap();
         assert!(!block.bytes.is_empty());
     }
@@ -2045,12 +2656,31 @@ mod ce_verbatim_porting {
         let off_cmd_ptr = *block.label_offsets.get("cmd_ptr").expect("cmd_ptr");
         let off_result_slot = *block.label_offsets.get("result_slot").expect("result_slot");
         let off_result_len = *block.label_offsets.get("result_len").expect("result_len");
-        let off_tolstring_addr = *block.label_offsets.get("tolstring_addr").expect("tolstring_addr");
+        let off_tolstring_addr = *block
+            .label_offsets
+            .get("tolstring_addr")
+            .expect("tolstring_addr");
 
-        assert_eq!(off_cmd_ptr - off_saved_state, 8, "dq saved_state must be 8 bytes");
-        assert_eq!(off_result_slot - off_cmd_ptr, 8, "dq cmd_ptr must be 8 bytes");
-        assert_eq!(off_result_len - off_result_slot, 4, "dd result_slot must be 4 bytes");
-        assert_eq!(off_tolstring_addr - off_result_len, 8, "dq result_len must be 8 bytes");
+        assert_eq!(
+            off_cmd_ptr - off_saved_state,
+            8,
+            "dq saved_state must be 8 bytes"
+        );
+        assert_eq!(
+            off_result_slot - off_cmd_ptr,
+            8,
+            "dq cmd_ptr must be 8 bytes"
+        );
+        assert_eq!(
+            off_result_len - off_result_slot,
+            4,
+            "dd result_slot must be 4 bytes"
+        );
+        assert_eq!(
+            off_tolstring_addr - off_result_len,
+            8,
+            "dq result_len must be 8 bytes"
+        );
     }
 
     #[test]
@@ -2064,7 +2694,12 @@ mod ce_verbatim_porting {
         let mut lbl_after = a.create_label();
         a.set_label(&mut lbl_after).unwrap();
         a.nop().unwrap(); // 1 byte (0x5)
-        let res = a.assemble_options(0x1000, iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS).unwrap();
+        let res = a
+            .assemble_options(
+                0x1000,
+                iced_x86::BlockEncoderOptions::RETURN_NEW_INSTRUCTION_OFFSETS,
+            )
+            .unwrap();
         assert_eq!(res.label_ip(&lbl_data).unwrap(), 0x1001);
         assert_eq!(res.label_ip(&lbl_after).unwrap(), 0x1005);
         assert_eq!(res.inner.code_buffer.len(), 6);
@@ -2246,7 +2881,11 @@ mod ce_verbatim_porting {
             sar eax, cl
         "#;
         let r = assemble_text(code, 0x140000000, &HashMap::new());
-        assert!(r.is_ok(), "failed to assemble sub mem & shifts: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "failed to assemble sub mem & shifts: {:?}",
+            r.err()
+        );
         let block = r.unwrap();
         assert_eq!(block.instruction_count, 6);
         // Verify `sub rax, [rcx+0x10]` produces 48 2b 41 10
@@ -2297,7 +2936,10 @@ mod ce_verbatim_porting {
             dq 0
         "#;
         let err = check_trampoline_data_fallthrough(hazard_code);
-        assert!(err.is_err(), "Must reject unjumped data slots in trampoline caves");
+        assert!(
+            err.is_err(),
+            "Must reject unjumped data slots in trampoline caves"
+        );
         assert!(err.unwrap_err().contains("trampoline cave payload"));
 
         // 2. Correct Pattern: Unconditional JMP over data slots to tail label
@@ -2310,13 +2952,20 @@ mod ce_verbatim_porting {
             dq 0
             code:
         "#;
-        assert!(check_trampoline_data_fallthrough(safe_code).is_ok(), "Jumping over data slots must pass");
+        assert!(
+            check_trampoline_data_fallthrough(safe_code).is_ok(),
+            "Jumping over data slots must pass"
+        );
 
         // Assemble safe_code and verify label offset for `code` lands after `player_base_slot`
         let block = assemble_text(safe_code, 0x140000000, &HashMap::new()).unwrap();
         let slot_off = *block.label_offsets.get("player_base_slot").unwrap();
         let code_off = *block.label_offsets.get("code").unwrap();
-        assert_eq!(code_off, slot_off + 8, "Tail label 'code' must land 8 bytes after player_base_slot");
+        assert_eq!(
+            code_off,
+            slot_off + 8,
+            "Tail label 'code' must land 8 bytes after player_base_slot"
+        );
 
         // 3. Eval cave with RET (leaf override) past data slots
         let leaf_code = r#"
@@ -2325,7 +2974,10 @@ mod ce_verbatim_porting {
             my_data:
             dd 100
         "#;
-        assert!(check_trampoline_data_fallthrough(leaf_code).is_ok(), "Leaf cave ending with ret before data must pass");
+        assert!(
+            check_trampoline_data_fallthrough(leaf_code).is_ok(),
+            "Leaf cave ending with ret before data must pass"
+        );
     }
 
     #[test]
@@ -2340,15 +2992,25 @@ mod ce_verbatim_porting {
         "#;
         let empty_symbols = HashMap::new();
         let res = assemble_text(code, 0x140000000, &empty_symbols);
-        assert!(res.is_err(), "Assembly must fail if a marker ($player_base) cannot be resolved");
+        assert!(
+            res.is_err(),
+            "Assembly must fail if a marker ($player_base) cannot be resolved"
+        );
         let err_msg = res.unwrap_err();
-        assert!(err_msg.contains("unknown symbol '$player_base'") || err_msg.contains("player_base"), "Error message should mention the unresolved marker, got: {err_msg}");
+        assert!(
+            err_msg.contains("unknown symbol '$player_base'") || err_msg.contains("player_base"),
+            "Error message should mention the unresolved marker, got: {err_msg}"
+        );
 
         // Now with resolved symbol, assembly must succeed
         let mut symbols = HashMap::new();
         symbols.insert("player_base".to_string(), 0x140123456);
         let ok_res = assemble_text(code, 0x140000000, &symbols);
-        assert!(ok_res.is_ok(), "Assembly must succeed when marker is provided in symbols: {:?}", ok_res.err());
+        assert!(
+            ok_res.is_ok(),
+            "Assembly must succeed when marker is provided in symbols: {:?}",
+            ok_res.err()
+        );
     }
 
     #[test]
@@ -2362,7 +3024,11 @@ mod ce_verbatim_porting {
             movabs rdx, $player_base_slot
         "#;
         let res = assemble_text(movabs_code, 0x140000000, &symbols);
-        assert!(res.is_ok(), "movabs mnemonic must assemble cleanly: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "movabs mnemonic must assemble cleanly: {:?}",
+            res.err()
+        );
 
         // 2. Clear error on rip-relative displacement overflow (> 2GB apart)
         let overflow_code = r#"
@@ -2371,7 +3037,10 @@ mod ce_verbatim_porting {
         let err_res = assemble_text(overflow_code, 0x140000000, &symbols);
         assert!(err_res.is_err());
         let err = err_res.unwrap_err();
-        assert!(err.contains("exceeds ±2GB limit"), "Expected diagnostic displacement overflow message, got: {err}");
+        assert!(
+            err.contains("exceeds ±2GB limit"),
+            "Expected diagnostic displacement overflow message, got: {err}"
+        );
     }
 
     #[test]
@@ -2389,7 +3058,8 @@ mod ce_verbatim_porting {
             vmovsd xmm3, xmm4, xmm5
             vmovsd xmm3, xmm4, [r8 + 0x50]
         "#;
-        let res_vmov = assemble_text(vmov_code, 0x140000000, &symbols).expect("assemble vmovss/vmovsd");
+        let res_vmov =
+            assemble_text(vmov_code, 0x140000000, &symbols).expect("assemble vmovss/vmovsd");
         assert_eq!(res_vmov.instruction_count, 8);
         // VEX prefix bytes start with c4 or c5
         assert!(res_vmov.bytes.iter().any(|b| *b == 0xc4 || *b == 0xc5));
@@ -2504,7 +3174,8 @@ mod ce_verbatim_porting {
 
         // 1. Memory operands for inc and dec
         let code_inc_mem = "inc dword [rdx]\ndec qword ptr [rax+0x10]\ninc byte [rcx]";
-        let res = assemble_text(code_inc_mem, 0x140000000, &symbols).expect("inc/dec memory operands should assemble");
+        let res = assemble_text(code_inc_mem, 0x140000000, &symbols)
+            .expect("inc/dec memory operands should assemble");
         // inc dword ptr [rdx] is FF 02
         // dec qword ptr [rax+10h] is 48 FF 48 10
         // inc byte ptr [rcx] is FE 01
@@ -2528,5 +3199,3 @@ mod ce_verbatim_porting {
         assert!(err_op.contains("unsupported operand for inc"));
     }
 }
-
-

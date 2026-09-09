@@ -181,8 +181,9 @@ impl Scan {
         let mut kept = Vec::with_capacity(self.matches.len());
         for (addr, prev) in &self.matches {
             if let Ok(cur) = read_value(proc, *addr, self.value_type)
-                && op_matches(op, *prev, cur, self.value_type) {
-                    kept.push((*addr, cur));
+                && op_matches(op, *prev, cur, self.value_type)
+            {
+                kept.push((*addr, cur));
             }
         }
         self.matches = kept;
@@ -485,13 +486,27 @@ mod tests {
         let mut scan = Scan::new(ValueType::F32);
         // Range 14760..14820 should catch all four (they're all in [14760,14820]).
         let n = scan
-            .first_scan(&proc, &[region_to(16)], ScanOp::Range { min: 14760.0, max: 14820.0 })
+            .first_scan(
+                &proc,
+                &[region_to(16)],
+                ScanOp::Range {
+                    min: 14760.0,
+                    max: 14820.0,
+                },
+            )
             .unwrap();
         assert_eq!(n, 4);
         // A tighter range 14790.0..14790.5 should catch only 14790.0 and 14790.3.
         let mut scan = Scan::new(ValueType::F32);
         let n = scan
-            .first_scan(&proc, &[region_to(16)], ScanOp::Range { min: 14790.0, max: 14790.5 })
+            .first_scan(
+                &proc,
+                &[region_to(16)],
+                ScanOp::Range {
+                    min: 14790.0,
+                    max: 14790.5,
+                },
+            )
             .unwrap();
         assert_eq!(n, 2);
     }
@@ -586,7 +601,13 @@ mod tests {
         let proc = MockProcess::new(buf);
         let mut scan = Scan::new(ValueType::Ptr);
         let n = scan
-            .first_scan(&proc, &[region_to(32)], ScanOp::Exact { value: 0x3000 as f64 })
+            .first_scan(
+                &proc,
+                &[region_to(32)],
+                ScanOp::Exact {
+                    value: 0x3000 as f64,
+                },
+            )
             .unwrap();
         assert_eq!(n, 1);
         assert_eq!(scan.matches()[0].0, 2 * 8);
@@ -608,7 +629,8 @@ mod tests {
     }
 
     #[test]
-    fn alignment_filters_addresses() {        // 8 i32 values: 0..7
+    fn alignment_filters_addresses() {
+        // 8 i32 values: 0..7
         let mut buf = Vec::new();
         for i in 0..8i32 {
             buf.extend_from_slice(&i.to_le_bytes());
@@ -638,10 +660,24 @@ mod tests {
         for i in 0..8i32 {
             buf.extend_from_slice(&i.to_le_bytes());
         }
-        let found = scan_buffer(&buf, 0x1000, 4, 0, ValueType::I32, ScanOp::Exact { value: 5.0 });
+        let found = scan_buffer(
+            &buf,
+            0x1000,
+            4,
+            0,
+            ValueType::I32,
+            ScanOp::Exact { value: 5.0 },
+        );
         assert_eq!(found, vec![(0x1000 + 5 * 4, 5.0)]);
         // range
-        let found = scan_buffer(&buf, 0, 4, 0, ValueType::I32, ScanOp::Range { min: 2.0, max: 4.0 });
+        let found = scan_buffer(
+            &buf,
+            0,
+            4,
+            0,
+            ValueType::I32,
+            ScanOp::Range { min: 2.0, max: 4.0 },
+        );
         assert_eq!(found.len(), 3);
     }
 
@@ -665,10 +701,20 @@ mod tests {
 
         // Scan in 4096-byte chunks with 3 bytes of overlap
         let mut hits = Vec::new();
-        let (scanned, skipped) = scan_region_chunks(&proc, &region, 4096, 3, |chunk_base, chunk_buf| {
-            let m = scan_buffer(chunk_buf, chunk_base, 4, 0, ValueType::U32, ScanOp::Exact { value: target_val as f64 });
-            hits.extend(m);
-        });
+        let (scanned, skipped) =
+            scan_region_chunks(&proc, &region, 4096, 3, |chunk_base, chunk_buf| {
+                let m = scan_buffer(
+                    chunk_buf,
+                    chunk_base,
+                    4,
+                    0,
+                    ValueType::U32,
+                    ScanOp::Exact {
+                        value: target_val as f64,
+                    },
+                );
+                hits.extend(m);
+            });
 
         assert_eq!(skipped, 0);
         assert!(scanned >= 10000);

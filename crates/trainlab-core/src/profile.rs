@@ -457,17 +457,12 @@ pub const PROFILES_DIR: &str = "cheats";
 
 /// Result of attempting to discover and load a profile file from disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum DiscoveredProfile {
     /// Successfully parsed profile.
-    Valid {
-        file: String,
-        profile: GameProfile,
-    },
+    Valid { file: String, profile: GameProfile },
     /// Failed to parse profile YAML, containing the parse error.
-    Invalid {
-        file: String,
-        error: String,
-    },
+    Invalid { file: String, error: String },
 }
 
 /// Discover all profile files in `cheats/`, returning both valid profiles and any invalid files with errors.
@@ -490,10 +485,16 @@ pub fn discover_all_profiles() -> Vec<DiscoveredProfile> {
         let name = entry.file_name().to_string_lossy().into_owned();
         match std::fs::read_to_string(&path) {
             Ok(text) => match GameProfile::from_yaml(&text) {
-                Ok(profile) => out.push(DiscoveredProfile::Valid { file: name, profile }),
+                Ok(profile) => out.push(DiscoveredProfile::Valid {
+                    file: name,
+                    profile,
+                }),
                 Err(err) => {
                     eprintln!("[PROFILE] failed to parse cheats/{name}: {err}");
-                    out.push(DiscoveredProfile::Invalid { file: name, error: err });
+                    out.push(DiscoveredProfile::Invalid {
+                        file: name,
+                        error: err,
+                    });
                 }
             },
             Err(e) => {
@@ -525,12 +526,13 @@ pub fn discover_profiles() -> Vec<(String, GameProfile)> {
 /// The absolute path to the profiles directory (next to the GUI exe or in workspace root).
 pub fn profiles_dir_path() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent() {
-            let p = dir.join(PROFILES_DIR);
-            if p.exists() {
-                return p;
-            }
+        && let Some(dir) = exe.parent()
+    {
+        let p = dir.join(PROFILES_DIR);
+        if p.exists() {
+            return p;
         }
+    }
     let cwd_cheats = std::path::PathBuf::from(PROFILES_DIR);
     if cwd_cheats.exists() {
         return cwd_cheats;
@@ -538,12 +540,13 @@ pub fn profiles_dir_path() -> std::path::PathBuf {
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let manifest_path = std::path::PathBuf::from(manifest_dir);
         if let Some(parent) = manifest_path.parent()
-            && let Some(workspace_root) = parent.parent() {
-                let ws_cheats = workspace_root.join(PROFILES_DIR);
-                if ws_cheats.exists() {
-                    return ws_cheats;
-                }
+            && let Some(workspace_root) = parent.parent()
+        {
+            let ws_cheats = workspace_root.join(PROFILES_DIR);
+            if ws_cheats.exists() {
+                return ws_cheats;
             }
+        }
     }
     std::path::PathBuf::from(PROFILES_DIR)
 }
@@ -678,7 +681,10 @@ mod tests {
                 target_ref: Some("mining_speed".into()),
                 hook: Some("override".into()),
                 payload: None,
-                asm: Some("miningSpeedValue:\n  dd (float)4.0\ndivss xmm2, [rip + miningSpeedValue]".into()),
+                asm: Some(
+                    "miningSpeedValue:\n  dd (float)4.0\ndivss xmm2, [rip + miningSpeedValue]"
+                        .into(),
+                ),
                 jump: Some("relative".into()),
                 mechanism: None,
                 rate_hz: None,
@@ -701,7 +707,8 @@ mod tests {
         assert_eq!(c.kind, "toggle");
         assert_eq!(c.jump.as_deref(), Some("relative"));
         // The asm source must round-trip exactly.
-        let expected_asm = "miningSpeedValue:\n  dd (float)4.0\ndivss xmm2, [rip + miningSpeedValue]";
+        let expected_asm =
+            "miningSpeedValue:\n  dd (float)4.0\ndivss xmm2, [rip + miningSpeedValue]";
         assert_eq!(c.asm.as_deref(), Some(expected_asm));
     }
 
@@ -722,7 +729,9 @@ cheats: []
         let init_cmds = profile.init_commands.as_ref().expect("init commands");
         assert_eq!(init_cmds.len(), 1);
         match &init_cmds[0] {
-            ProfileCommand::SetMarker { marker, address, .. } => {
+            ProfileCommand::SetMarker {
+                marker, address, ..
+            } => {
                 assert_eq!(marker, "gc_slot");
                 assert_eq!(address, "gc_cave+0x44");
             }
@@ -756,7 +765,14 @@ cheats: []
         let init_cmds = profile.init_commands.as_ref().expect("init commands");
         assert_eq!(init_cmds.len(), 1);
         match &init_cmds[0] {
-            ProfileCommand::InstallCave { target_ref, hook, jump, asm, marker, .. } => {
+            ProfileCommand::InstallCave {
+                target_ref,
+                hook,
+                jump,
+                asm,
+                marker,
+                ..
+            } => {
                 assert_eq!(target_ref.as_deref(), Some("zlua_gettop"));
                 assert_eq!(hook, "override");
                 assert_eq!(jump.as_deref(), Some("relative"));
@@ -799,7 +815,14 @@ cheats:
         let cmds = profile.cheats[0].commands.as_ref().expect("commands");
         assert_eq!(cmds.len(), 2);
         match &cmds[0] {
-            ProfileCommand::WriteCopy { src, dst, value_type, addend_ref, op, note } => {
+            ProfileCommand::WriteCopy {
+                src,
+                dst,
+                value_type,
+                addend_ref,
+                op,
+                note,
+            } => {
                 assert_eq!(src, "sel_ship_entity+0xad0");
                 assert_eq!(dst, "sel_ship_entity+0xacc");
                 assert_eq!(value_type.as_deref(), Some("f32"));
@@ -810,7 +833,14 @@ cheats:
             _ => panic!("expected WriteCopy variant for cmd 0"),
         }
         match &cmds[1] {
-            ProfileCommand::WriteCopy { src, dst, value_type, addend_ref, op, .. } => {
+            ProfileCommand::WriteCopy {
+                src,
+                dst,
+                value_type,
+                addend_ref,
+                op,
+                ..
+            } => {
                 assert_eq!(src, "sel_ship_entity+0xadc");
                 assert_eq!(dst, "sel_ship_entity+0xad8");
                 assert_eq!(value_type.as_deref(), Some("f32"));
@@ -844,12 +874,22 @@ cheats: []
         let profile = GameProfile::from_yaml(yaml).expect("parse yaml");
         assert_eq!(profile.setup.len(), 1);
         match &profile.setup[0] {
-            SetupStep::AobScan { name, pattern, offset, region, original_bytes, context } => {
+            SetupStep::AobScan {
+                name,
+                pattern,
+                offset,
+                region,
+                original_bytes,
+                context,
+            } => {
                 assert_eq!(name, "influence_hook");
                 assert_eq!(pattern, "8B B7 ?? ?? ?? ?? 39 B3");
                 assert_eq!(*offset, Some(0));
                 assert_eq!(region.as_deref(), Some("sins2.exe"));
-                assert_eq!(original_bytes.as_deref(), Some("8B B7 F8 D8 00 00 39 B3 50 08 00 00"));
+                assert_eq!(
+                    original_bytes.as_deref(),
+                    Some("8B B7 F8 D8 00 00 39 B3 50 08 00 00")
+                );
                 assert!(context.as_ref().unwrap().contains("mov esi,[rdi+0xd8f8]"));
             }
             _ => panic!("expected AobScan variant"),
@@ -889,7 +929,8 @@ structs:
         value_type: U32
 cheats: []
 "#;
-        let profile = GameProfile::from_yaml(yaml).expect("parse structs with lowercase and mixed value_type");
+        let profile = GameProfile::from_yaml(yaml)
+            .expect("parse structs with lowercase and mixed value_type");
         assert_eq!(profile.structs.len(), 1);
         let s = &profile.structs[0];
         assert_eq!(s.name, "ShipEntity");
@@ -909,10 +950,13 @@ cheats: []
 
     #[test]
     fn test_helldivers_yaml_with_command_notes_parses_cleanly() {
-        let helldivers_yaml_path = std::path::Path::new("/home/sean/Documents/Gaming/helldivers/helldivers.yaml");
+        let helldivers_yaml_path =
+            std::path::Path::new("/home/sean/Documents/Gaming/helldivers/helldivers.yaml");
         if helldivers_yaml_path.exists() {
-            let content = std::fs::read_to_string(helldivers_yaml_path).expect("read helldivers.yaml");
-            let profile = GameProfile::from_yaml(&content).expect("helldivers.yaml must parse cleanly");
+            let content =
+                std::fs::read_to_string(helldivers_yaml_path).expect("read helldivers.yaml");
+            let profile =
+                GameProfile::from_yaml(&content).expect("helldivers.yaml must parse cleanly");
             assert_eq!(profile.game, "helldivers.exe");
             assert!(profile.init_commands.is_some());
             assert!(!profile.cheats.is_empty());
@@ -940,7 +984,10 @@ cheats: []
         let net = profile.network.as_ref().unwrap();
         assert_eq!(net.enabled, Some(true));
         assert_eq!(net.ignore_ports, vec![443]);
-        assert_eq!(net.ignore_hosts, vec!["api.helldivers.com", "telemetry.arrowhead.com"]);
+        assert_eq!(
+            net.ignore_hosts,
+            vec!["api.helldivers.com", "telemetry.arrowhead.com"]
+        );
         assert_eq!(net.capture_loopback, Some(false));
 
         let serialized = profile.to_yaml().expect("serialize");

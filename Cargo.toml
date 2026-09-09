@@ -6,6 +6,7 @@ members = [
     "crates/trainlab-gui",
     "crates/trainlab-scanner",
     "crates/trainlab-cave",
+    "crates/trainlab-release",
 ]
 
 [workspace.package]

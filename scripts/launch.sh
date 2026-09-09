@@ -15,9 +15,14 @@
 #   Works on any Linux distro with Steam installed natively or via Flatpak.
 # ==============================================================================
 
-# Extract the exact Proton runner from Steam's command ($@).
-# When launched via Steam launch options (%command%), Proton is always present in $@.
+# Detect launch environment: Proton, Steam Linux Runtime (SLR/pressure-vessel), or native Linux
 PROTON_RUNNER=""
+SLR_ENTRY=""
+
+# 1. Search for Proton runner first. Modern Proton (e.g. Proton 8, 9, 10, 11) runs inside
+# Steam Linux Runtime containers (e.g. SteamLinuxRuntime_4, soldier, sniper).
+# Steam passes both `_v2-entry-point` AND `/path/to/Proton/proton` in $@.
+# If Proton is present, it MUST take precedence so we launch trainlab.exe under Proton!
 for arg in "$@"; do
     if [[ "$arg" == *"proton" ]] && [ -x "$arg" ]; then
         PROTON_RUNNER="$arg"
@@ -25,25 +30,68 @@ for arg in "$@"; do
     fi
 done
 
+# 2. Only look for SLR container if Proton was NOT found (meaning a native Linux game)
 if [ -z "$PROTON_RUNNER" ]; then
-    echo "[trainlab] WARNING: Proton runner not found in launch command. Trainer will not be started." >/tmp/trainlab_launch_out.log
+    for arg in "$@"; do
+        if [[ "$arg" == *"_v2-entry-point" ]] && [ -x "$arg" ]; then
+            SLR_ENTRY="$arg"
+            break
+        elif [[ "$arg" == *"pressure-vessel-adverb"* ]] && [ -x "$arg" ]; then
+            SLR_ENTRY="$arg"
+            break
+        fi
+    done
+fi
+
+TRAINLAB_DIR="${TRAINLAB_DIR:-$HOME/Documents/Trainers/Trainlab}"
+
+# Check for unified names first, then legacy names
+TARGET_WIN_EXE=""
+if [ -f "$TRAINLAB_DIR/trainlab.exe" ]; then
+    TARGET_WIN_EXE="$TRAINLAB_DIR/trainlab.exe"
+elif [ -f "$TRAINLAB_DIR/trainlab-gui.exe" ]; then
+    TARGET_WIN_EXE="$TRAINLAB_DIR/trainlab-gui.exe"
+fi
+
+TARGET_LINUX_EXE=""
+if [ -f "$TRAINLAB_DIR/trainlab" ]; then
+    TARGET_LINUX_EXE="$TRAINLAB_DIR/trainlab"
+elif [ -f "$TRAINLAB_DIR/trainlab-gui-linux" ]; then
+    TARGET_LINUX_EXE="$TRAINLAB_DIR/trainlab-gui-linux"
+elif [ -f "$TRAINLAB_DIR/trainlab-gui" ]; then
+    TARGET_LINUX_EXE="$TRAINLAB_DIR/trainlab-gui"
+fi
+
+if [ -z "$PROTON_RUNNER" ] && [ -z "$SLR_ENTRY" ]; then
+    echo "[trainlab] INFO: No Proton runner or SLR container detected in launch command. Assuming native Linux host." >/tmp/trainlab_launch_out.log
 fi
 
 # 1. Execute the main game launch in the background and capture its PID
 "$@" &
 GAME_PID=$!
 
-# 2. Wait 4 seconds for game window / Proton prefix initialization in Gamescope
+# 2. Wait 4 seconds for game window / container initialization in Gamescope
 sleep 4
 
-# 3. Launch Trainlab GUI under Proton in the background and capture its PID
-TRAINLAB_DIR="${TRAINLAB_DIR:-$HOME/Documents/Trainers/Trainlab}"
-TARGET_EXE="$TRAINLAB_DIR/trainlab-gui.exe"
+# 3. Launch Trainlab GUI in the background according to runtime environment
 TRAINER_PID=""
 
-if [ -f "$TARGET_EXE" ] && [ -n "$PROTON_RUNNER" ] && [ -x "$PROTON_RUNNER" ]; then
-    "$PROTON_RUNNER" run "$TARGET_EXE" >/tmp/trainlab_launch_out.log 2>&1 &
+if [ -n "$PROTON_RUNNER" ] && [ -x "$PROTON_RUNNER" ] && [ -n "$TARGET_WIN_EXE" ]; then
+    echo "[trainlab] Launching Windows trainer via Proton: $PROTON_RUNNER ($TARGET_WIN_EXE)" >>/tmp/trainlab_launch_out.log
+    "$PROTON_RUNNER" run "$TARGET_WIN_EXE" >>/tmp/trainlab_launch_out.log 2>&1 &
     TRAINER_PID=$!
+elif [ -n "$SLR_ENTRY" ] && [ -x "$SLR_ENTRY" ] && [ -n "$TARGET_LINUX_EXE" ]; then
+    echo "[trainlab] Launching native Linux trainer inside SLR container: $SLR_ENTRY ($TARGET_LINUX_EXE)" >>/tmp/trainlab_launch_out.log
+    "$SLR_ENTRY" --verb=run -- "$TARGET_LINUX_EXE" >>/tmp/trainlab_launch_out.log 2>&1 &
+    TRAINER_PID=$!
+elif [ -n "$TARGET_LINUX_EXE" ]; then
+    echo "[trainlab] Launching native Linux trainer directly on host ($TARGET_LINUX_EXE)" >>/tmp/trainlab_launch_out.log
+    "$TARGET_LINUX_EXE" >>/tmp/trainlab_launch_out.log 2>&1 &
+    TRAINER_PID=$!
+elif [ -n "$TARGET_WIN_EXE" ]; then
+    echo "[trainlab] WARNING: Only Windows trainer exists but no Proton runner detected." >>/tmp/trainlab_launch_out.log
+else
+    echo "[trainlab] WARNING: No trainlab or trainlab.exe executable found in $TRAINLAB_DIR" >>/tmp/trainlab_launch_out.log
 fi
 
 # 4. Cleanup routine to aggressively tear down all child/helper processes
@@ -53,6 +101,9 @@ cleanup() {
         kill -9 "$TRAINER_PID" 2>/dev/null
     fi
     pkill -9 -f trainlab-gui.exe 2>/dev/null
+    pkill -9 -f trainlab.exe 2>/dev/null
+    pkill -9 -f trainlab-gui-linux 2>/dev/null
+    pkill -9 -x trainlab 2>/dev/null
 
     # If the game process is still alive when cleanup is triggered (e.g. Steam Stop button)
     if [ -n "$GAME_PID" ] && kill -0 "$GAME_PID" 2>/dev/null; then

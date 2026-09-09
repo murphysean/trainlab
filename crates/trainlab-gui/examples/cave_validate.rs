@@ -55,15 +55,17 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use rmcp::ClientHandler;
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::ServiceExt;
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::ClientHandler;
 
 const MCP_URL: &str = "http://127.0.0.1:8123/mcp";
 const DLL_PORT: u16 = 31337;
 
-fn dll_rpc(req: &trainlab_core::protocol::Request) -> Result<trainlab_core::protocol::Response, String> {
+fn dll_rpc(
+    req: &trainlab_core::protocol::Request,
+) -> Result<trainlab_core::protocol::Response, String> {
     let addr = format!("127.0.0.1:{DLL_PORT}");
     let mut s = TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
     s.set_nodelay(true).ok();
@@ -71,10 +73,12 @@ fn dll_rpc(req: &trainlab_core::protocol::Request) -> Result<trainlab_core::prot
     let frame = trainlab_core::protocol::encode(req).map_err(|e| format!("encode: {e}"))?;
     s.write_all(&frame).map_err(|e| format!("write: {e}"))?;
     let mut lb = [0u8; 4];
-    s.read_exact(&mut lb).map_err(|e| format!("read len: {e}"))?;
+    s.read_exact(&mut lb)
+        .map_err(|e| format!("read len: {e}"))?;
     let len = u32::from_le_bytes(lb) as usize;
     let mut body = vec![0u8; len];
-    s.read_exact(&mut body).map_err(|e| format!("read body: {e}"))?;
+    s.read_exact(&mut body)
+        .map_err(|e| format!("read body: {e}"))?;
     let mut fo = Vec::with_capacity(4 + len);
     fo.extend_from_slice(&lb);
     fo.extend_from_slice(&body);
@@ -82,7 +86,10 @@ fn dll_rpc(req: &trainlab_core::protocol::Request) -> Result<trainlab_core::prot
 }
 
 fn read_f32_dll(addr: u64) -> Option<f32> {
-    match dll_rpc(&trainlab_core::protocol::Request::Read { address: addr, len: 4 }) {
+    match dll_rpc(&trainlab_core::protocol::Request::Read {
+        address: addr,
+        len: 4,
+    }) {
         Ok(trainlab_core::protocol::Response::Read { data }) if data.len() == 4 => {
             Some(f32::from_le_bytes([data[0], data[1], data[2], data[3]]))
         }
@@ -124,9 +131,10 @@ async fn stage_then_confirm(
         // Parse the pending id out of the "pending id N" response.
         if let Some(n) = parse_pending_id(&text) {
             let r2 = client
-                .call_tool(CallToolRequestParams::new("confirm_op").with_arguments(args(&[
-                    ("id", serde_json::json!(n)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("confirm_op")
+                        .with_arguments(args(&[("id", serde_json::json!(n))])),
+                )
                 .await?;
             println!("{}", extract_text(&r2));
         } else {
@@ -162,11 +170,16 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
     match stage {
         "ping" => {
             let r = client
-                .call_tool(CallToolRequestParams::new("ping").with_arguments(serde_json::Map::new()))
+                .call_tool(
+                    CallToolRequestParams::new("ping").with_arguments(serde_json::Map::new()),
+                )
                 .await?;
             println!("[MCP] {}", extract_text(&r));
             match dll_rpc(&trainlab_core::protocol::Request::Ping) {
-                Ok(trainlab_core::protocol::Response::Pong { version, capabilities }) => {
+                Ok(trainlab_core::protocol::Response::Pong {
+                    version,
+                    capabilities,
+                }) => {
                     let cap_str = if capabilities.is_empty() {
                         String::new()
                     } else {
@@ -180,25 +193,35 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
         "games" => {
             // games — list candidate game processes for attach_game.
             let r = client
-                .call_tool(CallToolRequestParams::new("find_games").with_arguments(serde_json::Map::new()))
+                .call_tool(
+                    CallToolRequestParams::new("find_games").with_arguments(serde_json::Map::new()),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "attach" => {
             // attach <game> [inject] — attach to a game (find + inject + connect).
             let game = std::env::args().nth(2).expect("game exe name arg");
-            let no_inject = std::env::args().nth(3).map(|s| s == "false").unwrap_or(false);
+            let no_inject = std::env::args()
+                .nth(3)
+                .map(|s| s == "false")
+                .unwrap_or(false);
             let r = client
-                .call_tool(CallToolRequestParams::new("attach_game").with_arguments(args(&[
-                    ("game", serde_json::json!(game)),
-                    ("inject", serde_json::json!(!no_inject)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("attach_game").with_arguments(args(&[
+                        ("game", serde_json::json!(game)),
+                        ("inject", serde_json::json!(!no_inject)),
+                    ])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "status" => {
             let r = client
-                .call_tool(CallToolRequestParams::new("connection_status").with_arguments(serde_json::Map::new()))
+                .call_tool(
+                    CallToolRequestParams::new("connection_status")
+                        .with_arguments(serde_json::Map::new()),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
@@ -235,37 +258,54 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         "cheats" => {
             let r = client
-                .call_tool(CallToolRequestParams::new("list_cheats").with_arguments(serde_json::Map::new()))
+                .call_tool(
+                    CallToolRequestParams::new("list_cheats")
+                        .with_arguments(serde_json::Map::new()),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "setcheat" => {
             // setcheat <id> <value> — stage a value write for a cheat.
-            let id: u64 = std::env::args().nth(2).expect("cheat id").parse().expect("numeric");
+            let id: u64 = std::env::args()
+                .nth(2)
+                .expect("cheat id")
+                .parse()
+                .expect("numeric");
             let value = std::env::args().nth(3).expect("value arg");
             let r = client
-                .call_tool(CallToolRequestParams::new("set_cheat_value").with_arguments(args(&[
-                    ("id", serde_json::json!(id)),
-                    ("value", serde_json::json!(value)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("set_cheat_value").with_arguments(args(&[
+                        ("id", serde_json::json!(id)),
+                        ("value", serde_json::json!(value)),
+                    ])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "profiles" => {
             let r = client
-                .call_tool(CallToolRequestParams::new("list_profiles").with_arguments(serde_json::Map::new()))
+                .call_tool(
+                    CallToolRequestParams::new("list_profiles")
+                        .with_arguments(serde_json::Map::new()),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "loadprofile" => {
             // loadprofile <name> [run_setup]
             let name = std::env::args().nth(2).expect("profile name arg");
-            let run_setup = std::env::args().nth(3).map(|s| s != "false").unwrap_or(true);
+            let run_setup = std::env::args()
+                .nth(3)
+                .map(|s| s != "false")
+                .unwrap_or(true);
             let r = client
-                .call_tool(CallToolRequestParams::new("load_profile").with_arguments(args(&[
-                    ("profile", serde_json::json!(name)),
-                    ("run_setup", serde_json::json!(run_setup)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("load_profile").with_arguments(args(&[
+                        ("profile", serde_json::json!(name)),
+                        ("run_setup", serde_json::json!(run_setup)),
+                    ])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
@@ -298,7 +338,10 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         "seedi" => {
             // i32 seed: seedi <value> — scan for an i32 value (integer currency).
-            let val = std::env::args().nth(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            let val = std::env::args()
+                .nth(2)
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
             let r = client
                 .call_tool(CallToolRequestParams::new("scan").with_arguments(args(&[
                     ("value_type", serde_json::json!("i32")),
@@ -310,8 +353,14 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         "seedr" => {
             // Range seed: seedr <min> <max> — scan f32 in [min,max].
-            let min = std::env::args().nth(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-            let max = std::env::args().nth(3).and_then(|s| s.parse::<f64>().ok()).unwrap_or(min);
+            let min = std::env::args()
+                .nth(2)
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let max = std::env::args()
+                .nth(3)
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(min);
             let r = client
                 .call_tool(CallToolRequestParams::new("scan").with_arguments(args(&[
                     ("value_type", serde_json::json!("f32")),
@@ -325,9 +374,10 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         "narrow" => {
             let r = client
-                .call_tool(CallToolRequestParams::new("next").with_arguments(args(&[
-                    ("op", serde_json::json!("changed")),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("next")
+                        .with_arguments(args(&[("op", serde_json::json!("changed"))])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
@@ -335,11 +385,23 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
             // write <addr> <f32value> [confirm] — stages an f32 write (4 hex
             // bytes). Pass "confirm" as the 4th arg to also apply it, or call
             // the 'confirm' stage with the returned pending id.
-            let addr = std::env::args().nth(2).and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
-            let val = std::env::args().nth(3).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
-            let do_confirm = std::env::args().nth(4).map(|s| s == "confirm").unwrap_or(false);
+            let addr = std::env::args()
+                .nth(2)
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0);
+            let val = std::env::args()
+                .nth(3)
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            let do_confirm = std::env::args()
+                .nth(4)
+                .map(|s| s == "confirm")
+                .unwrap_or(false);
             let bytes = val.to_le_bytes();
-            let hex = format!("{:02x}{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2], bytes[3]);
+            let hex = format!(
+                "{:02x}{:02x}{:02x}{:02x}",
+                bytes[0], bytes[1], bytes[2], bytes[3]
+            );
             stage_then_confirm(
                 &client,
                 "write",
@@ -354,11 +416,23 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
         "writei" => {
             // writei <addr> <i32value> [confirm] — stages an i32 write (4 hex
             // bytes). Pass "confirm" as the 4th arg to also apply it.
-            let addr = std::env::args().nth(2).and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
-            let val = std::env::args().nth(3).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-            let do_confirm = std::env::args().nth(4).map(|s| s == "confirm").unwrap_or(false);
+            let addr = std::env::args()
+                .nth(2)
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0);
+            let val = std::env::args()
+                .nth(3)
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
+            let do_confirm = std::env::args()
+                .nth(4)
+                .map(|s| s == "confirm")
+                .unwrap_or(false);
             let bytes = val.to_le_bytes();
-            let hex = format!("{:02x}{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2], bytes[3]);
+            let hex = format!(
+                "{:02x}{:02x}{:02x}{:02x}",
+                bytes[0], bytes[1], bytes[2], bytes[3]
+            );
             stage_then_confirm(
                 &client,
                 "write",
@@ -382,27 +456,33 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
         "watch" => {
             let addr_str = std::env::args().nth(2).expect("address arg");
             let r = client
-                .call_tool(CallToolRequestParams::new("watch_writes").with_arguments(args(&[
-                    ("address", serde_json::json!(addr_str)),
-                    ("len", serde_json::json!(4)),
-                    ("one_shot", serde_json::json!(false)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("watch_writes").with_arguments(args(&[
+                        ("address", serde_json::json!(addr_str)),
+                        ("len", serde_json::json!(4)),
+                        ("one_shot", serde_json::json!(false)),
+                    ])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "poll" => {
             let r = client
-                .call_tool(CallToolRequestParams::new("watch_poll").with_arguments(serde_json::Map::new()))
+                .call_tool(
+                    CallToolRequestParams::new("watch_poll").with_arguments(serde_json::Map::new()),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "disasm" => {
             let addr_str = std::env::args().nth(2).expect("address arg");
             let r = client
-                .call_tool(CallToolRequestParams::new("disassemble").with_arguments(args(&[
-                    ("address", serde_json::json!(addr_str)),
-                    ("len", serde_json::json!(48)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("disassemble").with_arguments(args(&[
+                        ("address", serde_json::json!(addr_str)),
+                        ("len", serde_json::json!(48)),
+                    ])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
@@ -425,8 +505,14 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let name = parts[0];
                         let value_type = parts[1];
-                        let offset = parts.get(2).map(|s| s.parse::<u64>().unwrap_or(0)).unwrap_or(0);
-                        let len = parts.get(3).map(|s| s.parse::<usize>().unwrap_or(0)).filter(|&l| l > 0);
+                        let offset = parts
+                            .get(2)
+                            .map(|s| s.parse::<u64>().unwrap_or(0))
+                            .unwrap_or(0);
+                        let len = parts
+                            .get(3)
+                            .map(|s| s.parse::<usize>().unwrap_or(0))
+                            .filter(|&l| l > 0);
                         let mut m = serde_json::Map::new();
                         m.insert("name".into(), serde_json::json!(name));
                         m.insert("value_type".into(), serde_json::json!(value_type));
@@ -441,10 +527,12 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
                     println!("no valid fields given; use name:type[:offset[:len]]");
                 } else {
                     let r = client
-                        .call_tool(CallToolRequestParams::new("dump_struct").with_arguments(args(&[
-                            ("address", serde_json::json!(addr_str)),
-                            ("fields", serde_json::json!(fields_json)),
-                        ])))
+                        .call_tool(
+                            CallToolRequestParams::new("dump_struct").with_arguments(args(&[
+                                ("address", serde_json::json!(addr_str)),
+                                ("fields", serde_json::json!(fields_json)),
+                            ])),
+                        )
                         .await?;
                     println!("{}", extract_text(&r));
                 }
@@ -454,9 +542,14 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
             let addr_str = std::env::args().nth(2).expect("target arg");
             // hook kind optional (default trampoline), payload optional, and an
             // optional 5th arg "confirm" to apply immediately.
-            let hook = std::env::args().nth(3).unwrap_or_else(|| "trampoline".into());
+            let hook = std::env::args()
+                .nth(3)
+                .unwrap_or_else(|| "trampoline".into());
             let payload = std::env::args().nth(4).unwrap_or_default();
-            let do_confirm = std::env::args().nth(5).map(|s| s == "confirm").unwrap_or(false);
+            let do_confirm = std::env::args()
+                .nth(5)
+                .map(|s| s == "confirm")
+                .unwrap_or(false);
             stage_then_confirm(
                 &client,
                 "install_cave",
@@ -482,7 +575,10 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
             let target = std::env::args().nth(2).expect("target arg");
             let reg = std::env::args().nth(3).unwrap_or_else(|| "rcx".into());
             let value_type = std::env::args().nth(4).unwrap_or_else(|| "ptr".into());
-            let capacity: usize = std::env::args().nth(5).map(|s| s.parse().unwrap_or(32)).unwrap_or(32);
+            let capacity: usize = std::env::args()
+                .nth(5)
+                .map(|s| s.parse().unwrap_or(32))
+                .unwrap_or(32);
             let stop_on_match = std::env::args().nth(6).map(|s| s == "true").unwrap_or(true);
 
             // Optional gate args: gate_reg gate_cmp [val|min max] [gate_value_type]
@@ -507,42 +603,65 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
                     gate.insert("value_type".into(), serde_json::json!(g_vt));
                 }
                 if g_cmp == "range" {
-                    let min: f64 = std::env::args().nth(9).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let max: f64 = std::env::args().nth(10).and_then(|s| s.parse().ok()).unwrap_or(min);
+                    let min: f64 = std::env::args()
+                        .nth(9)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    let max: f64 = std::env::args()
+                        .nth(10)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(min);
                     gate.insert("min".into(), serde_json::json!(min));
                     gate.insert("max".into(), serde_json::json!(max));
                 } else if g_cmp != "whole" {
-                    let val: f64 = std::env::args().nth(9).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                    let val: f64 = std::env::args()
+                        .nth(9)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
                     gate.insert("value".into(), serde_json::json!(val));
                 }
                 tool_args.push(("gate", serde_json::Value::Object(gate)));
             }
             let r = client
-                .call_tool(CallToolRequestParams::new("capture_reg").with_arguments(args(&tool_args)))
+                .call_tool(
+                    CallToolRequestParams::new("capture_reg").with_arguments(args(&tool_args)),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "readcaptures" => {
-            let id: u64 = std::env::args().nth(2).expect("capture id arg").parse().expect("numeric id");
+            let id: u64 = std::env::args()
+                .nth(2)
+                .expect("capture id arg")
+                .parse()
+                .expect("numeric id");
             let r = client
-                .call_tool(CallToolRequestParams::new("read_captures").with_arguments(args(&[
-                    ("id", serde_json::json!(id)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("read_captures")
+                        .with_arguments(args(&[("id", serde_json::json!(id))])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "uninstallcapture" => {
-            let id: u64 = std::env::args().nth(2).expect("capture id arg").parse().expect("numeric id");
+            let id: u64 = std::env::args()
+                .nth(2)
+                .expect("capture id arg")
+                .parse()
+                .expect("numeric id");
             let r = client
-                .call_tool(CallToolRequestParams::new("uninstall_capture_reg").with_arguments(args(&[
-                    ("id", serde_json::json!(id)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("uninstall_capture_reg")
+                        .with_arguments(args(&[("id", serde_json::json!(id))])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
         "clear" => {
             let r = client
-                .call_tool(CallToolRequestParams::new("clear_breakpoints").with_arguments(args(&[])))
+                .call_tool(
+                    CallToolRequestParams::new("clear_breakpoints").with_arguments(args(&[])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
@@ -560,9 +679,10 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
                 .parse()
                 .expect("numeric id");
             let r = client
-                .call_tool(CallToolRequestParams::new("confirm_op").with_arguments(args(&[
-                    ("id", serde_json::json!(id)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("confirm_op")
+                        .with_arguments(args(&[("id", serde_json::json!(id))])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
@@ -574,9 +694,10 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
                 .parse()
                 .expect("numeric id");
             let r = client
-                .call_tool(CallToolRequestParams::new("reject_op").with_arguments(args(&[
-                    ("id", serde_json::json!(id)),
-                ])))
+                .call_tool(
+                    CallToolRequestParams::new("reject_op")
+                        .with_arguments(args(&[("id", serde_json::json!(id))])),
+                )
                 .await?;
             println!("{}", extract_text(&r));
         }
@@ -587,13 +708,7 @@ async fn run(stage: &str) -> Result<(), Box<dyn std::error::Error>> {
                 .parse()
                 .expect("numeric id");
             // undo now stages; apply it via the same confirm path.
-            stage_then_confirm(
-                &client,
-                "undo",
-                &[("id", serde_json::json!(id))],
-                true,
-            )
-            .await?;
+            stage_then_confirm(&client, "undo", &[("id", serde_json::json!(id))], true).await?;
         }
         other => println!("unknown stage: {other}"),
     }

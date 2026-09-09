@@ -51,8 +51,7 @@ pub fn find_module(modules: &[ModuleInfo], addr: u64) -> Option<&ModuleInfo> {
 pub fn enumerate_windows(pid: u32) -> Result<Vec<ModuleInfo>, MemoryError> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W,
-        TH32CS_SNAPMODULE,
+        CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, TH32CS_SNAPMODULE,
     };
 
     // SAFETY: snapshot handle is a valid HANDLE; closed on all paths.
@@ -103,15 +102,12 @@ pub fn enumerate_windows(_pid: u32) -> Result<Vec<ModuleInfo>, MemoryError> {
 /// `modules` is optional; if provided it's tried first. Otherwise (or on a
 /// miss) we fall back to matching `addr` against `regions` and report the
 /// region's name + offset.
-pub fn resolve(
-    addr: u64,
-    modules: Option<&[ModuleInfo]>,
-    regions: &[Region],
-) -> String {
+pub fn resolve(addr: u64, modules: Option<&[ModuleInfo]>, regions: &[Region]) -> String {
     if let Some(ms) = modules
-        && let Some(m) = find_module(ms, addr) {
-            return m.format_offset(addr);
-        }
+        && let Some(m) = find_module(ms, addr)
+    {
+        return m.format_offset(addr);
+    }
     // Fall back to a region.
     for r in regions {
         if addr >= r.start && addr < r.end {
@@ -142,16 +138,34 @@ mod tests {
     #[test]
     fn find_module_matches() {
         let mods = vec![
-            ModuleInfo { base: 0x1000, size: 0x1000, name: "a.dll".into(), path: None },
-            ModuleInfo { base: 0x5000, size: 0x1000, name: "b.dll".into(), path: None },
+            ModuleInfo {
+                base: 0x1000,
+                size: 0x1000,
+                name: "a.dll".into(),
+                path: None,
+            },
+            ModuleInfo {
+                base: 0x5000,
+                size: 0x1000,
+                name: "b.dll".into(),
+                path: None,
+            },
         ];
-        assert_eq!(find_module(&mods, 0x5600).map(|m| m.name.as_str()), Some("b.dll"));
+        assert_eq!(
+            find_module(&mods, 0x5600).map(|m| m.name.as_str()),
+            Some("b.dll")
+        );
         assert_eq!(find_module(&mods, 0x9000).map(|m| m.name.as_str()), None);
     }
 
     #[test]
     fn resolve_falls_back_to_region() {
-        let mods = vec![ModuleInfo { base: 0x1000, size: 0x100, name: "a.dll".into(), path: None }];
+        let mods = vec![ModuleInfo {
+            base: 0x1000,
+            size: 0x100,
+            name: "a.dll".into(),
+            path: None,
+        }];
         let regions = vec![Region {
             start: 0x9000,
             end: 0x9100,

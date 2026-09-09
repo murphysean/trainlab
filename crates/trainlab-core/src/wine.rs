@@ -170,10 +170,7 @@ impl ScanScope {
     ///
     /// When `scope` is [`ScanScope::All`, returns every readable region.
     /// Otherwise, returns regions whose [`RegionKind`] is in scope.
-    pub fn regions(
-        &self,
-        tagged: &[TaggedRegion],
-    ) -> Vec<crate::memory::Region> {
+    pub fn regions(&self, tagged: &[TaggedRegion]) -> Vec<crate::memory::Region> {
         match self {
             ScanScope::All => tagged
                 .iter()
@@ -198,7 +195,10 @@ impl ScanScope {
 ///
 /// This is the convenience entry point for "give me the regions to scan for
 /// PID `pid`." Returns the scoped, readable regions.
-pub fn scan_regions(pid: i32, scope: ScanScope) -> Result<Vec<crate::memory::Region>, std::io::Error> {
+pub fn scan_regions(
+    pid: i32,
+    scope: ScanScope,
+) -> Result<Vec<crate::memory::Region>, std::io::Error> {
     let tagged = tag_regions(pid)?;
     Ok(scope.regions(&tagged))
 }
@@ -230,9 +230,10 @@ pub fn is_wine_process(pid: i32) -> bool {
     }
     // (2) Wine DLLs mapped.
     if let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps"))
-        && (maps.contains("/wine/") || maps.to_lowercase().contains("wine")) {
-            return true;
-        }
+        && (maps.contains("/wine/") || maps.to_lowercase().contains("wine"))
+    {
+        return true;
+    }
     // (3) Ancestor walk.
     ancestor_has_wine(pid)
 }

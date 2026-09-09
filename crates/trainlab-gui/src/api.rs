@@ -3,11 +3,10 @@
 //! Provides JSON HTTP REST endpoints for remote control, web dashboards,
 //! and script integrations alongside the MCP server.
 
-use axum::body::Bytes;
+use axum::Router;
 use axum::extract::{FromRequest, Json, Multipart, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp;
@@ -242,19 +241,29 @@ pub struct UploadQuery {
 
 /// Helper function to save uploaded file bytes with collision-free naming:
 /// `name.ext` -> `name.ext`, `name_1.ext`, `name_2.ext`, etc.
-pub fn save_uploaded_file(requested_filename: &str, bytes: &[u8]) -> Result<UploadResponse, String> {
+pub fn save_uploaded_file(
+    requested_filename: &str,
+    bytes: &[u8],
+) -> Result<UploadResponse, String> {
     let clean_name = std::path::Path::new(requested_filename)
         .file_name()
         .and_then(|f| f.to_str())
         .unwrap_or("upload.bin");
-    let clean_name = if clean_name.trim().is_empty() { "upload.bin" } else { clean_name.trim() };
+    let clean_name = if clean_name.trim().is_empty() {
+        "upload.bin"
+    } else {
+        clean_name.trim()
+    };
 
     let uploads_dir = std::path::Path::new("uploads");
     std::fs::create_dir_all(uploads_dir)
         .map_err(|e| format!("failed to create uploads directory: {e}"))?;
 
     let path_obj = std::path::Path::new(clean_name);
-    let stem = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or("upload");
+    let stem = path_obj
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("upload");
     let ext = path_obj.extension().and_then(|e| e.to_str());
 
     let mut candidate_name = clean_name.to_string();
@@ -271,8 +280,7 @@ pub fn save_uploaded_file(requested_filename: &str, bytes: &[u8]) -> Result<Uplo
     std::fs::write(&target_path, bytes)
         .map_err(|e| format!("failed to write uploaded file '{candidate_name}': {e}"))?;
 
-    let abs_path = std::fs::canonicalize(&target_path)
-        .unwrap_or_else(|_| target_path.clone());
+    let abs_path = std::fs::canonicalize(&target_path).unwrap_or_else(|_| target_path.clone());
 
     Ok(UploadResponse {
         filename: candidate_name.clone(),
@@ -287,18 +295,30 @@ pub fn save_uploaded_file(requested_filename: &str, bytes: &[u8]) -> Result<Uplo
 /// use `lock_session(&state)?`. For handlers returning `Json<T>` directly,
 /// use `lock_session_or_500(&state)` which returns a 500 on poison.
 fn err(msg: impl Into<String>) -> (StatusCode, Json<ApiError>) {
-    (StatusCode::BAD_REQUEST, Json(ApiError { error: msg.into() }))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError { error: msg.into() }),
+    )
 }
 
-fn lock_session_or_500(state: &ApiState) -> Result<std::sync::MutexGuard<'_, crate::session::SessionState>, (StatusCode, Json<ApiError>)> {
+fn lock_session_or_500(
+    state: &ApiState,
+) -> Result<std::sync::MutexGuard<'_, crate::session::SessionState>, (StatusCode, Json<ApiError>)> {
     state.session.lock().map_err(|_| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: "session lock poisoned".into() }))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "session lock poisoned".into(),
+            }),
+        )
     })
 }
 
 // --- Handlers ---
 
-async fn get_status(State(state): State<ApiState>) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
+async fn get_status(
+    State(state): State<ApiState>,
+) -> Result<Json<StatusResponse>, (StatusCode, Json<ApiError>)> {
     let s = lock_session_or_500(&state)?;
     Ok(Json(StatusResponse {
         connected: s.connected(),
@@ -308,25 +328,41 @@ async fn get_status(State(state): State<ApiState>) -> Result<Json<StatusResponse
     }))
 }
 
-async fn get_cheats(State(state): State<ApiState>) -> Result<Json<Vec<CheatDto>>, (StatusCode, Json<ApiError>)> {
+async fn get_cheats(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<CheatDto>>, (StatusCode, Json<ApiError>)> {
     let s = lock_session_or_500(&state)?;
-    let cheats = s.list_cheats().into_iter().map(|c| {
-        let (kind_str, enabled, val) = match &c.kind {
-            crate::session::CheatKind::Toggle { enabled, .. } => ("toggle".to_string(), Some(*enabled), None),
-            crate::session::CheatKind::Patch { enabled, .. } => ("patch".to_string(), Some(*enabled), None),
-            crate::session::CheatKind::Button { .. } => ("button".to_string(), None, None),
-            crate::session::CheatKind::Value { value_type, .. } => ("value".to_string(), None, Some(format!("{value_type:?}"))),
-            crate::session::CheatKind::Struct { fields, .. } => ("struct".to_string(), None, Some(format!("{} field(s)", fields.len()))),
-        };
-        CheatDto {
-            id: c.id,
-            label: c.label.clone(),
-            kind: kind_str,
-            enabled,
-            value: val,
-            hotkey: c.hotkey.clone(),
-        }
-    }).collect();
+    let cheats = s
+        .list_cheats()
+        .into_iter()
+        .map(|c| {
+            let (kind_str, enabled, val) = match &c.kind {
+                crate::session::CheatKind::Toggle { enabled, .. } => {
+                    ("toggle".to_string(), Some(*enabled), None)
+                }
+                crate::session::CheatKind::Patch { enabled, .. } => {
+                    ("patch".to_string(), Some(*enabled), None)
+                }
+                crate::session::CheatKind::Button { .. } => ("button".to_string(), None, None),
+                crate::session::CheatKind::Value { value_type, .. } => {
+                    ("value".to_string(), None, Some(format!("{value_type:?}")))
+                }
+                crate::session::CheatKind::Struct { fields, .. } => (
+                    "struct".to_string(),
+                    None,
+                    Some(format!("{} field(s)", fields.len())),
+                ),
+            };
+            CheatDto {
+                id: c.id,
+                label: c.label.clone(),
+                kind: kind_str,
+                enabled,
+                value: val,
+                hotkey: c.hotkey.clone(),
+            }
+        })
+        .collect();
     Ok(Json(cheats))
 }
 
@@ -334,23 +370,40 @@ async fn toggle_cheat(
     State(state): State<ApiState>,
     Json(req): Json<ToggleCheatReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    let result = mcp_srv.set_cheat_toggle(rmcp::handler::server::wrapper::Parameters(mcp::SetCheatToggleArgs {
-        id: req.cheat_id,
-        enabled: req.enabled,
-    })).map_err(|e| err(e.message))?;
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let result = mcp_srv
+        .set_cheat_toggle(rmcp::handler::server::wrapper::Parameters(
+            mcp::SetCheatToggleArgs {
+                id: req.cheat_id,
+                enabled: req.enabled,
+            },
+        ))
+        .map_err(|e| err(e.message))?;
 
     state.request_repaint();
     // T-121: Return staged status with pending_id instead of claiming it applied.
-    let text = result.content.into_iter().find_map(|b| match b {
-        rmcp::model::ContentBlock::Text(t) => Some(t.text),
-        _ => None,
-    }).unwrap_or_default();
-    let pending_id = text.split("pending id ").nth(1).and_then(|s| s.split(')').next()).and_then(|s| s.parse::<u64>().ok());
+    let text = result
+        .content
+        .into_iter()
+        .find_map(|b| match b {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let pending_id = text
+        .split("pending id ")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .and_then(|s| s.parse::<u64>().ok());
     if let Some(pid) = pending_id {
-        Ok(Json(serde_json::json!({ "status": "staged", "pending_id": pid, "cheat_id": req.cheat_id, "enabled": req.enabled })))
+        Ok(Json(
+            serde_json::json!({ "status": "staged", "pending_id": pid, "cheat_id": req.cheat_id, "enabled": req.enabled }),
+        ))
     } else {
-        Ok(Json(serde_json::json!({ "status": "ok", "cheat_id": req.cheat_id, "enabled": req.enabled, "message": text })))
+        Ok(Json(
+            serde_json::json!({ "status": "ok", "cheat_id": req.cheat_id, "enabled": req.enabled, "message": text }),
+        ))
     }
 }
 
@@ -358,23 +411,40 @@ async fn apply_cheat(
     State(state): State<ApiState>,
     Json(req): Json<ApplyCheatReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    let result = mcp_srv.set_cheat_value(rmcp::handler::server::wrapper::Parameters(mcp::SetCheatValueArgs {
-        id: req.cheat_id,
-        value: req.value.clone(),
-    })).map_err(|e| err(e.message))?;
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let result = mcp_srv
+        .set_cheat_value(rmcp::handler::server::wrapper::Parameters(
+            mcp::SetCheatValueArgs {
+                id: req.cheat_id,
+                value: req.value.clone(),
+            },
+        ))
+        .map_err(|e| err(e.message))?;
 
     state.request_repaint();
     // T-121: Return staged status with pending_id.
-    let text = result.content.into_iter().find_map(|b| match b {
-        rmcp::model::ContentBlock::Text(t) => Some(t.text),
-        _ => None,
-    }).unwrap_or_default();
-    let pending_id = text.split("pending id ").nth(1).and_then(|s| s.split(')').next()).and_then(|s| s.parse::<u64>().ok());
+    let text = result
+        .content
+        .into_iter()
+        .find_map(|b| match b {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let pending_id = text
+        .split("pending id ")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .and_then(|s| s.parse::<u64>().ok());
     if let Some(pid) = pending_id {
-        Ok(Json(serde_json::json!({ "status": "staged", "pending_id": pid, "cheat_id": req.cheat_id, "value": req.value })))
+        Ok(Json(
+            serde_json::json!({ "status": "staged", "pending_id": pid, "cheat_id": req.cheat_id, "value": req.value }),
+        ))
     } else {
-        Ok(Json(serde_json::json!({ "status": "ok", "cheat_id": req.cheat_id, "value": req.value, "message": text })))
+        Ok(Json(
+            serde_json::json!({ "status": "ok", "cheat_id": req.cheat_id, "value": req.value, "message": text }),
+        ))
     }
 }
 
@@ -397,32 +467,42 @@ async fn run_cheat(
             None => return Err(err(format!("no cheat with id {}", req.cheat_id))),
             Some(c) => match &c.kind {
                 crate::session::CheatKind::Button { commands } => commands.clone(),
-                _ => return Err(err(format!(
-                    "cheat {} is not a button cheat; use /cheats/toggle or /cheats/apply",
-                    req.cheat_id
-                ))),
+                _ => {
+                    return Err(err(format!(
+                        "cheat {} is not a button cheat; use /cheats/toggle or /cheats/apply",
+                        req.cheat_id
+                    )));
+                }
             },
         }
     };
 
     let label = {
         let s = lock_session_or_500(&state)?;
-        s.get_cheat(req.cheat_id).map(|c| c.label.clone()).unwrap_or_default()
+        s.get_cheat(req.cheat_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_default()
     };
 
     {
         let mut s = lock_session_or_500(&state)?;
-        s.log_activity("API", format!("button '{}' triggered: running {} command(s)...", label, commands.len()));
+        s.log_activity(
+            "API",
+            format!(
+                "button '{}' triggered: running {} command(s)...",
+                label,
+                commands.len()
+            ),
+        );
     }
 
     let session = state.session.clone();
 
     // Run on a blocking thread — commands may contain Wait steps that sleep.
-    let result = tokio::task::spawn_blocking(move || {
-        mcp::execute_profile_commands(&session, &commands)
-    })
-    .await
-    .map_err(|e| err(format!("run_cheat task panicked: {e}")))?;
+    let result =
+        tokio::task::spawn_blocking(move || mcp::execute_profile_commands(&session, &commands))
+            .await
+            .map_err(|e| err(format!("run_cheat task panicked: {e}")))?;
 
     match result {
         Ok(()) => {
@@ -453,7 +533,9 @@ async fn run_cheat(
 /// Returns up to the last 1000 entries (the session's in-memory cap).
 /// Also available via SSE: the `/events` stream emits `activity_logged`
 /// events for real-time updates.
-async fn get_activity_log(State(state): State<ApiState>) -> Result<Json<Vec<String>>, (StatusCode, Json<ApiError>)> {
+async fn get_activity_log(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<String>>, (StatusCode, Json<ApiError>)> {
     let s = lock_session_or_500(&state)?;
     Ok(Json(s.list_activity_log()))
 }
@@ -486,20 +568,26 @@ async fn load_profile(
     .map_err(err)?;
 
     state.request_repaint();
-    Ok(Json(serde_json::json!({ "status": "ok", "profile": req.name, "result": res })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "profile": req.name, "result": res }),
+    ))
 }
 
-async fn get_markers(State(state): State<ApiState>) -> Result<Json<Vec<MarkerDto>>, (StatusCode, Json<ApiError>)> {
+async fn get_markers(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<MarkerDto>>, (StatusCode, Json<ApiError>)> {
     let s = lock_session_or_500(&state)?;
-    let markers = s.list_markers().into_iter().map(|m| {
-        MarkerDto {
+    let markers = s
+        .list_markers()
+        .into_iter()
+        .map(|m| MarkerDto {
             name: m.label.clone(),
             address: format!("{:#x}", m.address),
             address_hex: format!("{:#x}", m.address),
             size: m.size,
             note: m.note.clone(),
-        }
-    }).collect();
+        })
+        .collect();
     Ok(Json(markers))
 }
 
@@ -507,32 +595,43 @@ async fn set_marker(
     State(state): State<ApiState>,
     Json(req): Json<SetMarkerReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    mcp_srv.set_marker(rmcp::handler::server::wrapper::Parameters(mcp::SetMarkerArgs {
-        label: req.name.clone(),
-        address: req.address.clone(),
-        size: req.size,
-        kind: req.kind.clone(),
-        struct_type: req.struct_type.clone(),
-        note: req.note.clone(),
-    })).map_err(|e| err(e.message))?;
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    mcp_srv
+        .set_marker(rmcp::handler::server::wrapper::Parameters(
+            mcp::SetMarkerArgs {
+                label: req.name.clone(),
+                address: req.address.clone(),
+                size: req.size,
+                kind: req.kind.clone(),
+                struct_type: req.struct_type.clone(),
+                note: req.note.clone(),
+            },
+        ))
+        .map_err(|e| err(e.message))?;
 
     state.request_repaint();
-    Ok(Json(serde_json::json!({ "status": "ok", "name": req.name, "address": req.address })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "name": req.name, "address": req.address }),
+    ))
 }
 
 async fn read_memory(
     State(state): State<ApiState>,
     Json(req): Json<ReadReq>,
 ) -> Result<Json<ReadResp>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    let parsed_addr = mcp::parse_addr_expr(&state.session, &req.address).map_err(|e| err(format!("{e:?}")))?;
-    
-    let res = mcp_srv.read(rmcp::handler::server::wrapper::Parameters(mcp::ReadArgs {
-        address: req.address.clone(),
-        len: req.len,
-        value_type: req.value_type.clone(),
-    })).map_err(|e| err(e.message))?;
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let parsed_addr =
+        mcp::parse_addr_expr(&state.session, &req.address).map_err(|e| err(format!("{e:?}")))?;
+
+    let res = mcp_srv
+        .read(rmcp::handler::server::wrapper::Parameters(mcp::ReadArgs {
+            address: req.address.clone(),
+            len: req.len,
+            value_type: req.value_type.clone(),
+        }))
+        .map_err(|e| err(e.message))?;
 
     let text_block = match &res.content.first() {
         Some(rmcp::model::ContentBlock::Text(t)) => t.text.clone(),
@@ -552,25 +651,40 @@ async fn write_memory(
     State(state): State<ApiState>,
     Json(req): Json<WriteReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    let result = mcp_srv.write(rmcp::handler::server::wrapper::Parameters(mcp::WriteArgs {
-        address: req.address.clone(),
-        data: None,
-        value: Some(req.value.clone()),
-        value_type: req.value_type,
-    })).map_err(|e| err(e.message))?;
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let result = mcp_srv
+        .write(rmcp::handler::server::wrapper::Parameters(mcp::WriteArgs {
+            address: req.address.clone(),
+            data: None,
+            value: Some(req.value.clone()),
+            value_type: req.value_type,
+        }))
+        .map_err(|e| err(e.message))?;
 
     state.request_repaint();
     // T-121: Return staged status with pending_id.
-    let text = result.content.into_iter().find_map(|b| match b {
-        rmcp::model::ContentBlock::Text(t) => Some(t.text),
-        _ => None,
-    }).unwrap_or_default();
-    let pending_id = text.split("pending id ").nth(1).and_then(|s| s.split('.').next().or_else(|| s.split(')').next())).and_then(|s| s.trim().parse::<u64>().ok());
+    let text = result
+        .content
+        .into_iter()
+        .find_map(|b| match b {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let pending_id = text
+        .split("pending id ")
+        .nth(1)
+        .and_then(|s| s.split('.').next().or_else(|| s.split(')').next()))
+        .and_then(|s| s.trim().parse::<u64>().ok());
     if let Some(pid) = pending_id {
-        Ok(Json(serde_json::json!({ "status": "staged", "pending_id": pid, "address": req.address, "value": req.value })))
+        Ok(Json(
+            serde_json::json!({ "status": "staged", "pending_id": pid, "address": req.address, "value": req.value }),
+        ))
     } else {
-        Ok(Json(serde_json::json!({ "status": "ok", "address": req.address, "value": req.value, "message": text })))
+        Ok(Json(
+            serde_json::json!({ "status": "ok", "address": req.address, "value": req.value, "message": text }),
+        ))
     }
 }
 
@@ -578,17 +692,23 @@ async fn first_scan(
     State(state): State<ApiState>,
     Json(req): Json<FirstScanReq>,
 ) -> Result<Json<ScanResp>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    let val_f64 = req.value.parse::<f64>().map_err(|_| err("invalid scan value float"))?;
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let val_f64 = req
+        .value
+        .parse::<f64>()
+        .map_err(|_| err("invalid scan value float"))?;
     let val_max_f64 = req.value_max.as_deref().and_then(|v| v.parse::<f64>().ok());
 
-    let _ = mcp_srv.scan(rmcp::handler::server::wrapper::Parameters(mcp::ScanArgs {
-        value: val_f64,
-        value_type: req.value_type.clone(),
-        max: val_max_f64,
-        alignment: None,
-        region: None,
-    })).map_err(|e| err(e.message))?;
+    let _ = mcp_srv
+        .scan(rmcp::handler::server::wrapper::Parameters(mcp::ScanArgs {
+            value: val_f64,
+            value_type: req.value_type.clone(),
+            max: val_max_f64,
+            alignment: None,
+            region: None,
+        }))
+        .map_err(|e| err(e.message))?;
 
     let count = {
         let s = lock_session_or_500(&state)?;
@@ -606,15 +726,18 @@ async fn refine_scan(
     State(state): State<ApiState>,
     Json(req): Json<RefineScanReq>,
 ) -> Result<Json<ScanResp>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
     let val_f64 = req.value.as_deref().and_then(|v| v.parse::<f64>().ok());
     let val_max_f64 = req.value_max.as_deref().and_then(|v| v.parse::<f64>().ok());
 
-    let _ = mcp_srv.next(rmcp::handler::server::wrapper::Parameters(mcp::NextArgs {
-        op: req.mode,
-        value: val_f64,
-        max: val_max_f64,
-    })).map_err(|e| err(e.message))?;
+    let _ = mcp_srv
+        .next(rmcp::handler::server::wrapper::Parameters(mcp::NextArgs {
+            op: req.mode,
+            value: val_f64,
+            max: val_max_f64,
+        }))
+        .map_err(|e| err(e.message))?;
 
     let (count, vt_str) = {
         let s = lock_session_or_500(&state)?;
@@ -632,16 +755,20 @@ async fn refine_scan(
     }))
 }
 
-async fn get_scan_matches(State(state): State<ApiState>) -> Result<Json<Vec<ScanMatchDto>>, (StatusCode, Json<ApiError>)> {
+async fn get_scan_matches(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<ScanMatchDto>>, (StatusCode, Json<ApiError>)> {
     let s = lock_session_or_500(&state)?;
     let matches = if let Some(sc) = s.scan() {
-        sc.matches().iter().take(100).map(|(addr, val)| {
-            ScanMatchDto {
+        sc.matches()
+            .iter()
+            .take(100)
+            .map(|(addr, val)| ScanMatchDto {
                 address: format!("{addr:#x}"),
                 address_hex: format!("{addr:#x}"),
                 value: *val,
-            }
-        }).collect()
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -664,7 +791,9 @@ async fn window_command(
     Ok(Json(serde_json::json!({ "status": "ok", "command": cmd })))
 }
 
-async fn get_tracked_apps(State(state): State<ApiState>) -> Result<Json<Vec<crate::session::DiscoveredApp>>, (StatusCode, Json<ApiError>)> {
+async fn get_tracked_apps(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<crate::session::DiscoveredApp>>, (StatusCode, Json<ApiError>)> {
     let s = lock_session_or_500(&state)?;
     Ok(Json(s.list_tracked_apps()))
 }
@@ -679,7 +808,9 @@ async fn launch_app_handler(
         s.launch_application(&req.path, &args).map_err(err)?
     };
     state.request_repaint();
-    Ok(Json(serde_json::json!({ "status": "ok", "path": req.path, "pid": pid })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "path": req.path, "pid": pid }),
+    ))
 }
 
 // --- Network traffic handlers ---
@@ -724,12 +855,8 @@ async fn get_network_packets(
         _ => None,
     };
 
-    let (packets, total) = s.list_network_packets(
-        params.limit,
-        params.offset,
-        proto,
-        params.filter.as_deref(),
-    );
+    let (packets, total) =
+        s.list_network_packets(params.limit, params.offset, proto, params.filter.as_deref());
 
     let hooks_enabled = s.network_hooks_enabled();
     Ok(Json(NetworkLogResponse {
@@ -748,7 +875,9 @@ async fn clear_network_packets_handler(
         s.clear_network_packets()
     };
     state.request_repaint();
-    Ok(Json(serde_json::json!({ "status": "ok", "cleared": cleared })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "cleared": cleared }),
+    ))
 }
 
 /// `POST /api/network/toggle` — toggle in-game network interception.
@@ -775,29 +904,38 @@ async fn toggle_network_hooks_handler(
         }
     }
     // Forward command to DLL if connected
-    let _ = crate::controller::request(&state.session, &trainlab_core::protocol::Request::ConfigureNetworkHook {
-        enabled: req.enabled,
-        ignore_ports: ports,
-        capture_loopback: req.capture_loopback,
-        ignore_hosts,
-    });
+    let _ = crate::controller::request(
+        &state.session,
+        &trainlab_core::protocol::Request::ConfigureNetworkHook {
+            enabled: req.enabled,
+            ignore_ports: ports,
+            capture_loopback: req.capture_loopback,
+            ignore_hosts,
+        },
+    );
     state.request_repaint();
-    Ok(Json(serde_json::json!({ "status": "ok", "enabled": req.enabled })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "enabled": req.enabled }),
+    ))
 }
 
 // --- T-120: Pending op handlers ---
 
 /// `GET /api/pending` — list all staged (pending) mutations awaiting confirmation.
-async fn list_pending_ops(State(state): State<ApiState>) -> Result<Json<Vec<PendingOpDto>>, (StatusCode, Json<ApiError>)> {
+async fn list_pending_ops(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<PendingOpDto>>, (StatusCode, Json<ApiError>)> {
     let s = lock_session_or_500(&state)?;
-    let pending: Vec<PendingOpDto> = s.list_pending().iter().map(|p| {
-        PendingOpDto {
+    let pending: Vec<PendingOpDto> = s
+        .list_pending()
+        .iter()
+        .map(|p| PendingOpDto {
             id: p.id,
             kind: p.kind.kind_text().to_string(),
             address: format!("{:#x}", p.address),
             preview: p.preview.clone(),
-        }
-    }).collect();
+        })
+        .collect();
     Ok(Json(pending))
 }
 
@@ -806,10 +944,13 @@ async fn confirm_op_handler(
     State(state): State<ApiState>,
     Json(req): Json<OpConfirmReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    mcp_srv.confirm_op(rmcp::handler::server::wrapper::Parameters(mcp::OpConfirmArgs {
-        id: req.id,
-    })).map_err(|e| err(e.message))?;
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    mcp_srv
+        .confirm_op(rmcp::handler::server::wrapper::Parameters(
+            mcp::OpConfirmArgs { id: req.id },
+        ))
+        .map_err(|e| err(e.message))?;
 
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "id": req.id })))
@@ -820,10 +961,13 @@ async fn reject_op_handler(
     State(state): State<ApiState>,
     Json(req): Json<OpConfirmReq>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    mcp_srv.reject_op(rmcp::handler::server::wrapper::Parameters(mcp::OpConfirmArgs {
-        id: req.id,
-    })).map_err(|e| err(e.message))?;
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    mcp_srv
+        .reject_op(rmcp::handler::server::wrapper::Parameters(
+            mcp::OpConfirmArgs { id: req.id },
+        ))
+        .map_err(|e| err(e.message))?;
 
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "id": req.id })))
@@ -842,14 +986,21 @@ async fn set_pin_handler(
     State(state): State<ApiState>,
     Json(args): Json<mcp::PinValueArgs>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    let res = mcp_srv.pin_value(rmcp::handler::server::wrapper::Parameters(args))
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let res = mcp_srv
+        .pin_value(rmcp::handler::server::wrapper::Parameters(args))
         .map_err(|e| err(e.message))?;
 
-    let text = res.content.iter().filter_map(|c| match c {
-        rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
-        _ => None,
-    }).collect::<Vec<_>>().join("\n");
+    let text = res
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "message": text })))
@@ -859,14 +1010,23 @@ async fn set_pin_handler(
 async fn clear_pins_handler(
     State(state): State<ApiState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let mcp_srv = mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
-    let res = mcp_srv.clear_pins(rmcp::handler::server::wrapper::Parameters(mcp::ListPinsArgs {}))
+    let mcp_srv =
+        mcp::TrainlabMcpServer::with_session_and_ctx(state.session.clone(), state.egui_ctx.clone());
+    let res = mcp_srv
+        .clear_pins(rmcp::handler::server::wrapper::Parameters(
+            mcp::ListPinsArgs {},
+        ))
         .map_err(|e| err(e.message))?;
 
-    let text = res.content.iter().filter_map(|c| match c {
-        rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
-        _ => None,
-    }).collect::<Vec<_>>().join("\n");
+    let text = res
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     state.request_repaint();
     Ok(Json(serde_json::json!({ "status": "ok", "message": text })))
@@ -917,21 +1077,28 @@ async fn upload_handler(
             .map_err(|e| err(format!("invalid multipart request: {e}")))?;
 
         let mut found: Option<(String, Vec<u8>)> = None;
-        while let Ok(Some(field)) = multipart.next_field().await {
+        if let Ok(Some(field)) = multipart.next_field().await {
             let field_filename = field.file_name().map(|s| s.to_string());
-            let data = field.bytes().await.map_err(|e| err(format!("failed to read multipart field bytes: {e}")))?;
-            let name = query.filename.clone()
+            let data = field
+                .bytes()
+                .await
+                .map_err(|e| err(format!("failed to read multipart field bytes: {e}")))?;
+            let name = query
+                .filename
+                .clone()
                 .or(field_filename)
                 .unwrap_or_else(|| "upload.bin".to_string());
             found = Some((name, data.to_vec()));
-            break;
         }
         found.ok_or_else(|| err("no file field found in multipart upload"))?
     } else {
         let body_bytes = axum::body::to_bytes(request.into_body(), 50 * 1024 * 1024)
             .await
             .map_err(|e| err(format!("failed to read request body: {e}")))?;
-        let filename = query.filename.clone().unwrap_or_else(|| "upload.bin".to_string());
+        let filename = query
+            .filename
+            .clone()
+            .unwrap_or_else(|| "upload.bin".to_string());
         (filename, body_bytes.to_vec())
     };
 
@@ -943,7 +1110,13 @@ async fn upload_handler(
 
     // Log upload in activity log
     if let Ok(mut s) = state.session.lock() {
-        s.log_activity("UPLOAD", format!("saved '{}' ({} bytes) -> {}", res.filename, res.size, res.path));
+        s.log_activity(
+            "UPLOAD",
+            format!(
+                "saved '{}' ({} bytes) -> {}",
+                res.filename, res.size, res.path
+            ),
+        );
     }
 
     state.request_repaint();

@@ -3,26 +3,29 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;
-use windows::core::PCSTR;
-use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
+use windows::Win32::Graphics::Direct3D::{
+    D3D_PRIMITIVE_TOPOLOGY, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState, ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext,
-    ID3D11InputLayout, ID3D11PixelShader, ID3D11RasterizerState, ID3D11RenderTargetView,
-    ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_INDEX_BUFFER, D3D11_BIND_SHADER_RESOURCE,
     D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE,
     D3D11_BLEND_OP_ADD, D3D11_BLEND_SRC_ALPHA, D3D11_BUFFER_DESC, D3D11_COLOR_WRITE_ENABLE_ALL,
     D3D11_CPU_ACCESS_WRITE, D3D11_CULL_NONE, D3D11_DEPTH_STENCIL_DESC, D3D11_FILL_SOLID,
-    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_INPUT_PER_VERTEX_DATA, D3D11_INPUT_ELEMENT_DESC,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_WRITE_DISCARD, D3D11_RASTERIZER_DESC,
+    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA,
+    D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE, D3D11_RASTERIZER_DESC,
     D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SAMPLER_DESC, D3D11_SUBRESOURCE_DATA,
-    D3D11_TEXTURE2D_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC,
-    D3D11_VIEWPORT,
+    D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC,
+    D3D11_VIEWPORT, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState,
+    ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout,
+    ID3D11PixelShader, ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState,
+    ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_UNKNOWN,
+    DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G32_FLOAT,
+    DXGI_FORMAT_UNKNOWN,
 };
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
+use windows::core::PCSTR;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
 type FnD3DCompile = unsafe extern "system" fn(
@@ -137,13 +140,21 @@ impl<'a> D3D11StateBackup<'a> {
         let mut blend_state = None;
         let mut blend_factor = [0.0f32; 4];
         let mut sample_mask = 0u32;
-        unsafe { context.OMGetBlendState(Some(&mut blend_state), Some(&mut blend_factor), Some(&mut sample_mask)) };
+        unsafe {
+            context.OMGetBlendState(
+                Some(&mut blend_state),
+                Some(&mut blend_factor),
+                Some(&mut sample_mask),
+            )
+        };
 
         let rasterizer_state = unsafe { context.RSGetState().ok() };
 
         let mut depth_stencil_state = None;
         let mut stencil_ref = 0u32;
-        unsafe { context.OMGetDepthStencilState(Some(&mut depth_stencil_state), Some(&mut stencil_ref)) };
+        unsafe {
+            context.OMGetDepthStencilState(Some(&mut depth_stencil_state), Some(&mut stencil_ref))
+        };
 
         let input_layout = unsafe { context.IAGetInputLayout().ok() };
         let topology = unsafe { context.IAGetPrimitiveTopology() };
@@ -164,7 +175,13 @@ impl<'a> D3D11StateBackup<'a> {
         let mut index_buffer = None;
         let mut ib_format = DXGI_FORMAT_UNKNOWN;
         let mut ib_offset = 0u32;
-        unsafe { context.IAGetIndexBuffer(Some(&mut index_buffer), Some(&mut ib_format), Some(&mut ib_offset)) };
+        unsafe {
+            context.IAGetIndexBuffer(
+                Some(&mut index_buffer),
+                Some(&mut ib_format),
+                Some(&mut ib_offset),
+            )
+        };
 
         let mut vertex_shader = None;
         unsafe { context.VSGetShader(&mut vertex_shader, None, None) };
@@ -211,23 +228,41 @@ impl<'a> D3D11StateBackup<'a> {
 
     pub unsafe fn restore(&self) {
         unsafe {
-            self.context.OMSetRenderTargets(Some(&self.rtv), self.dsv.as_ref());
+            self.context
+                .OMSetRenderTargets(Some(&self.rtv), self.dsv.as_ref());
             if self.num_viewports > 0 {
-                self.context.RSSetViewports(Some(&self.viewports[..self.num_viewports as usize]));
+                self.context
+                    .RSSetViewports(Some(&self.viewports[..self.num_viewports as usize]));
             }
-            self.context.OMSetBlendState(self.blend_state.as_ref(), Some(&self.blend_factor), self.sample_mask);
+            self.context.OMSetBlendState(
+                self.blend_state.as_ref(),
+                Some(&self.blend_factor),
+                self.sample_mask,
+            );
             self.context.RSSetState(self.rasterizer_state.as_ref());
-            self.context.OMSetDepthStencilState(self.depth_stencil_state.as_ref(), self.stencil_ref);
+            self.context
+                .OMSetDepthStencilState(self.depth_stencil_state.as_ref(), self.stencil_ref);
             self.context.IASetInputLayout(self.input_layout.as_ref());
             self.context.IASetPrimitiveTopology(self.topology);
 
             let vb_ptrs: [Option<ID3D11Buffer>; 1] = [self.vertex_buffer[0].clone()];
-            self.context.IASetVertexBuffers(0, 1, Some(vb_ptrs.as_ptr()), Some(self.vb_stride.as_ptr()), Some(self.vb_offset.as_ptr()));
-            self.context.IASetIndexBuffer(self.index_buffer.as_ref(), self.ib_format, self.ib_offset);
+            self.context.IASetVertexBuffers(
+                0,
+                1,
+                Some(vb_ptrs.as_ptr()),
+                Some(self.vb_stride.as_ptr()),
+                Some(self.vb_offset.as_ptr()),
+            );
+            self.context.IASetIndexBuffer(
+                self.index_buffer.as_ref(),
+                self.ib_format,
+                self.ib_offset,
+            );
 
             self.context.VSSetShader(self.vertex_shader.as_ref(), None);
             self.context.PSSetShader(self.pixel_shader.as_ref(), None);
-            self.context.VSSetConstantBuffers(0, Some(&self.vs_constant_buffer));
+            self.context
+                .VSSetConstantBuffers(0, Some(&self.vs_constant_buffer));
             self.context.PSSetSamplers(0, Some(&self.ps_sampler));
             self.context.PSSetShaderResources(0, Some(&self.ps_srv));
         }
@@ -236,7 +271,9 @@ impl<'a> D3D11StateBackup<'a> {
 
 impl<'a> Drop for D3D11StateBackup<'a> {
     fn drop(&mut self) {
-        unsafe { self.restore(); }
+        unsafe {
+            self.restore();
+        }
     }
 }
 
@@ -298,7 +335,13 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             let sc: &IDXGISwapChain = unsafe { std::mem::transmute(&swapchain_ptr) };
             if let Ok(backbuffer) = unsafe { sc.GetBuffer::<ID3D11Texture2D>(0) } {
                 let mut rtv = None;
-                if (unsafe { state.device.CreateRenderTargetView(&backbuffer, None, Some(&mut rtv)) }).is_ok() {
+                if (unsafe {
+                    state
+                        .device
+                        .CreateRenderTargetView(&backbuffer, None, Some(&mut rtv))
+                })
+                .is_ok()
+                {
                     state.rtv = rtv;
                 }
             }
@@ -364,22 +407,44 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                         unsafe { std::mem::transmute(*vs_vt.add(3)) };
                     let get_vs_size: unsafe extern "system" fn(*mut c_void) -> usize =
                         unsafe { std::mem::transmute(*vs_vt.add(4)) };
-                    let vs_bytecode = unsafe { std::slice::from_raw_parts(get_vs_buf(vs_blob) as *const u8, get_vs_size(vs_blob)) };
+                    let vs_bytecode = unsafe {
+                        std::slice::from_raw_parts(
+                            get_vs_buf(vs_blob) as *const u8,
+                            get_vs_size(vs_blob),
+                        )
+                    };
 
                     let ps_vt = unsafe { *(ps_blob as *mut *mut usize) };
                     let get_ps_buf: unsafe extern "system" fn(*mut c_void) -> *const c_void =
                         unsafe { std::mem::transmute(*ps_vt.add(3)) };
                     let get_ps_size: unsafe extern "system" fn(*mut c_void) -> usize =
                         unsafe { std::mem::transmute(*ps_vt.add(4)) };
-                    let ps_bytecode = unsafe { std::slice::from_raw_parts(get_ps_buf(ps_blob) as *const u8, get_ps_size(ps_blob)) };
+                    let ps_bytecode = unsafe {
+                        std::slice::from_raw_parts(
+                            get_ps_buf(ps_blob) as *const u8,
+                            get_ps_size(ps_blob),
+                        )
+                    };
 
                     let mut vs = None;
-                    if (unsafe { state.device.CreateVertexShader(vs_bytecode, None, Some(&mut vs)) }).is_ok() {
+                    if (unsafe {
+                        state
+                            .device
+                            .CreateVertexShader(vs_bytecode, None, Some(&mut vs))
+                    })
+                    .is_ok()
+                    {
                         state.vertex_shader = vs;
                     }
 
                     let mut ps = None;
-                    if (unsafe { state.device.CreatePixelShader(ps_bytecode, None, Some(&mut ps)) }).is_ok() {
+                    if (unsafe {
+                        state
+                            .device
+                            .CreatePixelShader(ps_bytecode, None, Some(&mut ps))
+                    })
+                    .is_ok()
+                    {
                         state.pixel_shader = ps;
                     }
 
@@ -414,12 +479,20 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                     ];
 
                     let mut il = None;
-                    if (unsafe { state.device.CreateInputLayout(&input_elements, vs_bytecode, Some(&mut il)) }).is_ok() {
+                    if (unsafe {
+                        state
+                            .device
+                            .CreateInputLayout(&input_elements, vs_bytecode, Some(&mut il))
+                    })
+                    .is_ok()
+                    {
                         state.input_layout = il;
                     }
 
-                    let rel_vs: unsafe extern "system" fn(*mut c_void) -> u32 = unsafe { std::mem::transmute(*vs_vt.add(2)) };
-                    let rel_ps: unsafe extern "system" fn(*mut c_void) -> u32 = unsafe { std::mem::transmute(*ps_vt.add(2)) };
+                    let rel_vs: unsafe extern "system" fn(*mut c_void) -> u32 =
+                        unsafe { std::mem::transmute(*vs_vt.add(2)) };
+                    let rel_ps: unsafe extern "system" fn(*mut c_void) -> u32 =
+                        unsafe { std::mem::transmute(*ps_vt.add(2)) };
                     unsafe {
                         rel_vs(vs_blob);
                         rel_ps(ps_blob);
@@ -451,16 +524,38 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             let t = 0.0f32;
             let b = 800.0f32;
             let proj_matrix: [f32; 16] = [
-                2.0 / (r - l), 0.0,           0.0, 0.0,
-                0.0,           2.0 / (t - b), 0.0, 0.0,
-                0.0,           0.0,           0.5, 0.0,
-                (r + l) / (l - r), (t + b) / (b - t), 0.5, 1.0,
+                2.0 / (r - l),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                2.0 / (t - b),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.5,
+                0.0,
+                (r + l) / (l - r),
+                (t + b) / (b - t),
+                0.5,
+                1.0,
             ];
 
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            if (unsafe { state.context.Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)) }).is_ok() {
+            if (unsafe {
+                state
+                    .context
+                    .Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+            })
+            .is_ok()
+            {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(proj_matrix.as_ptr() as *const c_void, mapped.pData, 64);
+                    std::ptr::copy_nonoverlapping(
+                        proj_matrix.as_ptr() as *const c_void,
+                        mapped.pData,
+                        64,
+                    );
                     state.context.Unmap(cb, 0);
                 }
             }
@@ -494,7 +589,13 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                 ..Default::default()
             };
             let mut rs = None;
-            if (unsafe { state.device.CreateRasterizerState(&rast_desc, Some(&mut rs)) }).is_ok() {
+            if (unsafe {
+                state
+                    .device
+                    .CreateRasterizerState(&rast_desc, Some(&mut rs))
+            })
+            .is_ok()
+            {
                 state.rasterizer_state = rs;
             }
         }
@@ -503,7 +604,13 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             let mut ds_desc = D3D11_DEPTH_STENCIL_DESC::default();
             ds_desc.DepthEnable = false.into();
             let mut ds = None;
-            if (unsafe { state.device.CreateDepthStencilState(&ds_desc, Some(&mut ds)) }).is_ok() {
+            if (unsafe {
+                state
+                    .device
+                    .CreateDepthStencilState(&ds_desc, Some(&mut ds))
+            })
+            .is_ok()
+            {
                 state.depth_stencil_state = ds;
             }
         }
@@ -520,7 +627,13 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                 ..Default::default()
             };
             let mut ss = None;
-            if (unsafe { state.device.CreateSamplerState(&sampler_desc, Some(&mut ss)) }).is_ok() {
+            if (unsafe {
+                state
+                    .device
+                    .CreateSamplerState(&sampler_desc, Some(&mut ss))
+            })
+            .is_ok()
+            {
                 state.sampler_state = ss;
             }
         }
@@ -541,7 +654,9 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             state.context.RSSetViewports(Some(&vp));
 
             if let Some(bs) = state.blend_state.as_ref() {
-                state.context.OMSetBlendState(bs, Some(&[0.0; 4]), 0xFFFFFFFF);
+                state
+                    .context
+                    .OMSetBlendState(bs, Some(&[0.0; 4]), 0xFFFFFFFF);
             }
             if let Some(rs) = state.rasterizer_state.as_ref() {
                 state.context.RSSetState(rs);
@@ -585,10 +700,8 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                         (rgba, c.width() as u32, c.height() as u32)
                     }
                     egui::ImageData::Font(f) => {
-                        let rgba: Vec<u8> = f
-                            .srgba_pixels(None)
-                            .flat_map(|p| p.to_array())
-                            .collect();
+                        let rgba: Vec<u8> =
+                            f.srgba_pixels(None).flat_map(|p| p.to_array()).collect();
                         (rgba, f.width() as u32, f.height() as u32)
                     }
                 };
@@ -640,11 +753,23 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                     };
 
                     let mut texture = None;
-                    if (unsafe { state.device.CreateTexture2D(&tex_desc, Some(&subresource), Some(&mut texture)) }).is_ok()
+                    if (unsafe {
+                        state.device.CreateTexture2D(
+                            &tex_desc,
+                            Some(&subresource),
+                            Some(&mut texture),
+                        )
+                    })
+                    .is_ok()
                         && let Some(tex) = texture
                     {
                         let mut srv = None;
-                        if (unsafe { state.device.CreateShaderResourceView(&tex, None, Some(&mut srv)) }).is_ok()
+                        if (unsafe {
+                            state
+                                .device
+                                .CreateShaderResourceView(&tex, None, Some(&mut srv))
+                        })
+                        .is_ok()
                             && let Some(srv_view) = srv
                         {
                             state.textures.insert(
@@ -674,7 +799,8 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                         unsafe { state.context.PSSetShaderResources(0, Some(&srv_opt)) };
                     }
 
-                    let vb_byte_size = mesh.vertices.len() * std::mem::size_of::<egui::epaint::Vertex>();
+                    let vb_byte_size =
+                        mesh.vertices.len() * std::mem::size_of::<egui::epaint::Vertex>();
                     let ib_byte_size = mesh.indices.len() * std::mem::size_of::<u32>();
 
                     // Create / Reallocate dynamic Vertex Buffer
@@ -688,7 +814,9 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                             StructureByteStride: 0,
                         };
                         let mut vb = None;
-                        if (unsafe { state.device.CreateBuffer(&vb_desc, None, Some(&mut vb)) }).is_ok() {
+                        if (unsafe { state.device.CreateBuffer(&vb_desc, None, Some(&mut vb)) })
+                            .is_ok()
+                        {
                             state.vertex_buffer = vb;
                             state.vertex_buffer_cap = vb_desc.ByteWidth as usize;
                         }
@@ -705,7 +833,9 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                             StructureByteStride: 0,
                         };
                         let mut ib = None;
-                        if (unsafe { state.device.CreateBuffer(&ib_desc, None, Some(&mut ib)) }).is_ok() {
+                        if (unsafe { state.device.CreateBuffer(&ib_desc, None, Some(&mut ib)) })
+                            .is_ok()
+                        {
                             state.index_buffer = ib;
                             state.index_buffer_cap = ib_desc.ByteWidth as usize;
                         }
@@ -714,7 +844,13 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                     // Map and write vertices
                     if let Some(vb) = state.vertex_buffer.as_ref() {
                         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                        if (unsafe { state.context.Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)) }).is_ok() {
+                        if (unsafe {
+                            state
+                                .context
+                                .Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                        })
+                        .is_ok()
+                        {
                             unsafe {
                                 std::ptr::copy_nonoverlapping(
                                     mesh.vertices.as_ptr() as *const c_void,
@@ -729,7 +865,13 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                     // Map and write indices
                     if let Some(ib) = state.index_buffer.as_ref() {
                         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                        if (unsafe { state.context.Map(ib, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped)) }).is_ok() {
+                        if (unsafe {
+                            state
+                                .context
+                                .Map(ib, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                        })
+                        .is_ok()
+                        {
                             unsafe {
                                 std::ptr::copy_nonoverlapping(
                                     mesh.indices.as_ptr() as *const c_void,
@@ -742,14 +884,24 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                     }
 
                     // Bind buffers and draw
-                    if let (Some(vb), Some(ib)) = (state.vertex_buffer.as_ref(), state.index_buffer.as_ref()) {
+                    if let (Some(vb), Some(ib)) =
+                        (state.vertex_buffer.as_ref(), state.index_buffer.as_ref())
+                    {
                         let stride = [std::mem::size_of::<egui::epaint::Vertex>() as u32];
                         let offset = [0u32];
                         let vb_opt = [Some(vb.clone())];
                         unsafe {
-                            state.context.IASetVertexBuffers(0, 1, Some(vb_opt.as_ptr()), Some(stride.as_ptr()), Some(offset.as_ptr()));
+                            state.context.IASetVertexBuffers(
+                                0,
+                                1,
+                                Some(vb_opt.as_ptr()),
+                                Some(stride.as_ptr()),
+                                Some(offset.as_ptr()),
+                            );
                             state.context.IASetIndexBuffer(ib, DXGI_FORMAT_R32_UINT, 0);
-                            state.context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                            state
+                                .context
+                                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                             state.context.DrawIndexed(mesh.indices.len() as u32, 0, 0);
                         }
                     }

@@ -6,8 +6,8 @@
 //! (Steam Deck / Steam machine use case). This module centralizes that logic
 //! and the low-level framed request/response over the DLL fast channel.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -27,10 +27,14 @@ pub struct IpcClient {
 static GLOBAL_CLIENT: Mutex<Option<(String, u16, IpcClient)>> = Mutex::new(None);
 
 impl IpcClient {
-    pub fn connect(host: String, port: u16, session: Option<SharedSession>) -> Result<Self, String> {
+    pub fn connect(
+        host: String,
+        port: u16,
+        session: Option<SharedSession>,
+    ) -> Result<Self, String> {
+        use std::collections::HashMap;
         use std::io::{Read, Write};
         use std::net::ToSocketAddrs;
-        use std::collections::HashMap;
 
         let (tx, rx) = std::sync::mpsc::channel::<(u64, Request, oneshot::Sender<Response>)>();
         let (evt_tx, evt_rx) = std::sync::mpsc::channel::<Event>();
@@ -61,7 +65,9 @@ impl IpcClient {
                                 };
                                 let _ = evt_tx_clone.send(Event::SyncCheats { cheats });
                             }
-                            trainlab_core::event::BusEvent::Session(trainlab_core::event::SessionEvent::CheatUpdated { .. }) => {
+                            trainlab_core::event::BusEvent::Session(
+                                trainlab_core::event::SessionEvent::CheatUpdated { .. },
+                            ) => {
                                 // Incremental sync whenever cheats change
                                 let cheats = if let Ok(s_guard) = session_clone.lock() {
                                     s_guard.export_overlay_cheats()
@@ -88,7 +94,10 @@ impl IpcClient {
                     let mut stream = match target_addr.to_socket_addrs() {
                         Ok(mut addrs) => {
                             if let Some(sock_addr) = addrs.next() {
-                                match std::net::TcpStream::connect_timeout(&sock_addr, Duration::from_millis(1000)) {
+                                match std::net::TcpStream::connect_timeout(
+                                    &sock_addr,
+                                    Duration::from_millis(1000),
+                                ) {
                                     Ok(s) => s,
                                     Err(_) => {
                                         std::thread::sleep(Duration::from_millis(200));
@@ -133,18 +142,21 @@ impl IpcClient {
                                 full.extend_from_slice(&len_buf);
                                 full.extend_from_slice(&body);
                                 if let Ok(msg) = protocol::decode::<Message>(&full) {
-                                    match &msg {
+                                    match msg {
                                         Message::Event(evt) => {
                                             // Publish directly onto the Session EventBus
                                             if let Some(s) = &session_for_inbound
-                                                && let Ok(s_guard) = s.lock() {
-                                                    s_guard.publish_event(trainlab_core::event::BusEvent::Protocol(evt.clone()));
-                                                }
-                                        }
-                                        Message::Response { .. } => {
-                                            if inbound_tx.send(msg).is_err() {
-                                                break;
+                                                && let Ok(s_guard) = s.lock()
+                                            {
+                                                s_guard.publish_event(
+                                                    trainlab_core::event::BusEvent::Protocol(evt),
+                                                );
                                             }
+                                        }
+                                        Message::Response { .. }
+                                            if inbound_tx.send(msg).is_err() =>
+                                        {
+                                            break;
                                         }
                                         _ => {}
                                     }
@@ -159,17 +171,19 @@ impl IpcClient {
                         while let Ok(evt) = evt_rx.try_recv() {
                             let evt_msg = Message::Event(evt);
                             if let Ok(frame) = protocol::encode(&evt_msg)
-                                && stream.write_all(&frame).is_err() {
-                                    break 'stream_loop;
-                                }
+                                && stream.write_all(&frame).is_err()
+                            {
+                                break 'stream_loop;
+                            }
                         }
 
                         // 2. Process correlated responses from reader thread
                         while let Ok(msg) = inbound_rx.try_recv() {
                             if let Message::Response { id, resp } = msg
-                                && let Some(sender) = pending_responses.remove(&id) {
-                                    let _ = sender.send(resp);
-                                }
+                                && let Some(sender) = pending_responses.remove(&id)
+                            {
+                                let _ = sender.send(resp);
+                            }
                         }
 
                         // 3. Receive outbound requests with non-blocking try_recv / short timeout
@@ -180,12 +194,16 @@ impl IpcClient {
                                 if let Ok(frame) = protocol::encode(&msg) {
                                     if stream.write_all(&frame).is_err() {
                                         if let Some(sender) = pending_responses.remove(&id) {
-                                            let _ = sender.send(Response::Error { message: "IPC write failed".into() });
+                                            let _ = sender.send(Response::Error {
+                                                message: "IPC write failed".into(),
+                                            });
                                         }
                                         break 'stream_loop;
                                     }
                                 } else if let Some(sender) = pending_responses.remove(&id) {
-                                    let _ = sender.send(Response::Error { message: "protocol encode error".into() });
+                                    let _ = sender.send(Response::Error {
+                                        message: "protocol encode error".into(),
+                                    });
                                 }
                             }
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -198,13 +216,18 @@ impl IpcClient {
 
                     // On stream disconnect, fail remaining pending responses
                     for (_, sender) in pending_responses.drain() {
-                        let _ = sender.send(Response::Error { message: "IPC socket disconnected".into() });
+                        let _ = sender.send(Response::Error {
+                            message: "IPC socket disconnected".into(),
+                        });
                     }
                 }
             })
             .map_err(|e| format!("failed to spawn IPC multiplexer thread: {e}"))?;
 
-        Ok(Self { tx, event_tx: evt_tx })
+        Ok(Self {
+            tx,
+            event_tx: evt_tx,
+        })
     }
 
     pub fn request(&self, req: Request) -> Result<Response, String> {
@@ -213,7 +236,7 @@ impl IpcClient {
         self.tx
             .send((seq, req, resp_tx))
             .map_err(|e| format!("IPC mailbox send failed: {e}"))?;
-        
+
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_millis(2500) {
             match resp_rx.try_recv() {
@@ -242,7 +265,12 @@ fn read_exact_array<const N: usize>(stream: &mut std::net::TcpStream) -> std::io
 }
 
 /// Send a request to the DLL listener at `(host, port)` via the single multiplexed channel.
-pub fn request_at(host: &str, port: u16, req: &Request, session: Option<&SharedSession>) -> Result<Response, String> {
+pub fn request_at(
+    host: &str,
+    port: u16,
+    req: &Request,
+    session: Option<&SharedSession>,
+) -> Result<Response, String> {
     let mut lock = GLOBAL_CLIENT.lock().unwrap();
     let client = match &*lock {
         Some((h, p, c)) if h == host && *p == port => c.clone(),
@@ -267,9 +295,11 @@ pub fn emit_event_to_dll(session: &SharedSession, event: Event) {
     };
     let lock = GLOBAL_CLIENT.lock().unwrap();
     if let Some((h, p, c)) = &*lock
-        && h == &host && *p == port {
-            c.emit_event(event);
-        }
+        && h == &host
+        && *p == port
+    {
+        c.emit_event(event);
+    }
 }
 
 /// Send a request to the DLL using the session's configured host/port.
@@ -284,13 +314,21 @@ pub fn request(session: &SharedSession, req: &Request) -> Result<Response, Strin
 }
 
 /// Ping the DLL at the given host/port. Returns the reported version and capabilities.
-pub fn ping_at(host: &str, port: u16, session: Option<&SharedSession>) -> Result<(String, Vec<String>), String> {
+pub fn ping_at(
+    host: &str,
+    port: u16,
+    session: Option<&SharedSession>,
+) -> Result<(String, Vec<String>), String> {
     match request_at(host, port, &Request::Ping, session) {
-        Ok(Response::Pong { version, capabilities }) => {
+        Ok(Response::Pong {
+            version,
+            capabilities,
+        }) => {
             if let Some(s) = session
-                && let Ok(mut s_guard) = s.lock() {
-                    s_guard.set_dll_capabilities(capabilities.clone());
-                }
+                && let Ok(mut s_guard) = s.lock()
+            {
+                s_guard.set_dll_capabilities(capabilities.clone());
+            }
             Ok((version, capabilities))
         }
         Ok(Response::Error { message }) => Err(message),
@@ -397,5 +435,7 @@ pub fn find_inject_connect(session: &SharedSession) -> Result<String, String> {
         }
     }
 
-    Err(format!("injection succeeded but connection failed: {last_err}"))
+    Err(format!(
+        "injection succeeded but connection failed: {last_err}"
+    ))
 }

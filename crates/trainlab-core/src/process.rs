@@ -19,8 +19,7 @@ pub fn list() -> Vec<ProcessInfo> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if let Ok(pid) = name.parse::<i32>() {
-                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                    .unwrap_or_default();
+                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
                 let comm = comm.trim().to_string();
                 if !comm.is_empty() {
                     out.push(ProcessInfo { pid, name: comm });
@@ -40,9 +39,7 @@ pub fn list() -> Vec<ProcessInfo> {
 /// Find a process by exact name match (case-insensitive).
 pub fn find_by_name(name: &str) -> Option<ProcessInfo> {
     let lower = name.to_lowercase();
-    list()
-        .into_iter()
-        .find(|p| p.name.to_lowercase() == lower)
+    list().into_iter().find(|p| p.name.to_lowercase() == lower)
 }
 
 /// Find a process by PID.
@@ -59,7 +56,9 @@ pub fn is_pid_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if !handle.is_null() {

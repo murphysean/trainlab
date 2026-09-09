@@ -19,7 +19,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Duration;
 
-use windows_sys::Win32::Security::Authentication::Identity::{SecBufferDesc, SECBUFFER_DATA};
+use windows_sys::Win32::Security::Authentication::Identity::{SECBUFFER_DATA, SecBufferDesc};
 use windows_sys::Win32::Security::Credentials::SecHandle;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
 
@@ -28,19 +28,11 @@ use trainlab_core::protocol::{PacketDirection, PacketKind};
 /// `SEC_E_OK` — the success status returned by `EncryptMessage`/`DecryptMessage`.
 const SEC_E_OK: i32 = 0;
 
-type FnEncryptMessage = unsafe extern "system" fn(
-    *const SecHandle,
-    u32,
-    *const SecBufferDesc,
-    u32,
-) -> i32;
+type FnEncryptMessage =
+    unsafe extern "system" fn(*const SecHandle, u32, *const SecBufferDesc, u32) -> i32;
 
-type FnDecryptMessage = unsafe extern "system" fn(
-    *const SecHandle,
-    *const SecBufferDesc,
-    u32,
-    *mut u32,
-) -> i32;
+type FnDecryptMessage =
+    unsafe extern "system" fn(*const SecHandle, *const SecBufferDesc, u32, *mut u32) -> i32;
 
 static ORIGINAL_ENCRYPT_MESSAGE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static ORIGINAL_DECRYPT_MESSAGE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -66,7 +58,8 @@ unsafe fn data_buffer_payload(desc: *const SecBufferDesc) -> Option<(*const u8, 
     if desc_ref.pBuffers.is_null() || desc_ref.cBuffers == 0 {
         return None;
     }
-    let buffers = unsafe { std::slice::from_raw_parts(desc_ref.pBuffers, desc_ref.cBuffers as usize) };
+    let buffers =
+        unsafe { std::slice::from_raw_parts(desc_ref.pBuffers, desc_ref.cBuffers as usize) };
     for buf in buffers {
         if buf.BufferType == SECBUFFER_DATA && !buf.pvBuffer.is_null() && buf.cbBuffer > 0 {
             return Some((buf.pvBuffer as *const u8, buf.cbBuffer as usize));
@@ -165,11 +158,16 @@ unsafe fn install_hook(
     callback_addr: u64,
     target_orig: &AtomicPtr<c_void>,
 ) -> (bool, String) {
-    let proc_name_str = String::from_utf8_lossy(proc_name).trim_end_matches('\0').to_string();
+    let proc_name_str = String::from_utf8_lossy(proc_name)
+        .trim_end_matches('\0')
+        .to_string();
     // SChannel exports live in secur32.dll (and are forwarded from sspicli.dll).
     let secur32_mod = unsafe { GetModuleHandleA(b"secur32.dll\0".as_ptr()) };
     if secur32_mod.is_null() {
-        return (false, format!("{}=FAIL(secur32.dll not loaded)", proc_name_str));
+        return (
+            false,
+            format!("{}=FAIL(secur32.dll not loaded)", proc_name_str),
+        );
     }
 
     let fn_ptr = unsafe { GetProcAddress(secur32_mod, proc_name.as_ptr()) };
@@ -191,7 +189,7 @@ unsafe fn install_hook(
             mem.write(addr, data).map_err(|e| e.to_string())
         };
         let allocate = |size: usize, exec: bool| -> Result<u64, String> {
-            crate::allocate(size, exec)
+            crate::allocate_near(target_u64, size, exec)
         };
 
         match trainlab_cave::cave::install(target_u64, hook, read, write, allocate) {
@@ -206,7 +204,13 @@ unsafe fn install_hook(
                     target_u64,
                     installed.cave_addr
                 );
-                (true, format!("{}=Y", String::from_utf8_lossy(proc_name).trim_end_matches('\0')))
+                (
+                    true,
+                    format!(
+                        "{}=Y",
+                        String::from_utf8_lossy(proc_name).trim_end_matches('\0')
+                    ),
+                )
             }
             Err(e) => {
                 tracing::warn!(
@@ -214,11 +218,24 @@ unsafe fn install_hook(
                     String::from_utf8_lossy(proc_name),
                     e
                 );
-                (false, format!("{}=FAIL({})", String::from_utf8_lossy(proc_name).trim_end_matches('\0'), e))
+                (
+                    false,
+                    format!(
+                        "{}=FAIL({})",
+                        String::from_utf8_lossy(proc_name).trim_end_matches('\0'),
+                        e
+                    ),
+                )
             }
         }
     } else {
-        (false, format!("{}=FAIL(GetProcAddress failed)", String::from_utf8_lossy(proc_name).trim_end_matches('\0')))
+        (
+            false,
+            format!(
+                "{}=FAIL(GetProcAddress failed)",
+                String::from_utf8_lossy(proc_name).trim_end_matches('\0')
+            ),
+        )
     }
 }
 

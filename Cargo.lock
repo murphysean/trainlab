@@ -4484,6 +4484,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trainlab-release"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+]
+
+[[package]]
 name = "trainlab-scanner"
 version = "0.2.0"
 dependencies = [

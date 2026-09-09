@@ -81,10 +81,11 @@ pub fn find_all_aligned_with_base(
         let mut matched = true;
         for (j, p) in pattern.iter().enumerate() {
             if let Some(b) = p
-                && haystack[i + j] != *b {
-                    matched = false;
-                    break;
-                }
+                && haystack[i + j] != *b
+            {
+                matched = false;
+                break;
+            }
         }
         if matched {
             out.push(i);

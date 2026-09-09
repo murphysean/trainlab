@@ -48,7 +48,10 @@ pub fn parse_value_bytes(s: &str, vt: ValueType) -> Result<Vec<u8>, String> {
                 let v = i32::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
                 Ok(v.to_le_bytes().to_vec())
             } else {
-                Ok(s.parse::<i32>().map_err(|e| e.to_string())?.to_le_bytes().to_vec())
+                Ok(s.parse::<i32>()
+                    .map_err(|e| e.to_string())?
+                    .to_le_bytes()
+                    .to_vec())
             }
         }
         ValueType::U32 => {
@@ -56,16 +59,26 @@ pub fn parse_value_bytes(s: &str, vt: ValueType) -> Result<Vec<u8>, String> {
                 let v = u32::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
                 Ok(v.to_le_bytes().to_vec())
             } else {
-                Ok(s.parse::<u32>().map_err(|e| e.to_string())?.to_le_bytes().to_vec())
+                Ok(s.parse::<u32>()
+                    .map_err(|e| e.to_string())?
+                    .to_le_bytes()
+                    .to_vec())
             }
         }
-        ValueType::F32 => Ok(s.parse::<f32>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
+        ValueType::F32 => Ok(s
+            .parse::<f32>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
         ValueType::I64 => {
             if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
                 let v = i64::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
                 Ok(v.to_le_bytes().to_vec())
             } else {
-                Ok(s.parse::<i64>().map_err(|e| e.to_string())?.to_le_bytes().to_vec())
+                Ok(s.parse::<i64>()
+                    .map_err(|e| e.to_string())?
+                    .to_le_bytes()
+                    .to_vec())
             }
         }
         ValueType::U64 => {
@@ -73,16 +86,26 @@ pub fn parse_value_bytes(s: &str, vt: ValueType) -> Result<Vec<u8>, String> {
                 let v = u64::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
                 Ok(v.to_le_bytes().to_vec())
             } else {
-                Ok(s.parse::<u64>().map_err(|e| e.to_string())?.to_le_bytes().to_vec())
+                Ok(s.parse::<u64>()
+                    .map_err(|e| e.to_string())?
+                    .to_le_bytes()
+                    .to_vec())
             }
         }
-        ValueType::F64 => Ok(s.parse::<f64>().map_err(|e| e.to_string())?.to_le_bytes().to_vec()),
+        ValueType::F64 => Ok(s
+            .parse::<f64>()
+            .map_err(|e| e.to_string())?
+            .to_le_bytes()
+            .to_vec()),
         ValueType::Ptr => {
             if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
                 let v = u64::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
                 Ok(v.to_le_bytes().to_vec())
             } else {
-                Ok(s.parse::<u64>().map_err(|e| e.to_string())?.to_le_bytes().to_vec())
+                Ok(s.parse::<u64>()
+                    .map_err(|e| e.to_string())?
+                    .to_le_bytes()
+                    .to_vec())
             }
         }
     }
@@ -99,7 +122,9 @@ pub fn parse_hex_bytes(s: &str) -> Result<Vec<u8>, String> {
     }
     (0..clean.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).map_err(|e| format!("invalid hex byte: {e}")))
+        .map(|i| {
+            u8::from_str_radix(&clean[i..i + 2], 16).map_err(|e| format!("invalid hex byte: {e}"))
+        })
         .collect()
 }
 
@@ -199,14 +224,19 @@ where
         })?;
 
         if data.len() < 8 {
-            return Err(format!("short read dereferencing pointer at {ptr_addr:#x} (from '{input}')"));
+            return Err(format!(
+                "short read dereferencing pointer at {ptr_addr:#x} (from '{input}')"
+            ));
         }
         let target_ptr = u64::from_le_bytes(data[..8].try_into().unwrap());
         return Ok(target_ptr);
     }
 
     // 2. Try raw hex or decimal
-    if let Some(hex) = input.strip_prefix("0x").or_else(|| input.strip_prefix("0X")) {
+    if let Some(hex) = input
+        .strip_prefix("0x")
+        .or_else(|| input.strip_prefix("0X"))
+    {
         if let Ok(a) = u64::from_str_radix(hex, 16) {
             return Ok(a);
         }
@@ -226,10 +256,12 @@ where
     }
 
     // Fallback try raw hex without 0x if all characters are hex
-    if !input.is_empty() && input.chars().all(|c| c.is_ascii_hexdigit())
-        && let Ok(a) = u64::from_str_radix(input, 16) {
-            return Ok(a);
-        }
+    if !input.is_empty()
+        && input.chars().all(|c| c.is_ascii_hexdigit())
+        && let Ok(a) = u64::from_str_radix(input, 16)
+    {
+        return Ok(a);
+    }
 
     Err(format!(
         "could not resolve address expression '{input}' (not a raw hex/dec address, marker, or loaded module)"
@@ -263,7 +295,10 @@ mod tests {
 
     #[test]
     fn test_format_and_parse_values() {
-        assert_eq!(format_value(&12345i32.to_le_bytes(), ValueType::I32), "12345");
+        assert_eq!(
+            format_value(&12345i32.to_le_bytes(), ValueType::I32),
+            "12345"
+        );
         assert_eq!(format_value(&3.25f32.to_le_bytes(), ValueType::F32), "3.25");
         assert_eq!(
             parse_value_bytes("999", ValueType::I32).unwrap(),
@@ -297,15 +332,33 @@ mod tests {
         let resolve_module = |_name: &str| None;
 
         // Test 1 hop: [$player_base + 0x08] -> 0x2000
-        let res1 = parse_addr_expr_custom("[$player_base + 0x08]", Some(&mem), &resolve_marker, &resolve_module).unwrap();
+        let res1 = parse_addr_expr_custom(
+            "[$player_base + 0x08]",
+            Some(&mem),
+            &resolve_marker,
+            &resolve_module,
+        )
+        .unwrap();
         assert_eq!(res1, 0x2000);
 
         // Test 2 hops: [[$player_base + 0x08] + 0x10] -> 0x3000
-        let res2 = parse_addr_expr_custom("[[$player_base + 0x08] + 0x10]", Some(&mem), &resolve_marker, &resolve_module).unwrap();
+        let res2 = parse_addr_expr_custom(
+            "[[$player_base + 0x08] + 0x10]",
+            Some(&mem),
+            &resolve_marker,
+            &resolve_module,
+        )
+        .unwrap();
         assert_eq!(res2, 0x3000);
 
         // Test 3 hops + final offset: [[[$player_base + 0x08] + 0x10] + 0x14] -> 0x3014
-        let res3 = parse_addr_expr_custom("[[$player_base + 0x08] + 0x10] + 0x14", Some(&mem), &resolve_marker, &resolve_module).unwrap();
+        let res3 = parse_addr_expr_custom(
+            "[[$player_base + 0x08] + 0x10] + 0x14",
+            Some(&mem),
+            &resolve_marker,
+            &resolve_module,
+        )
+        .unwrap();
         assert_eq!(res3, 0x3014);
 
         let final_val = mem.read(res3, 4).unwrap();

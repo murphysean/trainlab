@@ -73,7 +73,9 @@ pub trait ProcessMemory {
             crate::scan::DEFAULT_CHUNK_SIZE,
             overlap,
             |chunk_base, chunk_buf| {
-                for off in crate::aob::find_all_aligned_with_base(chunk_buf, pattern, chunk_base, alignment) {
+                for off in crate::aob::find_all_aligned_with_base(
+                    chunk_buf, pattern, chunk_base, alignment,
+                ) {
                     let addr = (chunk_base + off as u64) as i64 + offset.unwrap_or(0);
                     matches.push(addr as u64);
                 }
@@ -170,9 +172,17 @@ pub enum MemoryError {
     /// The OS call failed (e.g. permission denied, process exited).
     Os(String),
     /// The requested range was not fully readable.
-    PartialRead { address: u64, len: usize, got: usize },
+    PartialRead {
+        address: u64,
+        len: usize,
+        got: usize,
+    },
     /// The requested range was not fully writable.
-    PartialWrite { address: u64, len: usize, wrote: usize },
+    PartialWrite {
+        address: u64,
+        len: usize,
+        wrote: usize,
+    },
     /// The address was outside any known region.
     OutOfRange { address: u64 },
 }
@@ -184,8 +194,15 @@ impl fmt::Display for MemoryError {
             MemoryError::PartialRead { address, len, got } => {
                 write!(f, "partial read at 0x{address:x}: wanted {len}, got {got}")
             }
-            MemoryError::PartialWrite { address, len, wrote } => {
-                write!(f, "partial write at 0x{address:x}: wanted {len}, wrote {wrote}")
+            MemoryError::PartialWrite {
+                address,
+                len,
+                wrote,
+            } => {
+                write!(
+                    f,
+                    "partial write at 0x{address:x}: wanted {len}, wrote {wrote}"
+                )
             }
             MemoryError::OutOfRange { address } => {
                 write!(f, "address 0x{address:x} outside known regions")
@@ -298,7 +315,11 @@ pub mod unix {
             }
             let n = n as usize;
             if n != len {
-                return Err(MemoryError::PartialRead { address, len, got: n });
+                return Err(MemoryError::PartialRead {
+                    address,
+                    len,
+                    got: n,
+                });
             }
             Ok(buf)
         }
@@ -375,13 +396,11 @@ pub mod windows {
 
     use super::{MemoryError, ProcessMemory, Region};
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
-    use windows_sys::Win32::System::Diagnostics::Debug::{
-        ReadProcessMemory, WriteProcessMemory,
-    };
+    use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows_sys::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
-        PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
-        PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+        MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE,
+        PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_READONLY,
+        PAGE_READWRITE, PAGE_WRITECOPY, VirtualQueryEx,
     };
 
     /// A handle to a Windows process, opened with `PROCESS_VM_READ |
@@ -605,7 +624,9 @@ fn region_covers(address: u64, len: usize, need_readable: bool) -> bool {
     let end = address.saturating_add(len as u64);
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery,
+        };
         // Walk regions from the start address until we cover `end` or leave the
         // address space. Every page in the range must be committed and (for
         // reads) readable / (for writes) writable.
@@ -639,14 +660,22 @@ fn region_covers(address: u64, len: usize, need_readable: bool) -> bool {
             };
             let readable = matches!(
                 prot,
-                PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ
-                    | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
+                PAGE_READONLY
+                    | PAGE_READWRITE
+                    | PAGE_WRITECOPY
+                    | PAGE_EXECUTE_READ
+                    | PAGE_EXECUTE_READWRITE
+                    | PAGE_EXECUTE_WRITECOPY
             );
             let writable = matches!(
                 prot,
                 PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY
             );
-            let ok = if need_readable { readable } else { readable && writable };
+            let ok = if need_readable {
+                readable
+            } else {
+                readable && writable
+            };
             if !ok {
                 return false;
             }
@@ -686,7 +715,11 @@ fn region_covers(address: u64, len: usize, need_readable: bool) -> bool {
             if start <= address && end_r >= end {
                 let readable = perms.contains('r');
                 let writable = perms.contains('w');
-                let ok = if need_readable { readable } else { readable && writable };
+                let ok = if need_readable {
+                    readable
+                } else {
+                    readable && writable
+                };
                 return ok;
             }
         }
@@ -715,7 +748,7 @@ fn write_in_process(address: u64, data: &[u8]) -> Result<usize, MemoryError> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
-        use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE};
+        use windows_sys::Win32::System::Memory::{PAGE_EXECUTE_READWRITE, VirtualProtect};
         use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
         let ptr = address as *mut core::ffi::c_void;
@@ -723,10 +756,14 @@ fn write_in_process(address: u64, data: &[u8]) -> Result<usize, MemoryError> {
         // SAFETY: VirtualProtect on our own address space; ptr/data are valid.
         let ok = unsafe { VirtualProtect(ptr, data.len(), PAGE_EXECUTE_READWRITE, &mut old) };
         if ok == 0 {
-            return Err(MemoryError::Os("VirtualProtect (make writable) failed".into()));
+            return Err(MemoryError::Os(
+                "VirtualProtect (make writable) failed".into(),
+            ));
         }
         // SAFETY: the range is now writable; data is a valid slice.
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+        }
         // Restore original protection (best-effort) and flush CPU instruction cache.
         // SAFETY: restoring our own page protection and flushing pipeline for the modified range.
         unsafe {
@@ -746,13 +783,19 @@ fn write_in_process(address: u64, data: &[u8]) -> Result<usize, MemoryError> {
         let len = end - start;
         // SAFETY: mprotect on our own mapped pages.
         let rc = unsafe {
-            libc::mprotect(start as *mut libc::c_void, len, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC)
+            libc::mprotect(
+                start as *mut libc::c_void,
+                len,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            )
         };
         if rc != 0 {
             return Err(MemoryError::Os("mprotect (make writable) failed".into()));
         }
         // SAFETY: the range is now writable.
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len());
+        }
         // Restore the page's original protection, re-derived from the maps.
         let orig = protection_of(address);
         // SAFETY: restoring our own page protection.
@@ -764,7 +807,9 @@ fn write_in_process(address: u64, data: &[u8]) -> Result<usize, MemoryError> {
     #[cfg(not(any(unix, windows)))]
     {
         let _ = ptr;
-        Err(MemoryError::Os("in-process writes unsupported on this target".into()))
+        Err(MemoryError::Os(
+            "in-process writes unsupported on this target".into(),
+        ))
     }
 }
 
@@ -777,8 +822,14 @@ fn protection_of(address: u64) -> libc::c_int {
     if let Ok(maps) = fs::read_to_string("/proc/self/maps") {
         for line in maps.lines() {
             let mut it = line.split_whitespace();
-            let range = match it.next() { Some(r) => r, None => continue };
-            let perms = match it.next() { Some(p) => p, None => continue };
+            let range = match it.next() {
+                Some(r) => r,
+                None => continue,
+            };
+            let perms = match it.next() {
+                Some(p) => p,
+                None => continue,
+            };
             let (start, end_r) = match range.split_once('-') {
                 Some((s, e)) => (
                     u64::from_str_radix(s, 16).unwrap_or(0),
@@ -788,9 +839,15 @@ fn protection_of(address: u64) -> libc::c_int {
             };
             if start <= address && address < end_r {
                 let mut p = 0;
-                if perms.contains('r') { p |= libc::PROT_READ; }
-                if perms.contains('w') { p |= libc::PROT_WRITE; }
-                if perms.contains('x') { p |= libc::PROT_EXEC; }
+                if perms.contains('r') {
+                    p |= libc::PROT_READ;
+                }
+                if perms.contains('w') {
+                    p |= libc::PROT_WRITE;
+                }
+                if perms.contains('x') {
+                    p |= libc::PROT_EXEC;
+                }
                 return p;
             }
         }
@@ -809,7 +866,11 @@ impl ProcessMemory for SelfProcess {
         // inside it) with no clean error. We instead return a clean error so
         // the fast channel stays up and the game is untouched.
         if !region_covers(address, len, /*need_readable=*/ true) {
-            return Err(MemoryError::PartialRead { address, len, got: 0 });
+            return Err(MemoryError::PartialRead {
+                address,
+                len,
+                got: 0,
+            });
         }
         let ptr = address as *const u8;
         // SAFETY: caller is responsible for the address being valid in this
@@ -939,9 +1000,9 @@ impl ProcessMemory for SelfProcess {
         {
             // Enumerate our own address space with VirtualQuery (self-process).
             use windows_sys::Win32::System::Memory::{
-                VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED,
-                PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY, PAGE_EXECUTE_READ,
-                PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_EXECUTE,
+                MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE,
+                PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_READONLY,
+                PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
             };
             let mut out = Vec::new();
             let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
@@ -1062,6 +1123,9 @@ mod tests {
     #[test]
     fn read_out_of_range_returns_error() {
         let r = SelfProcess.read(0x0000_0000_0100_0000, 8);
-        assert!(r.is_err(), "reading a non-region address should error, got {r:?}");
+        assert!(
+            r.is_err(),
+            "reading a non-region address should error, got {r:?}"
+        );
     }
 }

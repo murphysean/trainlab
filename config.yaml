@@ -3,9 +3,9 @@
 # Restrict or toggle off specific features as needed below.
 
 gui:
-  scale: 1.0
-  width: 1280.0
-  height: 800.0
+  scale: 1.5
+  # width: 1920.0   # Optional: if omitted, defaults to 1080p on desktop and native under Gamescope
+  # height: 1080.0  # Optional
   fullscreen: false
   theme: "dark"
   # Fallback external GUI timer rate for value pinning (default: 30 Hz)
