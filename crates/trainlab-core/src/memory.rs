@@ -714,7 +714,10 @@ fn write_in_process(address: u64, data: &[u8]) -> Result<usize, MemoryError> {
     }
     #[cfg(windows)]
     {
+        use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
         use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
         let ptr = address as *mut core::ffi::c_void;
         let mut old = 0u32;
         // SAFETY: VirtualProtect on our own address space; ptr/data are valid.
@@ -724,10 +727,11 @@ fn write_in_process(address: u64, data: &[u8]) -> Result<usize, MemoryError> {
         }
         // SAFETY: the range is now writable; data is a valid slice.
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len()); }
-        // Restore original protection (best-effort).
-        // SAFETY: restoring our own page protection.
+        // Restore original protection (best-effort) and flush CPU instruction cache.
+        // SAFETY: restoring our own page protection and flushing pipeline for the modified range.
         unsafe {
             VirtualProtect(ptr, data.len(), old, &mut old);
+            FlushInstructionCache(GetCurrentProcess(), ptr, data.len());
         }
         Ok(data.len())
     }

@@ -226,7 +226,14 @@ where
         ));
     }
 
-    write(target, &jmp_in).map_err(|e| format!("patch target: {e}"))?;
+    // Safe hot-patching: to prevent concurrent threads from decoding a torn/half-written
+    // instruction sequence, patch the trailing bytes [1..N] first (operands/disp/NOPs),
+    // serialize with a memory fence, and write the entry opcode byte [0] last.
+    if jmp_in.len() > 1 {
+        write(target + 1, &jmp_in[1..]).map_err(|e| format!("patch target operands: {e}"))?;
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
+    write(target, &jmp_in[..1]).map_err(|e| format!("patch target opcode: {e}"))?;
 
     Ok(InstalledCave {
         cave_addr: cave,
@@ -245,7 +252,15 @@ pub fn restore<W>(target: u64, original: &[u8], write: W) -> Result<(), String>
 where
     W: Fn(u64, &[u8]) -> Result<usize, String>,
 {
-    write(target, original).map(|_| ())
+    if original.is_empty() {
+        return Ok(());
+    }
+    // Restore trailing bytes first, then entry opcode byte last for clean transition.
+    if original.len() > 1 {
+        write(target + 1, &original[1..]).map_err(|e| format!("restore target operands: {e}"))?;
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
+    write(target, &original[..1]).map(|_| ()).map_err(|e| format!("restore target opcode: {e}"))
 }
 
 #[cfg(test)]
