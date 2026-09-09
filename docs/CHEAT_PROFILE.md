@@ -240,6 +240,38 @@ dump_struct), instead of re-supplying field offsets on every call.
           value_type: f32
   ```
 
+## 4b. Code cave payload rules & position-independence
+
+Code cave payloads execute in allocated heap memory (often relocated tens of MBs away
+from the target hook site in the game's `.text`). While RIP-relative references to
+**local labels within the same payload** (`jmp code`, `call local_sub`, `[rip + slot]`)
+maintain constant relative offsets when relocated, **direct branches to external markers
+or symbols** (`call $marker`, `jmp $ext_fn`, or raw addresses) emit `rel32` displacements
+relative to the hook site that fail at runtime.
+
+### Critical rules for cave assembly:
+
+1. **External markers must use 64-bit indirect calls/jmps:**
+   ```asm
+   ; ❌ INCORRECT (crashes at runtime due to miscalculated rel32 displacement):
+   call $qip_fn
+   jmp $return_addr
+
+   ; ✅ CORRECT (position-independent 64-bit indirect register branch):
+   mov r10, $qip_fn
+   call r10
+
+   mov r11, $return_addr
+   jmp r11
+   ```
+
+2. **Constant loads are position-independent:**
+   `mov rdx, $marker` emits an absolute 64-bit immediate (`movabs`), which is safe anywhere.
+
+3. **Assembler safety guard:**
+   `check_position_dependent_external_refs` statically validates cave payload assembly.
+   Direct `call` or `jmp` to an external symbol or marker is rejected early with an actionable error.
+
 ## 5. Attach → init flow
 
 All frontends — GUI attach, MCP `load_profile`, web `/profiles/load` — follow

@@ -1877,6 +1877,12 @@ impl TrainlabMcpServer {
                     // (origin = target, since the cave payload is emitted relative to it for
                     // the RIP-relative constant slots) to produce the shellcode payload bytes.
                     let payload = if let Some(asm_src) = &pc.asm {
+                        if let Err(e) = trainlab_core::asm::check_position_dependent_external_refs(asm_src) {
+                            drop(s);
+                            let err_msg = format!("asm for cheat '{}' failed position-independence check: {e}", pc.id);
+                            rollback_init_mutations(&self.session, &err_msg);
+                            return Err(err(err_msg));
+                        }
                         let symbols: HashMap<String, u64> = s
                             .list_markers()
                             .iter()
@@ -3953,6 +3959,9 @@ impl TrainlabMcpServer {
         }
 
         let (payload, label_offsets) = if let Some(asm_src) = &args.asm {
+            if !args.force {
+                trainlab_core::asm::check_position_dependent_external_refs(asm_src).map_err(err)?;
+            }
             if args.hook == "trampoline" && !args.force {
                 trainlab_core::asm::check_trampoline_data_fallthrough(asm_src).map_err(err)?;
             }
@@ -4634,6 +4643,8 @@ pub(crate) fn execute_profile_commands(
                 }
 
                 let (payload_bytes, label_offsets) = if let Some(asm_src) = asm {
+                    trainlab_core::asm::check_position_dependent_external_refs(asm_src)
+                        .map_err(|e| format!("cmd {idx}: {e}"))?;
                     if hook == "trampoline" {
                         trainlab_core::asm::check_trampoline_data_fallthrough(asm_src)
                             .map_err(|e| format!("cmd {idx}: {e}"))?;

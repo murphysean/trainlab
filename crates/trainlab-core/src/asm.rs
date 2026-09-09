@@ -246,6 +246,74 @@ Or pass 'force: true' to bypass this safety check."
     Ok(())
 }
 
+/// Checks assembly code for position-dependent direct branches (`call` or `jmp`) to external markers
+/// or absolute addresses in relocated payloads (such as code caves).
+///
+/// In x86-64, direct branches (`call target`, `jmp target`) emit 32-bit relative displacement (`rel32`)
+/// computed from `origin_rip`. When a cave payload is assembled with `origin = target_addr` (the hook site),
+/// but the payload executes in a relocated heap cave (often tens of MBs away), the relative displacement
+/// points to unmapped memory or wrong instructions at runtime, causing an instant crash.
+///
+/// Local branches targeting labels defined within the payload itself (e.g. `jmp code`, `je skip`, `call my_sub`)
+/// maintain constant relative offsets when relocated and are perfectly valid.
+///
+/// This check rejects direct `call` or `jmp` instructions whose target is an external symbol (`$marker` or symbol name)
+/// or an absolute address, directing the profile author to use position-independent indirect calls/jmps:
+///   `mov r10, $marker`
+///   `call r10` (or `jmp r10`)
+pub fn check_position_dependent_external_refs(asm_code: &str) -> Result<(), String> {
+    let lines: Vec<&str> = asm_code.lines().collect();
+
+    // Pass 1: Collect all local labels defined in this payload
+    let mut local_labels = std::collections::HashSet::new();
+    for raw_line in &lines {
+        let line = strip_comments(raw_line).trim();
+        if let Some(label_name) = line.strip_suffix(':') {
+            local_labels.insert(label_name.trim().to_lowercase());
+        }
+    }
+
+    // Pass 2: Check any direct call or jmp
+    for (line_idx, raw_line) in lines.iter().enumerate() {
+        let line_num = line_idx + 1;
+        let line = strip_comments(raw_line).trim();
+        if line.is_empty() || line.ends_with(':') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let mnemonic = parts[0].to_lowercase();
+        if mnemonic == "call" || mnemonic == "jmp" {
+            if parts.len() < 2 {
+                continue;
+            }
+            let operand = parts[1..].join(" ");
+            let target = operand.trim().trim_end_matches(',').trim();
+
+            // Ignore register indirect calls: e.g. "call rax", "jmp r10", "call [r10]"
+            if parse_gpr64(target).is_ok() || parse_gpr32(target).is_ok() || target.starts_with('[') {
+                continue;
+            }
+
+            // Check if target is a local label
+            let normalized_target = target.trim_start_matches('$').to_lowercase();
+            if local_labels.contains(&normalized_target) {
+                continue;
+            }
+
+            // Target is an external symbol, marker, or absolute address:
+            return Err(format!(
+                "cave payload has position-dependent direct branch '{mnemonic} {target}' at line {line_num} ('{line}'). \
+Direct relative branches to external targets fail in relocated code caves because the payload executes at the cave address, \
+not the hook site origin, resulting in miscalculated rel32 displacement and instant crash.\n\
+Fix by using a position-independent 64-bit indirect branch instead:\n  mov r10, {target}\n  {mnemonic} r10"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn strip_comments(s: &str) -> &str {
     if let Some(idx) = s.find(';') {
         &s[..idx]
@@ -2380,6 +2448,43 @@ mod ce_verbatim_porting {
         let bad_code = "push rax\nmov rax, rbx\ndb 0x90\nret";
         let err = check_trampoline_data_fallthrough(bad_code).unwrap_err();
         assert!(err.contains("at line 3 ('db 0x90')"));
+    }
+
+    #[test]
+    fn test_check_position_dependent_external_refs() {
+        // Direct call to external symbol/marker rejected
+        let bad_call = "push rax\ncall $qip_fn\npop rax\nret";
+        let err = check_position_dependent_external_refs(bad_call).unwrap_err();
+        assert!(err.contains("position-dependent direct branch 'call $qip_fn' at line 2"));
+        assert!(err.contains("mov r10, $qip_fn"));
+
+        // Direct jmp to external symbol/marker rejected
+        let bad_jmp = "jmp $external_fn";
+        let err_jmp = check_position_dependent_external_refs(bad_jmp).unwrap_err();
+        assert!(err_jmp.contains("position-dependent direct branch 'jmp $external_fn' at line 1"));
+
+        // Direct call to raw address rejected
+        let bad_raw = "call 0x1407ad680";
+        let err_raw = check_position_dependent_external_refs(bad_raw).unwrap_err();
+        assert!(err_raw.contains("position-dependent direct branch 'call 0x1407ad680' at line 1"));
+
+        // Indirect call/jmp allowed
+        let good_indirect = "mov r10, $qip_fn\ncall r10\nmov r11, 0x1407ad680\njmp r11";
+        assert!(check_position_dependent_external_refs(good_indirect).is_ok());
+
+        // Local branch labels allowed
+        let good_local = r#"
+            jmp code
+            slot:
+            dq 0
+            code:
+            call local_sub
+            ret
+            local_sub:
+            nop
+            ret
+        "#;
+        assert!(check_position_dependent_external_refs(good_local).is_ok());
     }
 }
 
