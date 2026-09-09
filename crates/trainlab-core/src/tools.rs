@@ -643,7 +643,7 @@ pub fn eval_addr_expr(
 ) -> Result<u64, ToolError> {
     let s = session.lock().map_err(|_| err("session lock poisoned"))?;
     let resolve_marker = |name: &str| s.get_marker(name).map(|m| m.address);
-    let resolve_module = |_name: &str| {
+    let resolve_module = |name: &str| {
         if let Some(pid) = s.game_pid() {
             #[cfg(windows)]
             {
@@ -657,7 +657,7 @@ pub fn eval_addr_expr(
             }
             #[cfg(not(windows))]
             {
-                let _ = pid;
+                let _ = (name, pid);
             }
         }
         None
@@ -1258,7 +1258,7 @@ pub fn execute_allocate_memory(
     let size = args.size;
 
     #[cfg(windows)]
-    let (alloc_addr, prot_flags) = {
+    let alloc_addr = {
         use windows_sys::Win32::System::Memory::{
             MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_READONLY,
             PAGE_READWRITE, VirtualAllocEx,
@@ -1309,7 +1309,7 @@ pub fn execute_allocate_memory(
         if ptr.is_null() {
             return Err(err("VirtualAllocEx failed in target process"));
         }
-        (ptr as u64, prot)
+        ptr as u64
     };
 
     #[cfg(not(windows))]

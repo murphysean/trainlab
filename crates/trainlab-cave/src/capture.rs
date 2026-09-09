@@ -243,7 +243,7 @@ where
     cave::restore(target, original, write)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::cell::RefCell;

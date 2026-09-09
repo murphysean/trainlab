@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,11 +51,14 @@ fn copy_artifact(src: &Path, dst: &Path, make_executable: bool) -> Result<()> {
     }
     fs::copy(src, dst)
         .with_context(|| format!("failed copying {} -> {}", src.display(), dst.display()))?;
+    #[cfg(unix)]
     if make_executable {
         let mut perms = fs::metadata(dst)?.permissions();
         perms.set_mode(0o755);
         fs::set_permissions(dst, perms)?;
     }
+    #[cfg(not(unix))]
+    let _ = make_executable;
     println!("  -> Packaged: \x1b[1;32m{}\x1b[0m", dst.display());
     Ok(())
 }
