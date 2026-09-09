@@ -1012,6 +1012,12 @@ fn parse_and_emit_instruction(
                 a.inc(reg).map_err(|e| e.to_string())?;
             } else if let Ok(reg) = parse_gpr32(args[0]) {
                 a.inc(reg).map_err(|e| e.to_string())?;
+            } else if let Ok(reg) = parse_gpr8(args[0]) {
+                a.inc(reg).map_err(|e| e.to_string())?;
+            } else if let Ok(mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+                a.inc(mem).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("unsupported operand for inc: '{}'", args[0]));
             }
         }
         "dec" => {
@@ -1020,6 +1026,12 @@ fn parse_and_emit_instruction(
                 a.dec(reg).map_err(|e| e.to_string())?;
             } else if let Ok(reg) = parse_gpr32(args[0]) {
                 a.dec(reg).map_err(|e| e.to_string())?;
+            } else if let Ok(reg) = parse_gpr8(args[0]) {
+                a.dec(reg).map_err(|e| e.to_string())?;
+            } else if let Ok(mem) = parse_mem(args[0], symbols, origin_rip, labels, a, referenced_labels) {
+                a.dec(mem).map_err(|e| e.to_string())?;
+            } else {
+                return Err(format!("unsupported operand for dec: '{}'", args[0]));
             }
         }
         "vmovss" => {
@@ -1521,7 +1533,6 @@ fn parse_and_emit_instruction(
         "vzeroupper" => {
             a.vzeroupper().map_err(|e| e.to_string())?;
         }
-        "other" => {}
         other => return Err(format!(
             "unsupported mnemonic '{other}' in assemble_asm. Supported families:\n\
              - Control flow: jmp, call, ret, je/jz, jne/jnz, jg, jge, jl, jle, ja, jae, jb, jbe, js, jns\n\
@@ -2485,6 +2496,36 @@ mod ce_verbatim_porting {
             ret
         "#;
         assert!(check_position_dependent_external_refs(good_local).is_ok());
+    }
+
+    #[test]
+    fn test_assemble_inc_dec_and_unknown_mnemonic() {
+        let symbols = std::collections::HashMap::new();
+
+        // 1. Memory operands for inc and dec
+        let code_inc_mem = "inc dword [rdx]\ndec qword ptr [rax+0x10]\ninc byte [rcx]";
+        let res = assemble_text(code_inc_mem, 0x140000000, &symbols).expect("inc/dec memory operands should assemble");
+        // inc dword ptr [rdx] is FF 02
+        // dec qword ptr [rax+10h] is 48 FF 48 10
+        // inc byte ptr [rcx] is FE 01
+        assert_eq!(&res.bytes[0..2], &[0xff, 0x02]);
+        assert_eq!(&res.bytes[2..6], &[0x48, 0xff, 0x48, 0x10]);
+        assert_eq!(&res.bytes[6..8], &[0xfe, 0x01]);
+
+        // 2. Unknown mnemonic must return an error and never be silently dropped
+        let bad_mnemonic = "push rax\nsome_bogus_mnemonic rdx\npop rax";
+        let err = assemble_text(bad_mnemonic, 0x140000000, &symbols).unwrap_err();
+        assert!(err.contains("unsupported mnemonic 'some_bogus_mnemonic'"));
+
+        // 3. Literal "other" mnemonic must also return an error
+        let bad_other = "other";
+        let err_other = assemble_text(bad_other, 0x140000000, &symbols).unwrap_err();
+        assert!(err_other.contains("unsupported mnemonic 'other'"));
+
+        // 4. Invalid operand for inc/dec must error rather than silently drop
+        let bad_operand = "inc invalid_reg_xyz";
+        let err_op = assemble_text(bad_operand, 0x140000000, &symbols).unwrap_err();
+        assert!(err_op.contains("unsupported operand for inc"));
     }
 }
 
