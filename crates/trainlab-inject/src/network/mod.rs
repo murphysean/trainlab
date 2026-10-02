@@ -562,10 +562,13 @@ pub fn detect_network_modules() -> Vec<String> {
 }
 
 #[cfg(test)]
+pub(crate) use tests::TEST_MUTEX;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    static TEST_MUTEX: Mutex<()> = Mutex::new(());
+    pub(crate) static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_record_and_drain_packets() {

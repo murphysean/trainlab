@@ -439,3 +439,332 @@ pub fn find_inject_connect(session: &SharedSession) -> Result<String, String> {
         "injection succeeded but connection failed: {last_err}"
     ))
 }
+
+/// Resolve the DLL path from relative name or standard fallback.
+pub fn resolve_dll_path(input: &str) -> String {
+    let has_sep = input.contains('/') || input.contains('\\');
+    if has_sep {
+        return input.to_string();
+    }
+    match std::env::current_exe() {
+        Ok(exe) => match exe.parent() {
+            Some(dir) => {
+                if input == "trainlab_inject.dll" && dir.join("trainlab.dll").exists() {
+                    dir.join("trainlab.dll").to_string_lossy().into_owned()
+                } else {
+                    dir.join(input).to_string_lossy().into_owned()
+                }
+            }
+            None => input.to_string(),
+        },
+        Err(_) => input.to_string(),
+    }
+}
+
+/// Perform the complete attach, inject, feature handshake, profile discovery/load,
+/// and cheat synchronization pipeline. Shared across GUI, MCP, REST API, and auto-attach.
+pub fn attach_and_initialize(
+    session: &SharedSession,
+    game_override: Option<&str>,
+    auto_init: bool,
+    source: &str,
+) -> Result<String, String> {
+    apply_defaults(session);
+
+    // 1. Resolve game executable name
+    let game_name = if let Some(g) = game_override {
+        let trimmed = g.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    } else {
+        None
+    };
+
+    let game_name = match game_name {
+        Some(g) => g,
+        None => {
+            let cur = session
+                .lock()
+                .map_err(|_| "session lock poisoned".to_string())?
+                .game_name()
+                .to_string();
+            if !cur.is_empty() {
+                cur
+            } else {
+                let candidates = crate::inject::find_game_candidates();
+                let profiles = crate::profile::discover_profiles();
+                let mut detected = None;
+                for cand in &candidates {
+                    if let Some((_file, _p)) = crate::profile::find_profile_for_game(&profiles, &cand.name) {
+                        detected = Some(cand.name.clone());
+                        break;
+                    }
+                }
+                if detected.is_none() && !candidates.is_empty() {
+                    detected = Some(candidates[0].name.clone());
+                }
+                detected.ok_or_else(|| {
+                    "no game executable specified and no running game candidate detected".to_string()
+                })?
+            }
+        }
+    };
+
+    if let Ok(mut s) = session.lock() {
+        s.set_game_name(game_name.clone());
+        let current_dll = s.dll_path().to_string();
+        if current_dll.is_empty() || current_dll == "trainlab_inject.dll" {
+            let resolved = resolve_dll_path("trainlab_inject.dll");
+            s.set_dll_path(resolved);
+        } else {
+            let resolved = resolve_dll_path(&current_dll);
+            s.set_dll_path(resolved);
+        }
+        s.log_activity(source, format!("attaching and injecting into '{game_name}'..."));
+    }
+
+    // 2. Perform find & inject & TCP connect
+    let version = find_inject_connect(session)?;
+
+    if let Ok(mut s) = session.lock() {
+        let attached_pid = s.game_pid();
+        s.record_tracked_app(&game_name, attached_pid, None);
+        s.log_activity(
+            source,
+            format!("connected, inject v{version} — initializing DLL via IPC..."),
+        );
+    }
+
+    // 3. Auto-discover profile and prepare features handshake
+    let mut matched_profile = None;
+    if auto_init {
+        let all_discovered = crate::profile::discover_all_profiles();
+        for dp in &all_discovered {
+            match dp {
+                crate::profile::DiscoveredProfile::Valid { file, profile } => {
+                    if profile.game.eq_ignore_ascii_case(&game_name) {
+                        matched_profile = Some((file.clone(), profile.clone()));
+                        break;
+                    }
+                }
+                crate::profile::DiscoveredProfile::Invalid { file, error } => {
+                    if file
+                        .to_lowercase()
+                        .contains(&game_name.to_lowercase().replace(".exe", ""))
+                        && let Ok(mut s) = session.lock()
+                    {
+                        s.log_activity(
+                            "PROFILE",
+                            format!(
+                                "WARNING: candidate profile '{file}' for '{game_name}' FAILED to parse: {error}"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let app_cfg = crate::config::AppConfig::load();
+    let mut features = app_cfg.inject_features.clone();
+    let dll_port = app_cfg.inject.dll_port;
+    let mcp_port = app_cfg.server.mcp_port;
+    if !features.network.ignore_ports.contains(&dll_port) {
+        features.network.ignore_ports.push(dll_port);
+    }
+    if !features.network.ignore_ports.contains(&mcp_port) {
+        features.network.ignore_ports.push(mcp_port);
+    }
+
+    if let Some((_, prof)) = &matched_profile {
+        if let Some(render_cfg) = &prof.render {
+            if let Ok(mut s) = session.lock() {
+                s.log_activity(
+                    source,
+                    format!(
+                        "RENDER: profile render block OVERRIDES app config — overlay={}, wndproc={}, xinput={} (profile values; app config ignored)",
+                        render_cfg.overlay, render_cfg.hook_wndproc, render_cfg.xinput_hooks,
+                    ),
+                );
+            }
+            features.display.overlay = render_cfg.overlay;
+            features.input.wndproc = render_cfg.hook_wndproc;
+            features.input.xinput = render_cfg.xinput_hooks;
+        }
+        if let Some(net_cfg) = &prof.network {
+            if let Some(en) = net_cfg.enabled
+                && !en
+            {
+                features.network.winsock = false;
+                features.network.winhttp = false;
+                features.network.schannel = false;
+                features.network.steamworks = false;
+            }
+            if let Some(ws) = net_cfg.winsock {
+                features.network.winsock = ws;
+            }
+            if let Some(wh) = net_cfg.winhttp {
+                features.network.winhttp = wh;
+            }
+            if let Some(sc) = net_cfg.schannel {
+                features.network.schannel = sc;
+            }
+            if let Some(sw) = net_cfg.steamworks {
+                features.network.steamworks = sw;
+            }
+            for p in &net_cfg.ignore_ports {
+                if !features.network.ignore_ports.contains(p) {
+                    features.network.ignore_ports.push(*p);
+                }
+            }
+            for h in &net_cfg.ignore_hosts {
+                if !features.network.ignore_hosts.contains(h) {
+                    features.network.ignore_hosts.push(h.clone());
+                }
+            }
+            if let Some(loopback) = net_cfg.capture_loopback {
+                features.network.capture_loopback = loopback;
+            }
+        }
+    }
+
+    if let Ok(mut s) = session.lock() {
+        s.log_activity(
+            "NETWORK",
+            format!(
+                "Handshake features: winsock={}, winhttp={}, schannel={}, steamworks={}, ignore_ports={:?}, ignore_hosts={:?}",
+                features.network.winsock,
+                features.network.winhttp,
+                features.network.schannel,
+                features.network.steamworks,
+                features.network.ignore_ports,
+                features.network.ignore_hosts
+            ),
+        );
+    }
+
+    match request(session, &Request::InitializeSession { features }) {
+        Ok(Response::SessionReady {
+            capabilities,
+            diagnostics,
+        }) => {
+            if let Ok(mut s) = session.lock() {
+                s.set_dll_capabilities(capabilities.clone());
+                s.set_network_hooks_enabled(
+                    capabilities.contains(&"network_capture".to_string()),
+                );
+                s.log_activity(
+                    source,
+                    format!(
+                        "DLL session initialized on {} ({}) | Input: {} | Active capabilities: [{}]",
+                        diagnostics.target_os,
+                        diagnostics.graphics_api,
+                        diagnostics.input_subsystem,
+                        capabilities.join(", ")
+                    ),
+                );
+                if !diagnostics.detected_overlays.is_empty() {
+                    s.log_activity(
+                        source,
+                        format!(
+                            "Detected in-game overlays: {:?}",
+                            diagnostics.detected_overlays
+                        ),
+                    );
+                }
+                if !diagnostics.loaded_network_modules.is_empty() {
+                    s.log_activity(
+                        source,
+                        format!(
+                            "Loaded game network modules: {:?}",
+                            diagnostics.loaded_network_modules
+                        ),
+                    );
+                }
+            }
+
+            if let Some((file, _)) = matched_profile {
+                if let Ok(mut s) = session.lock() {
+                    s.log_activity(
+                        source,
+                        format!("starting sequential profile initialization for '{file}'..."),
+                    );
+                }
+                match crate::mcp::TrainlabMcpServer::with_session(session.clone())
+                    .load_profile_by_name(&file, true)
+                {
+                    Ok(detail) => {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity(source, format!("profile '{file}' loaded: {detail}"));
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity(source, format!("profile '{file}' load FAILED: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            if let Ok(mut s) = session.lock() {
+                s.log_activity(source, "DLL session initialization completed (default)");
+            }
+        }
+    }
+
+    Ok(version)
+}
+
+/// Background worker that periodically polls for a target game process,
+/// then automatically attaches, injects, and initializes.
+pub fn spawn_auto_attach_worker(
+    session: SharedSession,
+    egui_ctx: Option<eframe::egui::Context>,
+    target_game: Option<String>,
+) {
+    std::thread::Builder::new()
+        .name("trainlab-auto-attach".into())
+        .spawn(move || {
+            tracing::info!(
+                "Auto-attach worker started. Polling for target game process (target={:?})...",
+                target_game
+            );
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_secs(90);
+
+            // Brief initial pause to let process launch start
+            std::thread::sleep(Duration::from_millis(1500));
+
+            while start.elapsed() < timeout {
+                if let Ok(s) = session.lock() {
+                    if s.connected() {
+                        tracing::info!("Auto-attach: session already connected, worker exiting.");
+                        return;
+                    }
+                }
+
+                let target = target_game.as_deref();
+                match attach_and_initialize(&session, target, true, "AUTO-ATTACH") {
+                    Ok(v) => {
+                        tracing::info!("Auto-attach succeeded (inject v{v})!");
+                        if let Some(ctx) = &egui_ctx {
+                            ctx.request_repaint();
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::debug!("Auto-attach attempt: {e}");
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            tracing::warn!("Auto-attach worker timed out after 90 seconds.");
+        })
+        .ok();
+}
+

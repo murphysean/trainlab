@@ -54,6 +54,17 @@ pub static STATE: RenderState = RenderState {
     detected_overlays: Mutex::new(Vec::new()),
 };
 
+pub fn log_render(msg: impl std::fmt::Display) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("trainlab_inject.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "[RENDER] {msg}");
+    }
+}
+
 /// Scan the process for known third-party capture / overlay DLLs to prevent collisions.
 #[cfg(windows)]
 pub fn detect_foreign_overlays() -> Vec<String> {

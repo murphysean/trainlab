@@ -67,6 +67,8 @@ pub fn router(session: SharedSession, egui_ctx: Option<eframe::egui::Context>) -
         .route("/pins", get(get_pins).post(set_pin_handler))
         .route("/pins/clear", post(clear_pins_handler))
         .route("/upload", post(upload_handler))
+        .route("/attach", post(attach_handler))
+        .route("/inject", post(attach_handler))
         .with_state(state)
 }
 
@@ -1122,3 +1124,93 @@ async fn upload_handler(
     state.request_repaint();
     Ok(Json(res))
 }
+
+#[derive(Deserialize, Default)]
+pub struct AttachReq {
+    pub game: Option<String>,
+    pub dll_path: Option<String>,
+    pub auto_init: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct AttachResp {
+    pub status: String,
+    pub game: String,
+    pub pid: Option<u32>,
+    pub version: Option<String>,
+    pub error: Option<String>,
+}
+
+async fn attach_handler(
+    State(state): State<ApiState>,
+    payload: Option<Json<AttachReq>>,
+) -> Result<Json<AttachResp>, (StatusCode, Json<AttachResp>)> {
+    let req = payload.map(|Json(r)| r).unwrap_or_default();
+    let session = state.session.clone();
+    let egui_ctx = state.egui_ctx.clone();
+
+    tokio::task::spawn_blocking(move || {
+        if let Some(dll) = req.dll_path {
+            if let Ok(mut s) = session.lock() {
+                s.set_dll_path(dll);
+            }
+        }
+        let auto_init = req.auto_init.unwrap_or(true);
+        match crate::controller::attach_and_initialize(
+            &session,
+            req.game.as_deref(),
+            auto_init,
+            "REST-API",
+        ) {
+            Ok(v) => {
+                if let Some(ctx) = egui_ctx {
+                    ctx.request_repaint();
+                }
+                let (game, pid) = session
+                    .lock()
+                    .map(|s| (s.game_name().to_string(), s.game_pid()))
+                    .unwrap_or_default();
+                Ok(Json(AttachResp {
+                    status: "attached".into(),
+                    game,
+                    pid,
+                    version: Some(v),
+                    error: None,
+                }))
+            }
+            Err(e) => {
+                if let Some(ctx) = egui_ctx {
+                    ctx.request_repaint();
+                }
+                let (game, pid) = session
+                    .lock()
+                    .map(|s| (s.game_name().to_string(), s.game_pid()))
+                    .unwrap_or_default();
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(AttachResp {
+                        status: "failed".into(),
+                        game,
+                        pid,
+                        version: None,
+                        error: Some(e),
+                    }),
+                ))
+            }
+        }
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AttachResp {
+                status: "failed".into(),
+                game: "".into(),
+                pid: None,
+                version: None,
+                error: Some(format!("task join error: {e}")),
+            }),
+        )
+    })?
+}
+

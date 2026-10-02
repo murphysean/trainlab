@@ -201,32 +201,92 @@ fn main() -> Result<()> {
 
     if args.deploy {
         println!("\n\x1b[1;36m=== 5. Deploying to Remote Devices ===\x1b[0m");
-        let targets = ["192.168.254.27", "192.168.254.143"];
-        for ip in &targets {
-            println!("Deploying to deck@{}...", ip);
+        let targets: [(&str, &str, &[&str], Option<String>); 3] = [
+            ("Steam Deck", "deck", &["192.168.0.32", "192.168.254.27"], std::env::var("STEAM_DECK_IP").ok()),
+            ("Steam Machine", "deck", &["192.168.0.30", "192.168.254.143"], std::env::var("STEAM_MACHINE_IP").ok()),
+            ("Steam Frame", "steamos", &["192.168.0.36"], std::env::var("STEAM_FRAME_IP").ok()),
+        ];
+        for (name, user, default_ips, override_ip) in &targets {
+            let mut resolved_ip = None;
+            if let Some(o) = override_ip {
+                resolved_ip = Some(o.clone());
+            } else {
+                for candidate in *default_ips {
+                    let probe = Command::new("ssh")
+                        .args(&[
+                            "-o", "ConnectTimeout=2",
+                            "-o", "StrictHostKeyChecking=accept-new",
+                            "-o", "BatchMode=yes",
+                            &format!("{user}@{candidate}"),
+                            "true",
+                        ])
+                        .status();
+                    if let Ok(st) = probe && st.success() {
+                        resolved_ip = Some(candidate.to_string());
+                        break;
+                    }
+                }
+            }
+
+            let ip = match resolved_ip {
+                Some(ip) => ip,
+                None => {
+                    eprintln!("\x1b[1;33m[warn]\x1b[0m {} is currently offline / unreachable across {:?}", name, default_ips);
+                    continue;
+                }
+            };
+
+            println!("Deploying to {} ({}@{})...", name, user, ip);
             let files = [
                 dist_dir.join("trainlab"),
                 dist_dir.join("trainlab.exe"),
                 dist_dir.join("trainlab.dll"),
                 dist_dir.join("trainlab.so"),
                 dist_dir.join("launch.sh"),
+                dist_dir.join("config.yaml"),
             ];
-            let mut scp_args = Vec::new();
+            let mut scp_args = vec![
+                "-o".to_string(),
+                "ConnectTimeout=5".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
+            ];
             for f in &files {
                 if f.exists() {
                     scp_args.push(f.to_string_lossy().to_string());
                 }
             }
-            let dest = format!("deck@{ip}:~/Documents/Trainers/Trainlab/");
+            let dest = format!("{user}@{ip}:~/Documents/Trainers/Trainlab/");
             scp_args.push(dest);
 
             let str_args: Vec<&str> = scp_args.iter().map(|s| s.as_str()).collect();
+            let _ = run_cmd(
+                "ssh",
+                &[
+                    "-o",
+                    "ConnectTimeout=5",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    &format!("{user}@{ip}"),
+                    "mkdir -p ~/Documents/Trainers/Trainlab",
+                ],
+            );
             if let Err(e) = run_cmd("scp", &str_args) {
-                eprintln!("\x1b[1;33m[warn]\x1b[0m Remote deploy to {ip} failed: {e}");
+                eprintln!("\x1b[1;33m[warn]\x1b[0m Remote deploy to {} ({}) failed: {e}", name, ip);
             } else {
                 let chmod_cmd = "chmod +x ~/Documents/Trainers/Trainlab/trainlab ~/Documents/Trainers/Trainlab/trainlab.exe ~/Documents/Trainers/Trainlab/launch.sh 2>/dev/null || true";
-                let _ = run_cmd("ssh", &[&format!("deck@{ip}"), chmod_cmd]);
-                println!("\x1b[1;32m[ok]\x1b[0m Successfully deployed to {ip}");
+                let _ = run_cmd(
+                    "ssh",
+                    &[
+                        "-o",
+                        "ConnectTimeout=5",
+                        "-o",
+                        "StrictHostKeyChecking=accept-new",
+                        &format!("{user}@{ip}"),
+                        chmod_cmd,
+                    ],
+                );
+                println!("\x1b[1;32m[ok]\x1b[0m Successfully deployed to {} ({})", name, ip);
             }
         }
     }

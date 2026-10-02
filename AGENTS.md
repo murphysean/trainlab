@@ -32,7 +32,10 @@ This compiles all targets, stages them in `target/release-dist/`, and synchroniz
 ```bash
 cargo deploy
 ```
-This performs the full compilation, packages the clean release directory, syncs the local mirror, and uses `scp` to push `trainlab`, `trainlab.exe`, `trainlab.dll`, `trainlab.so`, and `launch.sh` directly to the Steam Deck (`192.168.254.27`) and Steam Machine (`192.168.254.143`).
+This performs the full compilation, packages the clean release directory, syncs the local mirror, and uses `scp` to push `trainlab`, `trainlab.exe`, `trainlab.dll`, `trainlab.so`, and `launch.sh` directly to the configured targets:
+- Steam Deck (`deck@192.168.0.32` / `192.168.254.27`)
+- Steam Machine (`deck@192.168.0.30` / `192.168.254.143`)
+- Steam Frame (`steamos@192.168.0.36`)
 
 ### C. Package/Deploy without Rebuilding:
 ```bash

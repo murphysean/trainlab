@@ -83,7 +83,11 @@ pub unsafe extern "system" fn hooked_present(
     flags: u32,
 ) -> i32 {
     // 1. Increment live frame counter
-    super::STATE.frame_count.fetch_add(1, Ordering::Relaxed);
+    let fc = super::STATE.frame_count.fetch_add(1, Ordering::Relaxed) + 1;
+    let vis = super::STATE.overlay_visible.load(Ordering::Relaxed);
+    if fc == 1 || fc % 600 == 0 || (vis && fc % 60 == 0) {
+        super::log_render(format!("hooked_present: frame={fc}, overlay_visible={vis}, swapchain={swapchain:?}"));
+    }
 
     // 2. On the first few frames, extract the game's actual HWND from swapchain description safely
     if !HWND_INITIALIZED.load(Ordering::Relaxed) && !swapchain.is_null() {
@@ -101,6 +105,7 @@ pub unsafe extern "system" fn hooked_present(
                 if get_desc_fn(swapchain, &mut desc) == 0
                     && desc.output_window != std::ptr::null_mut()
                 {
+                    super::log_render(format!("hooked_present: captured game HWND={:?}", desc.output_window));
                     super::input::install_wndproc_hook(desc.output_window);
                     HWND_INITIALIZED.store(true, Ordering::Relaxed);
                 }
@@ -112,7 +117,7 @@ pub unsafe extern "system" fn hooked_present(
     super::overlay::execute_pinning_cadence();
 
     // 4. Run in-game overlay render pass if overlay is active
-    if super::STATE.overlay_visible.load(Ordering::Relaxed) {
+    if vis {
         if !super::d3d12::try_render_d3d12_overlay(swapchain) {
             super::d3d11::render_overlay_frame(swapchain);
         }
@@ -132,11 +137,13 @@ pub unsafe extern "system" fn hooked_present(
 unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
     let d3d11_dll = LoadLibraryA(b"d3d11.dll\0".as_ptr());
     if d3d11_dll == std::ptr::null_mut() {
+        super::log_render("find_dxgi_present_vmt: LoadLibraryA(d3d11.dll) returned NULL");
         return None;
     }
 
     let create_fn_ptr = GetProcAddress(d3d11_dll, b"D3D11CreateDeviceAndSwapChain\0".as_ptr());
     if create_fn_ptr.is_none() {
+        super::log_render("find_dxgi_present_vmt: GetProcAddress(D3D11CreateDeviceAndSwapChain) is None");
         return None;
     }
 
@@ -174,6 +181,7 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
     );
 
     if hwnd == std::ptr::null_mut() {
+        super::log_render("find_dxgi_present_vmt: CreateWindowExA returned NULL");
         return None;
     }
 
@@ -196,17 +204,17 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
     let mut context: *mut c_void = std::ptr::null_mut();
     let mut swapchain: *mut c_void = std::ptr::null_mut();
 
-    let feature_levels = [0xb000u32]; // D3D_FEATURE_LEVEL_11_0 = 0xb000
     const D3D_DRIVER_TYPE_HARDWARE: u32 = 1;
+    const D3D_DRIVER_TYPE_WARP: u32 = 2;
     const D3D11_SDK_VERSION: u32 = 7;
 
-    let hr = d3d11_create(
+    let mut hr = d3d11_create(
         std::ptr::null_mut(),
         D3D_DRIVER_TYPE_HARDWARE,
         std::ptr::null_mut(),
         0,
-        feature_levels.as_ptr(),
-        1,
+        std::ptr::null(),
+        0,
         D3D11_SDK_VERSION,
         &swap_desc,
         &mut swapchain,
@@ -215,12 +223,31 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
         &mut context,
     );
 
+    if hr != 0 || swapchain.is_null() {
+        super::log_render(format!("find_dxgi_present_vmt: HARDWARE driver failed (hr=0x{hr:08X}), trying WARP..."));
+        hr = d3d11_create(
+            std::ptr::null_mut(),
+            D3D_DRIVER_TYPE_WARP,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+            0,
+            D3D11_SDK_VERSION,
+            &swap_desc,
+            &mut swapchain,
+            &mut device,
+            &mut feature_level,
+            &mut context,
+        );
+    }
+
     let mut present_addr = None;
 
     if hr == 0 && !swapchain.is_null() {
         let vtable = *(swapchain as *mut *mut usize);
         // Index 8 is IDXGISwapChain::Present
         let present_ptr = *vtable.add(8);
+        super::log_render(format!("find_dxgi_present_vmt: SUCCESS! IDXGISwapChain::Present at 0x{present_ptr:X} (feature_level=0x{feature_level:X})"));
         present_addr = Some(present_ptr as *mut usize);
 
         // Release dummy COM objects
@@ -236,6 +263,8 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
         release_fn(swapchain as *mut usize);
         release_fn(device as *mut usize);
         release_fn(context as *mut usize);
+    } else {
+        super::log_render(format!("find_dxgi_present_vmt: FAILED to create D3D11 swapchain (hr=0x{hr:08X})"));
     }
 
     DestroyWindow(hwnd);
@@ -246,11 +275,12 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
 
 /// Initialize the DXGI hook in a background retry loop.
 pub fn init_dxgi_hook() {
+    super::log_render("init_dxgi_hook started");
     // Wait briefly if third-party hooks (Steam / OBS / Discord) are initializing
     std::thread::sleep(Duration::from_millis(500));
 
     // Try finding DXGI Present
-    for _ in 0..10 {
+    for attempt in 1..=20 {
         if HOOK_INSTALLED.load(Ordering::SeqCst) {
             break;
         }
@@ -264,6 +294,7 @@ pub fn init_dxgi_hook() {
                 || d3d11_mod != std::ptr::null_mut()
                 || d3d12_mod != std::ptr::null_mut()
             {
+                super::log_render(format!("init_dxgi_hook: attempt {attempt}, graphics modules found (dxgi={:?}, d3d11={:?})", dxgi_mod, d3d11_mod));
                 if let Some(target_present) = find_dxgi_present_vmt() {
                     let target_u64 = target_present as u64;
 
@@ -292,7 +323,6 @@ pub fn init_dxgi_hook() {
                     match trainlab_cave::cave::install(target_u64, hook, read, write, allocate) {
                         Ok(installed) => {
                             // Point original present to the trampoline return path
-                            // (installed.cave_addr + payload.len() is where relocated stolen instructions & jump-back live)
                             ORIGINAL_PRESENT.store(
                                 (installed.cave_addr + payload.len() as u64) as *mut c_void,
                                 Ordering::SeqCst,
@@ -310,22 +340,25 @@ pub fn init_dxgi_hook() {
                                 *name_lock = api_name.to_string();
                             }
 
-                            tracing::info!(
-                                "Successfully hooked IDXGISwapChain::Present at 0x{:X} ({})",
+                            super::log_render(format!(
+                                "init_dxgi_hook: HOOK INSTALLED at 0x{:X} -> cave 0x{:X} ({})",
                                 target_u64,
+                                installed.cave_addr,
                                 api_name
-                            );
+                            ));
                             break;
                         }
                         Err(err) => {
-                            tracing::warn!(
-                                "Failed to install Present hook at 0x{:X}: {:?}",
+                            super::log_render(format!(
+                                "init_dxgi_hook: cave::install FAILED at 0x{:X}: {:?}",
                                 target_u64,
                                 err
-                            );
+                            ));
                         }
                     }
                 }
+            } else if attempt == 1 || attempt % 5 == 0 {
+                super::log_render(format!("init_dxgi_hook: attempt {attempt}, waiting for dxgi/d3d11 modules..."));
             }
         }
 

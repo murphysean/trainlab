@@ -66,6 +66,37 @@ if [ -z "$PROTON_RUNNER" ] && [ -z "$SLR_ENTRY" ]; then
     echo "[trainlab] INFO: No Proton runner or SLR container detected in launch command. Assuming native Linux host." >/tmp/trainlab_launch_out.log
 fi
 
+# Detect Steam Frame environment
+IS_STEAM_FRAME=0
+if [ "$(hostname 2>/dev/null)" = "frame" ] || grep -q 'VARIANT_ID="vr"' /etc/os-release 2>/dev/null || [ -d "/usr/share/deckard" ] || [ -n "$STEAM_FRAME" ]; then
+    IS_STEAM_FRAME=1
+fi
+
+if [ "$IS_STEAM_FRAME" -eq 1 ]; then
+    export STEAM_FRAME=1
+    # On Steam Frame / VR, gamescope runs at 144 DPI Xft.dpi. An internal 1.5x scale multiplier causes
+    # double-scaling (~2.25x), zooming in the UI excessively. Default to 1.0 (100%) on the Frame.
+    export TRAINLAB_SCALE="${TRAINLAB_SCALE:-1.0}"
+fi
+
+# Detect game executable name from Steam command line arguments if present
+GAME_EXE=""
+for arg in "$@"; do
+    if [[ "$arg" == *.exe ]] || [[ "$arg" == *.x86_64 ]]; then
+        GAME_EXE=$(basename "$arg")
+        break
+    fi
+done
+
+AUTO_ARGS="--auto-attach"
+if [ -n "$GAME_EXE" ]; then
+    AUTO_ARGS="--auto-attach --game $GAME_EXE"
+fi
+if [ -n "$TRAINLAB_SCALE" ]; then
+    AUTO_ARGS="$AUTO_ARGS --scale $TRAINLAB_SCALE"
+fi
+export TRAINLAB_AUTO_INJECT=1
+
 # 1. Execute the main game launch in the background and capture its PID
 "$@" &
 GAME_PID=$!
@@ -77,16 +108,16 @@ sleep 4
 TRAINER_PID=""
 
 if [ -n "$PROTON_RUNNER" ] && [ -x "$PROTON_RUNNER" ] && [ -n "$TARGET_WIN_EXE" ]; then
-    echo "[trainlab] Launching Windows trainer via Proton: $PROTON_RUNNER ($TARGET_WIN_EXE)" >>/tmp/trainlab_launch_out.log
-    "$PROTON_RUNNER" run "$TARGET_WIN_EXE" >>/tmp/trainlab_launch_out.log 2>&1 &
+    echo "[trainlab] Launching Windows trainer via Proton: $PROTON_RUNNER ($TARGET_WIN_EXE $AUTO_ARGS)" >>/tmp/trainlab_launch_out.log
+    TRAINLAB_AUTO_INJECT=1 TRAINLAB_SCALE="${TRAINLAB_SCALE:-1.0}" "$PROTON_RUNNER" run "$TARGET_WIN_EXE" $AUTO_ARGS >>/tmp/trainlab_launch_out.log 2>&1 &
     TRAINER_PID=$!
 elif [ -n "$SLR_ENTRY" ] && [ -x "$SLR_ENTRY" ] && [ -n "$TARGET_LINUX_EXE" ]; then
-    echo "[trainlab] Launching native Linux trainer inside SLR container: $SLR_ENTRY ($TARGET_LINUX_EXE)" >>/tmp/trainlab_launch_out.log
-    "$SLR_ENTRY" --verb=run -- "$TARGET_LINUX_EXE" >>/tmp/trainlab_launch_out.log 2>&1 &
+    echo "[trainlab] Launching native Linux trainer inside SLR container: $SLR_ENTRY ($TARGET_LINUX_EXE $AUTO_ARGS)" >>/tmp/trainlab_launch_out.log
+    TRAINLAB_AUTO_INJECT=1 TRAINLAB_SCALE="${TRAINLAB_SCALE:-1.0}" "$SLR_ENTRY" --verb=run -- "$TARGET_LINUX_EXE" $AUTO_ARGS >>/tmp/trainlab_launch_out.log 2>&1 &
     TRAINER_PID=$!
 elif [ -n "$TARGET_LINUX_EXE" ]; then
-    echo "[trainlab] Launching native Linux trainer directly on host ($TARGET_LINUX_EXE)" >>/tmp/trainlab_launch_out.log
-    "$TARGET_LINUX_EXE" >>/tmp/trainlab_launch_out.log 2>&1 &
+    echo "[trainlab] Launching native Linux trainer directly on host ($TARGET_LINUX_EXE $AUTO_ARGS)" >>/tmp/trainlab_launch_out.log
+    TRAINLAB_AUTO_INJECT=1 TRAINLAB_SCALE="${TRAINLAB_SCALE:-1.0}" "$TARGET_LINUX_EXE" $AUTO_ARGS >>/tmp/trainlab_launch_out.log 2>&1 &
     TRAINER_PID=$!
 elif [ -n "$TARGET_WIN_EXE" ]; then
     echo "[trainlab] WARNING: Only Windows trainer exists but no Proton runner detected." >>/tmp/trainlab_launch_out.log

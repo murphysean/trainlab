@@ -61,12 +61,58 @@ impl Default for GuiConfig {
     }
 }
 
+/// Returns true if running on Steam Frame / Deckard VR headset.
+pub fn is_steam_frame() -> bool {
+    if std::env::var("STEAM_FRAME").is_ok()
+        || std::env::var("DECKARD").is_ok()
+        || std::env::var("TRAINLAB_STEAM_FRAME").is_ok()
+    {
+        return true;
+    }
+
+    // Direct Linux filesystem check
+    if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
+        if hostname.trim().eq_ignore_ascii_case("frame") {
+            return true;
+        }
+    }
+    if let Ok(os_release) = std::fs::read_to_string("/etc/os-release") {
+        if os_release.contains("VARIANT_ID=\"vr\"") || os_release.contains("VARIANT_ID=vr") {
+            return true;
+        }
+    }
+    if std::path::Path::new("/usr/share/deckard").exists() {
+        return true;
+    }
+
+    // Windows / Wine emulation check (root filesystem mounted at Z:)
+    if let Ok(hostname) = std::fs::read_to_string(r"Z:\etc\hostname") {
+        if hostname.trim().eq_ignore_ascii_case("frame") {
+            return true;
+        }
+    }
+    if let Ok(os_release) = std::fs::read_to_string(r"Z:\etc\os-release") {
+        if os_release.contains("VARIANT_ID=\"vr\"") || os_release.contains("VARIANT_ID=vr") {
+            return true;
+        }
+    }
+    if std::path::Path::new(r"Z:\usr\share\deckard").exists() {
+        return true;
+    }
+
+    false
+}
+
 fn default_pin_rate_hz() -> u32 {
     30
 }
 
 fn default_scale() -> f32 {
-    1.5
+    if is_steam_frame() {
+        1.0
+    } else {
+        1.5
+    }
 }
 fn default_theme() -> String {
     "dark".to_string()
@@ -200,10 +246,17 @@ impl AppConfig {
         // GUI Scale / DPI factor
         if let Ok(val) =
             std::env::var("TRAINLAB_SCALE").or_else(|_| std::env::var("TRAINLAB_DPI_SCALE"))
-            && let Ok(scale) = val.parse::<f32>()
-            && scale > 0.1
         {
-            self.gui.scale = scale;
+            if let Ok(scale) = val.parse::<f32>() {
+                if scale > 0.1 {
+                    self.gui.scale = scale;
+                }
+            }
+        } else if is_steam_frame() {
+            // Steam Frame's Gamescope compositor applies 144 DPI Xft.dpi base scaling.
+            // When running on Frame and no explicit TRAINLAB_SCALE is set, enforce 1.0 (100%)
+            // to avoid double-scaling / excessive zoom.
+            self.gui.scale = 1.0;
         }
 
         // GUI Dimensions

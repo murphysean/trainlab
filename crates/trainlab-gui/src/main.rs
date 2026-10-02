@@ -195,7 +195,10 @@ impl Default for TrainlabApp {
 
 impl TrainlabApp {
     fn new(session: SharedSession) -> Self {
-        let config = config::AppConfig::load();
+        Self::with_config(session, config::AppConfig::load())
+    }
+
+    fn with_config(session: SharedSession, config: config::AppConfig) -> Self {
         // The game executable to inject into. Overridable via TRAINLAB_GAME env var.
         let game_name = std::env::var("TRAINLAB_GAME").unwrap_or_default();
         let bus_rx = session.lock().unwrap().event_bus().subscribe();
@@ -306,7 +309,7 @@ impl TrainlabApp {
         let session = self.session.clone();
         let auto_init = self.auto_init;
         let game_name = self.game_name.clone();
-        let dll_path = resolve_dll_path(&self.dll_path);
+        let dll_path = controller::resolve_dll_path(&self.dll_path);
         let attaching_flag = self.is_attaching.clone();
 
         if let Ok(mut s) = self.session.lock() {
@@ -315,192 +318,12 @@ impl TrainlabApp {
         }
 
         std::thread::spawn(move || {
-            match controller::find_inject_connect(&session) {
-                Ok(version) => {
-                    if let Ok(mut s) = session.lock() {
-                        let attached_pid = s.game_pid();
-                        s.record_tracked_app(&game_name, attached_pid, None);
-                        s.log_activity(
-                            "UI",
-                            format!("connected, inject v{version} — initializing DLL via IPC..."),
-                        );
-                    }
-
-                    let mut matched_profile = None;
-                    if auto_init {
-                        let all_discovered = profile::discover_all_profiles();
-                        for dp in &all_discovered {
-                            match dp {
-                                profile::DiscoveredProfile::Valid { file, profile } => {
-                                    if profile.game.eq_ignore_ascii_case(&game_name) {
-                                        matched_profile = Some((file.clone(), profile.clone()));
-                                        break;
-                                    }
-                                }
-                                profile::DiscoveredProfile::Invalid { file, error } => {
-                                    if file
-                                        .to_lowercase()
-                                        .contains(&game_name.to_lowercase().replace(".exe", ""))
-                                        && let Ok(mut s) = session.lock()
-                                    {
-                                        s.log_activity("PROFILE", format!("WARNING: candidate profile '{file}' for '{game_name}' FAILED to parse: {error}"));
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Perform consolidated capability & feature negotiation handshake
-                    let app_cfg = config::AppConfig::load();
-                    let mut features = app_cfg.inject_features.clone();
-                    let dll_port = app_cfg.inject.dll_port;
-                    let mcp_port = app_cfg.server.mcp_port;
-                    if !features.network.ignore_ports.contains(&dll_port) {
-                        features.network.ignore_ports.push(dll_port);
-                    }
-                    if !features.network.ignore_ports.contains(&mcp_port) {
-                        features.network.ignore_ports.push(mcp_port);
-                    }
-
-                    // If a matching profile exists, overlay its render and network configuration into initial handshake
-                    if let Some((_, prof)) = &matched_profile {
-                        if let Some(render_cfg) = &prof.render {
-                            if let Ok(mut s) = session.lock() {
-                                s.log_activity("UI", format!(
-                                    "RENDER: profile render block OVERRIDES app config — overlay={}, wndproc={}, xinput={} (profile values; app config ignored)",
-                                    render_cfg.overlay, render_cfg.hook_wndproc, render_cfg.xinput_hooks,
-                                ));
-                            }
-                            features.display.overlay = render_cfg.overlay;
-                            features.input.wndproc = render_cfg.hook_wndproc;
-                            features.input.xinput = render_cfg.xinput_hooks;
-                        }
-                        if let Some(net_cfg) = &prof.network {
-                            if let Some(en) = net_cfg.enabled
-                                && !en
-                            {
-                                features.network.winsock = false;
-                                features.network.winhttp = false;
-                                features.network.schannel = false;
-                                features.network.steamworks = false;
-                            }
-                            if let Some(ws) = net_cfg.winsock {
-                                features.network.winsock = ws;
-                            }
-                            if let Some(wh) = net_cfg.winhttp {
-                                features.network.winhttp = wh;
-                            }
-                            if let Some(sc) = net_cfg.schannel {
-                                features.network.schannel = sc;
-                            }
-                            if let Some(sw) = net_cfg.steamworks {
-                                features.network.steamworks = sw;
-                            }
-                            for p in &net_cfg.ignore_ports {
-                                if !features.network.ignore_ports.contains(p) {
-                                    features.network.ignore_ports.push(*p);
-                                }
-                            }
-                            for h in &net_cfg.ignore_hosts {
-                                if !features.network.ignore_hosts.contains(h) {
-                                    features.network.ignore_hosts.push(h.clone());
-                                }
-                            }
-                            if let Some(loopback) = net_cfg.capture_loopback {
-                                features.network.capture_loopback = loopback;
-                            }
-                        }
-                    }
-
-                    if let Ok(mut s) = session.lock() {
-                        s.log_activity("NETWORK", format!(
-                            "Handshake features: winsock={}, winhttp={}, schannel={}, steamworks={}, ignore_ports={:?}, ignore_hosts={:?}",
-                            features.network.winsock, features.network.winhttp, features.network.schannel,
-                            features.network.steamworks, features.network.ignore_ports, features.network.ignore_hosts
-                        ));
-                    }
-
-                    match controller::request(&session, &Request::InitializeSession { features }) {
-                        Ok(Response::SessionReady {
-                            capabilities,
-                            diagnostics,
-                        }) => {
-                            if let Ok(mut s) = session.lock() {
-                                s.set_dll_capabilities(capabilities.clone());
-                                s.set_network_hooks_enabled(
-                                    capabilities.contains(&"network_capture".to_string()),
-                                );
-                                s.log_activity("UI", format!(
-                                    "DLL session initialized on {} ({}) | Input: {} | Active capabilities: [{}]",
-                                    diagnostics.target_os,
-                                    diagnostics.graphics_api,
-                                    diagnostics.input_subsystem,
-                                    capabilities.join(", ")
-                                ));
-                                if !diagnostics.detected_overlays.is_empty() {
-                                    s.log_activity(
-                                        "UI",
-                                        format!(
-                                            "Detected in-game overlays: {:?}",
-                                            diagnostics.detected_overlays
-                                        ),
-                                    );
-                                }
-                                if !diagnostics.loaded_network_modules.is_empty() {
-                                    s.log_activity(
-                                        "UI",
-                                        format!(
-                                            "Loaded game network modules: {:?}",
-                                            diagnostics.loaded_network_modules
-                                        ),
-                                    );
-                                }
-                            }
-
-                            // Now load the matched profile so setup steps and cheats materialize into session
-                            if let Some((file, _)) = matched_profile {
-                                if let Ok(mut s) = session.lock() {
-                                    s.log_activity("UI", format!("starting sequential profile initialization for '{file}'..."));
-                                }
-                                match mcp::TrainlabMcpServer::with_session(session.clone())
-                                    .load_profile_by_name(&file, true)
-                                {
-                                    Ok(detail) => {
-                                        if let Ok(mut s) = session.lock() {
-                                            s.log_activity(
-                                                "UI",
-                                                format!("profile '{file}' loaded: {detail}"),
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        if let Ok(mut s) = session.lock() {
-                                            s.log_activity(
-                                                "UI",
-                                                format!("profile '{file}' load FAILED: {e}"),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            if let Ok(mut s) = session.lock() {
-                                s.log_activity(
-                                    "UI",
-                                    "DLL session initialization completed (default)",
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    if let Ok(mut s) = session.lock() {
-                        s.log_activity("UI", format!("attach failed: {e}"));
-                        s.set_connected(false);
-                    }
-                }
-            }
+            let target = if game_name.trim().is_empty() {
+                None
+            } else {
+                Some(game_name.as_str())
+            };
+            let _ = controller::attach_and_initialize(&session, target, auto_init, "UI");
             attaching_flag.store(false, Ordering::SeqCst);
         });
     }
@@ -1953,7 +1776,7 @@ impl TrainlabApp {
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let config = config::AppConfig::load();
+    let mut config = config::AppConfig::load();
 
     // Clean out latent captures, snapshots, memory dumps, and previous session logs upon startup
     clean_startup_artifacts();
@@ -1967,10 +1790,58 @@ fn main() -> eframe::Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(delay_secs));
     }
 
+    // Parse CLI arguments and environment variables
+    let cli_args: Vec<String> = std::env::args().collect();
+    let mut auto_attach = std::env::var("TRAINLAB_AUTO_INJECT").is_ok()
+        || std::env::var("TRAINLAB_AUTO_ATTACH").is_ok();
+    let mut target_game: Option<String> = std::env::var("TRAINLAB_GAME").ok();
+    let mut target_dll: Option<String> = std::env::var("TRAINLAB_DLL").ok();
+    let mut cli_scale: Option<f32> = None;
+
+    let mut arg_idx = 1;
+    while arg_idx < cli_args.len() {
+        match cli_args[arg_idx].as_str() {
+            "--auto-attach" | "--auto-inject" => {
+                auto_attach = true;
+            }
+            "--game" if arg_idx + 1 < cli_args.len() => {
+                target_game = Some(cli_args[arg_idx + 1].clone());
+                arg_idx += 1;
+            }
+            "--dll" if arg_idx + 1 < cli_args.len() => {
+                target_dll = Some(cli_args[arg_idx + 1].clone());
+                arg_idx += 1;
+            }
+            "--scale" if arg_idx + 1 < cli_args.len() => {
+                if let Ok(s) = cli_args[arg_idx + 1].parse::<f32>() {
+                    cli_scale = Some(s);
+                }
+                arg_idx += 1;
+            }
+            _ => {}
+        }
+        arg_idx += 1;
+    }
+
+    if let Some(s) = cli_scale {
+        config.gui.scale = s;
+    }
+
     // One shared session state across the GUI and the MCP server. The GUI sets
     // `game_pid` when it injects the game; the MCP server reads it to open the
     // game process externally for scan-family tools (see D7).
     let session: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(SessionState::new()));
+
+    if let Some(ref g) = target_game {
+        if let Ok(mut s) = session.lock() {
+            s.set_game_name(g.clone());
+        }
+    }
+    if let Some(ref d) = target_dll {
+        if let Ok(mut s) = session.lock() {
+            s.set_dll_path(d.clone());
+        }
+    }
 
     // Detect launch environment: Gamescope / Steam Deck handheld mode vs Standard Desktop
     let is_gamescope = std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok()
@@ -2003,6 +1874,8 @@ fn main() -> eframe::Result<()> {
     };
 
     let app_config = config.clone();
+    let auto_attach_flag = auto_attach;
+    let auto_attach_game = target_game.clone();
 
     eframe::run_native(
         "trainlab",
@@ -2010,11 +1883,17 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
 
-            // Apply custom DPI / UI scale factor (pixels_per_point) to fix tiny text on high-DPI displays
-            if app_config.gui.scale != 1.0 {
-                ctx.set_pixels_per_point(app_config.gui.scale);
-                tracing::info!("Applied GUI DPI scale factor: {}", app_config.gui.scale);
+            if auto_attach_flag {
+                controller::spawn_auto_attach_worker(
+                    session.clone(),
+                    Some(ctx.clone()),
+                    auto_attach_game.clone(),
+                );
             }
+
+            // Apply custom DPI / UI scale factor (pixels_per_point)
+            ctx.set_pixels_per_point(app_config.gui.scale);
+            tracing::info!("Applied GUI DPI scale factor: {}", app_config.gui.scale);
 
             // Start the MCP & web server on a background tokio runtime if enabled.
             let server_enabled = app_config.server.enabled;
@@ -2228,7 +2107,7 @@ fn main() -> eframe::Result<()> {
                 });
             });
 
-            Box::new(TrainlabApp::with_session(session))
+            Box::new(TrainlabApp::with_config(session, app_config))
         }),
     )
 }
@@ -3696,26 +3575,7 @@ fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<
     }
 }
 
-fn resolve_dll_path(input: &str) -> String {
-    let has_sep = input.contains('/') || input.contains('\\');
-    if has_sep {
-        return input.to_string();
-    }
-    match std::env::current_exe() {
-        Ok(exe) => match exe.parent() {
-            Some(dir) => {
-                // If input is default trainlab_inject.dll, prefer trainlab.dll if present
-                if input == "trainlab_inject.dll" && dir.join("trainlab.dll").exists() {
-                    dir.join("trainlab.dll").to_string_lossy().into_owned()
-                } else {
-                    dir.join(input).to_string_lossy().into_owned()
-                }
-            }
-            None => input.to_string(),
-        },
-        Err(_) => input.to_string(),
-    }
-}
+
 fn parse_addr(s: &str) -> Result<u64, std::num::ParseIntError> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {

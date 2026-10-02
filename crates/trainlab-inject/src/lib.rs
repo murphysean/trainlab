@@ -1076,6 +1076,7 @@ mod tests {
 
     #[test]
     fn test_initialize_session_handshake() {
+        let _guard = network::TEST_MUTEX.lock().unwrap();
         let mem = SelfProcess;
         let req = Request::InitializeSession {
             features: trainlab_core::protocol::InjectFeaturesConfig::default(),

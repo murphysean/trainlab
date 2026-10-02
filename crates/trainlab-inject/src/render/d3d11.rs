@@ -283,6 +283,12 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
         return;
     }
 
+    static CALL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let c = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if c == 1 || c % 300 == 0 {
+        crate::render::log_render(format!("render_overlay_frame call #{c} for swapchain {swapchain_ptr:?}"));
+    }
+
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut lock = match RENDERER.lock() {
             Ok(l) => l,
@@ -294,13 +300,21 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
 
             let device: ID3D11Device = match unsafe { sc.GetDevice() } {
                 Ok(d) => d,
-                Err(_) => return,
+                Err(e) => {
+                    crate::render::log_render(format!("render_overlay_frame: sc.GetDevice() FAILED: {e:?}"));
+                    return;
+                }
             };
 
             let context: ID3D11DeviceContext = match unsafe { device.GetImmediateContext() } {
                 Ok(ctx) => ctx,
-                Err(_) => return,
+                Err(e) => {
+                    crate::render::log_render(format!("render_overlay_frame: device.GetImmediateContext() FAILED: {e:?}"));
+                    return;
+                }
             };
+
+            crate::render::log_render("render_overlay_frame: acquired D3D11 device and immediate context");
 
             *lock = Some(RendererState {
                 device,
@@ -333,16 +347,22 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
         // 1. Resolve Backbuffer Render Target View
         if state.rtv.is_none() {
             let sc: &IDXGISwapChain = unsafe { std::mem::transmute(&swapchain_ptr) };
-            if let Ok(backbuffer) = unsafe { sc.GetBuffer::<ID3D11Texture2D>(0) } {
-                let mut rtv = None;
-                if (unsafe {
-                    state
-                        .device
-                        .CreateRenderTargetView(&backbuffer, None, Some(&mut rtv))
-                })
-                .is_ok()
-                {
-                    state.rtv = rtv;
+            match unsafe { sc.GetBuffer::<ID3D11Texture2D>(0) } {
+                Ok(backbuffer) => {
+                    let mut rtv = None;
+                    if let Err(e) = unsafe {
+                        state
+                            .device
+                            .CreateRenderTargetView(&backbuffer, None, Some(&mut rtv))
+                    } {
+                        crate::render::log_render(format!("render_overlay_frame: CreateRenderTargetView FAILED: {e:?}"));
+                    } else {
+                        crate::render::log_render("render_overlay_frame: created RenderTargetView");
+                        state.rtv = rtv;
+                    }
+                }
+                Err(e) => {
+                    crate::render::log_render(format!("render_overlay_frame: sc.GetBuffer(0) FAILED: {e:?}"));
                 }
             }
         }
@@ -354,12 +374,23 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
 
         // 2. Compile and Initialize Shaders and Input Layout on First Run
         if state.vertex_shader.is_none() {
-            let compiler_dll = unsafe { LoadLibraryA(b"d3dcompiler_47.dll\0".as_ptr()) };
-            let d3d_compile_ptr = if compiler_dll != std::ptr::null_mut() {
-                unsafe { GetProcAddress(compiler_dll, b"D3DCompile\0".as_ptr()) }
-            } else {
-                None
-            };
+            let mut compiler_dll = unsafe { LoadLibraryA(b"d3dcompiler_47.dll\0".as_ptr()) };
+            if compiler_dll == std::ptr::null_mut() {
+                compiler_dll = unsafe { LoadLibraryA(b"d3dcompiler_46.dll\0".as_ptr()) };
+            }
+            if compiler_dll == std::ptr::null_mut() {
+                compiler_dll = unsafe { LoadLibraryA(b"d3dcompiler_43.dll\0".as_ptr()) };
+            }
+            if compiler_dll == std::ptr::null_mut() {
+                compiler_dll = unsafe { LoadLibraryA(b"d3dcompiler.dll\0".as_ptr()) };
+            }
+
+            if compiler_dll == std::ptr::null_mut() {
+                crate::render::log_render("render_overlay_frame: FAILED to load any d3dcompiler DLL");
+                return;
+            }
+
+            let d3d_compile_ptr = unsafe { GetProcAddress(compiler_dll, b"D3DCompile\0".as_ptr()) };
 
             if let Some(compile_proc) = d3d_compile_ptr {
                 let d3d_compile: FnD3DCompile = unsafe { std::mem::transmute(compile_proc) };

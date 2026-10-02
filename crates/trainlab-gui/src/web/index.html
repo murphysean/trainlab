@@ -284,6 +284,7 @@
       </div>
     </div>
     <div class="controls">
+      <button onclick="attachGame()" style="border-color: var(--accent); color: var(--accent);">🚀 Attach & Inject</button>
       <button onclick="sendWindowCmd('show')" style="border-color: var(--success); color: var(--success);">👁 Show GUI</button>
       <button onclick="sendWindowCmd('hide')" style="border-color: var(--danger); color: var(--danger);">🙈 Hide GUI</button>
       <select id="profile-select">
@@ -566,6 +567,20 @@
         });
       } finally {
         if (btn) { btn.textContent = '▶ Run'; btn.disabled = false; }
+      }
+    }
+
+    async function attachGame() {
+      try {
+        const res = await fetchJson(`${API}/attach`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        alert(`Attached to ${res.game} (PID ${res.pid || '?'})! Version: ${res.version || 'active'}`);
+        refreshAll();
+      } catch (e) {
+        alert(`Attach failed: ${e.message}`);
       }
     }
 

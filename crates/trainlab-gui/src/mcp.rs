@@ -934,6 +934,9 @@ pub struct AttachGameArgs {
     /// already-injected DLL (e.g. the GUI already injected it). Default true.
     #[serde(default = "default_true")]
     pub inject: bool,
+    /// If true, automatically perform session handshake (DXGI overlay hooks) and load matching profile. Default true.
+    #[serde(default = "default_true")]
+    pub auto_init: bool,
 }
 
 /// Arguments for [`set_connection`].
@@ -1125,47 +1128,29 @@ impl TrainlabMcpServer {
     /// setup loop — an agent can bring up the whole trainer on a Steam
     /// Deck/Steam machine without touching the GUI.
     #[tool(
-        description = "Attach to a game by name: find the process, inject the DLL, connect to its listener, and report status. Set game to the exe name (e.g. 'Unrailed2.exe')."
+        description = "Attach to a game by name: find the process, inject the DLL, connect to its listener, initialize DXGI overlay session, load matching cheat profile, and report status. Set game to the exe name (e.g. 'helldivers.exe')."
     )]
     fn attach_game(
         &self,
         Parameters(args): Parameters<AttachGameArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Update the session's target game and DLL path.
-        {
-            let mut s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            s.set_game_name(args.game.clone());
-            if let Some(p) = &args.dll_path {
+        if let Some(p) = &args.dll_path {
+            if let Ok(mut s) = self.session.lock() {
                 s.set_dll_path(p.clone());
             }
         }
-        // Resolve the DLL path relative to the GUI exe (mirrors the GUI).
-        let dll_path = {
-            let s = self
-                .session
-                .lock()
-                .map_err(|_| err("session lock poisoned"))?;
-            let raw = s.dll_path().to_string();
-            if raw.contains('/') || raw.contains('\\') {
-                raw
-            } else if let Ok(exe) = std::env::current_exe() {
-                exe.parent()
-                    .map(|d| d.join(&raw).to_string_lossy().into_owned())
-                    .unwrap_or(raw)
-            } else {
-                raw
-            }
-        };
-        if let Ok(mut s) = self.session.lock() {
-            s.set_dll_path(dll_path.clone());
-        }
 
         let result = if args.inject {
-            crate::controller::find_inject_connect(&self.session)
+            crate::controller::attach_and_initialize(
+                &self.session,
+                Some(&args.game),
+                args.auto_init,
+                "MCP",
+            )
         } else {
+            if let Ok(mut s) = self.session.lock() {
+                s.set_game_name(args.game.clone());
+            }
             crate::controller::check_connection(&self.session)
         };
         match result {
