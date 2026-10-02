@@ -29,6 +29,12 @@ pub enum Event {
     CheatToggled { id: u64, enabled: bool },
     /// A button cheat or action was triggered (e.g. from in-game overlay).
     CheatTriggered { id: u64 },
+    /// Result confirmation of a cheat execution (success/failure) pushed from GUI to overlay.
+    CheatExecuted {
+        id: u64,
+        success: bool,
+        message: Option<String>,
+    },
     /// A cheat's value or pinned target changed.
     CheatValueChanged {
         id: u64,

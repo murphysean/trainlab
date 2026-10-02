@@ -212,3 +212,94 @@ pub fn unregister_hotkey(_hwnd: isize, _id: i32) {}
 pub fn poll_wm_hotkey() -> Option<i32> {
     None
 }
+
+#[derive(Debug, Clone)]
+pub enum HotkeyCommand {
+    Sync(Vec<(i32, u64, HotkeySpec)>),
+}
+
+/// A dedicated background worker for Win32 global hotkeys.
+/// Ensures hotkeys (including window toggle 'J' and cheat hotkeys) respond
+/// reliably even when the trainer GUI window is minimized, hidden, or backgrounded.
+#[derive(Clone)]
+pub struct HotkeyManager {
+    cmd_tx: std::sync::mpsc::Sender<HotkeyCommand>,
+}
+
+impl HotkeyManager {
+    pub fn spawn(session: crate::session::SharedSession) -> Self {
+        let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<HotkeyCommand>();
+
+        #[cfg(target_os = "windows")]
+        std::thread::Builder::new()
+            .name("trainlab-hotkeys".into())
+            .spawn(move || {
+                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                    PeekMessageW, PM_REMOVE, WM_HOTKEY, MSG,
+                };
+                let mut current_specs: std::collections::HashMap<i32, (u64, HotkeySpec)> =
+                    std::collections::HashMap::new();
+
+                loop {
+                    // 1. Drain commands from channel
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        match cmd {
+                            HotkeyCommand::Sync(desired) => {
+                                for (id, _) in current_specs.drain() {
+                                    unregister_hotkey(0, id);
+                                }
+                                for (id, cheat_id, spec) in desired {
+                                    if register_hotkey(0, id, spec).is_ok() {
+                                        current_specs.insert(id, (cheat_id, spec));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Poll WM_HOTKEY for THIS thread
+                    unsafe {
+                        let mut msg: MSG = std::mem::zeroed();
+                        while PeekMessageW(
+                            &mut msg,
+                            std::ptr::null_mut(),
+                            WM_HOTKEY,
+                            WM_HOTKEY,
+                            PM_REMOVE,
+                        ) != 0
+                        {
+                            let hotkey_id = msg.wParam as i32;
+                            if hotkey_id == 9999 {
+                                if let Ok(mut s) = session.lock() {
+                                    s.request_window_cmd("toggle");
+                                }
+                            } else if let Some((cheat_id, _)) = current_specs.get(&hotkey_id) {
+                                if let Ok(s) = session.lock() {
+                                    s.publish_event(trainlab_core::event::BusEvent::Protocol(
+                                        trainlab_core::protocol::Event::CheatTriggered {
+                                            id: *cheat_id,
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+            .ok();
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (cmd_rx, session);
+        }
+
+        Self { cmd_tx }
+    }
+
+    pub fn sync(&self, hotkeys: Vec<(i32, u64, HotkeySpec)>) {
+        let _ = self.cmd_tx.send(HotkeyCommand::Sync(hotkeys));
+    }
+}
+

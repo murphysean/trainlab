@@ -262,12 +262,9 @@ pub fn push_controller_input(slot: usize, just_pressed: u16, thumb_ly: i16, thum
                         if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
                             out.push(Event::CheatTriggered { id });
                         }
-                        if let Ok(mut tf) = TRIGGER_FLASH.lock() {
-                            *tf = Some((id, std::time::Instant::now()));
-                        }
                         if let Ok(mut toast) = STATUS_TOAST.lock() {
                             *toast = Some((
-                                format!("Triggered '{}'", cheat.label),
+                                format!("Running '{}'...", cheat.label),
                                 true,
                                 std::time::Instant::now(),
                             ));
@@ -416,6 +413,27 @@ pub fn apply_event(event: Event) {
         }
         Event::AcknowledgePacket { id, .. } => {
             crate::network::acknowledge_packet(id);
+        }
+        Event::CheatExecuted { id, success, message } => {
+            let label = if let Ok(cheats) = CHEATS.lock() {
+                cheats.iter().find(|c| c.id == id).map(|c| c.label.clone()).unwrap_or_else(|| format!("Cheat #{id}"))
+            } else {
+                format!("Cheat #{id}")
+            };
+            if success {
+                if let Ok(mut tf) = TRIGGER_FLASH.lock() {
+                    *tf = Some((id, std::time::Instant::now()));
+                }
+                if let Ok(mut toast) = STATUS_TOAST.lock() {
+                    let msg = message.unwrap_or_else(|| format!("Executed '{label}'"));
+                    *toast = Some((format!("✓ {msg}"), true, std::time::Instant::now()));
+                }
+            } else {
+                if let Ok(mut toast) = STATUS_TOAST.lock() {
+                    let err = message.unwrap_or_else(|| "Command failed".to_string());
+                    *toast = Some((format!("✗ Error: '{label}': {err}"), false, std::time::Instant::now()));
+                }
+            }
         }
         _ => {}
     }
@@ -874,12 +892,9 @@ pub fn render_in_game_egui(
                                     if let Ok(mut out) = OUTBOUND_EVENTS.lock() {
                                         out.push(Event::CheatTriggered { id: cheat_id });
                                     }
-                                    if let Ok(mut tf) = TRIGGER_FLASH.lock() {
-                                        *tf = Some((cheat_id, std::time::Instant::now()));
-                                    }
                                     if let Ok(mut toast) = STATUS_TOAST.lock() {
                                         *toast = Some((
-                                            format!("Triggered '{}'", cheat.label),
+                                            format!("Running '{}'...", cheat.label),
                                             true,
                                             std::time::Instant::now(),
                                         ));

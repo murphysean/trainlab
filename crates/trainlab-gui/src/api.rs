@@ -513,6 +513,14 @@ async fn run_cheat(
                 s.log_activity("API", format!("button '{}' completed ok", label));
             }
             state.request_repaint();
+            crate::controller::emit_event_to_dll(
+                &state.session,
+                trainlab_core::protocol::Event::CheatExecuted {
+                    id: req.cheat_id,
+                    success: true,
+                    message: Some(format!("Executed '{label}'")),
+                },
+            );
             Ok(Json(serde_json::json!({
                 "status": "ok",
                 "cheat_id": req.cheat_id,
@@ -525,6 +533,14 @@ async fn run_cheat(
                 s.log_activity("API", format!("button '{}' failed: {e}", label));
             }
             state.request_repaint();
+            crate::controller::emit_event_to_dll(
+                &state.session,
+                trainlab_core::protocol::Event::CheatExecuted {
+                    id: req.cheat_id,
+                    success: false,
+                    message: Some(e.clone()),
+                },
+            );
             Err(err(format!("button '{}' failed: {e}", label)))
         }
     }

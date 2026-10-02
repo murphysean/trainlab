@@ -70,11 +70,11 @@ struct RegisteredHotkey {
 
 /// Execution status of a button cheat (for real-time GUI feedback).
 #[derive(Debug, Clone, Default)]
-struct ButtonStatus {
-    last_error: Option<String>,
-    last_error_time: Option<std::time::Instant>,
-    failure_count: usize,
-    last_success_time: Option<std::time::Instant>,
+pub struct ButtonStatus {
+    pub last_error: Option<String>,
+    pub last_error_time: Option<std::time::Instant>,
+    pub failure_count: usize,
+    pub last_success_time: Option<std::time::Instant>,
 }
 
 struct TrainlabApp {
@@ -103,11 +103,12 @@ struct TrainlabApp {
 
     // Cheats panel: editable value strings keyed by cheat id, editable hotkey strings,
     // active Win32 registered hotkeys, and a flag to show the panel.
-    cheat_values: std::collections::HashMap<u64, String>,
+    cheat_values: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>,
     cheat_values_cache: std::collections::HashMap<u64, (std::time::Instant, Option<Vec<u8>>)>,
     cheat_hotkey_inputs: std::collections::HashMap<u64, String>,
     registered_hotkeys: std::collections::HashMap<i32, RegisteredHotkey>,
     button_statuses: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>,
+    hotkey_manager: hotkeys::HotkeyManager,
     show_cheats: bool,
 
     // Value Search state
@@ -195,13 +196,21 @@ impl Default for TrainlabApp {
 
 impl TrainlabApp {
     fn new(session: SharedSession) -> Self {
-        Self::with_config(session, config::AppConfig::load())
+        let button_statuses = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let cheat_values = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        Self::with_config(session, config::AppConfig::load(), button_statuses, cheat_values)
     }
 
-    fn with_config(session: SharedSession, config: config::AppConfig) -> Self {
+    fn with_config(
+        session: SharedSession,
+        config: config::AppConfig,
+        button_statuses: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>,
+        cheat_values: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>,
+    ) -> Self {
         // The game executable to inject into. Overridable via TRAINLAB_GAME env var.
         let game_name = std::env::var("TRAINLAB_GAME").unwrap_or_default();
         let bus_rx = session.lock().unwrap().event_bus().subscribe();
+        let hotkey_manager = hotkeys::HotkeyManager::spawn(session.clone());
         let mut app = Self {
             session,
             host: config.inject.dll_host.clone(),
@@ -215,13 +224,12 @@ impl TrainlabApp {
             mem_ops: vec![MemOp::default()],
             aob_scans: vec![AobScan::default()],
             regions: Vec::new(),
-            cheat_values: std::collections::HashMap::new(),
+            cheat_values,
             cheat_values_cache: std::collections::HashMap::new(),
             cheat_hotkey_inputs: std::collections::HashMap::new(),
             registered_hotkeys: std::collections::HashMap::new(),
-            button_statuses: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            button_statuses,
+            hotkey_manager,
             show_cheats: true,
             scan_val: "".into(),
             scan_val_max: "".into(),
@@ -440,8 +448,9 @@ impl TrainlabApp {
                         let _marker_edit_key = format!("marker_val_{label}");
                         let mut edit_val = self
                             .cheat_values
-                            .get(&{ *addr })
-                            .cloned()
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(addr).cloned())
                             .unwrap_or_default();
 
                         ui.horizontal(|ui| {
@@ -451,7 +460,9 @@ impl TrainlabApp {
                                     .desired_width(90.0),
                             );
                             if text_edit.changed() {
-                                self.cheat_values.insert(*addr, edit_val.clone());
+                                if let Ok(mut m) = self.cheat_values.lock() {
+                                    m.insert(*addr, edit_val.clone());
+                                }
                             }
                             if ui.button("Write i32").clicked() {
                                 write_op = Some((
@@ -690,7 +701,9 @@ impl TrainlabApp {
                         cheats_count: 0,
                     }));
                 }
-                self.cheat_values.clear();
+                if let Ok(mut m) = self.cheat_values.lock() {
+                    m.clear();
+                }
             }
         });
         ui.separator();
@@ -758,15 +771,20 @@ impl TrainlabApp {
                                 ui.monospace(format!("[{current}]"));
 
                                 // Editable field (persisted per cheat id).
-                                let field = self_ptr
+                                let mut field_val = self_ptr
                                     .cheat_values
-                                    .entry(cheat.id)
-                                    .or_insert_with(|| current.clone());
-                                ui.text_edit_singleline(field);
+                                    .lock()
+                                    .ok()
+                                    .and_then(|m| m.get(&cheat.id).cloned())
+                                    .unwrap_or_else(|| current.clone());
+                                if ui.text_edit_singleline(&mut field_val).changed() {
+                                    if let Ok(mut m) = self_ptr.cheat_values.lock() {
+                                        m.insert(cheat.id, field_val.clone());
+                                    }
+                                }
 
                                 if ui.button("Apply").clicked() {
                                     if target_addr != 0 {
-                                        let field_val = field.clone();
                                         let data = parse_value_bytes(&field_val, *value_type);
                                         match data {
                                             Ok(bytes) => {
@@ -843,7 +861,12 @@ impl TrainlabApp {
                                             };
 
                                             let field_key = cheat.id * 1000 + idx as u64;
-                                            let mut edit_val = self_ptr.cheat_values.get(&field_key).cloned().unwrap_or_else(|| current.clone());
+                                            let mut edit_val = self_ptr
+                                                .cheat_values
+                                                .lock()
+                                                .ok()
+                                                .and_then(|m| m.get(&field_key).cloned())
+                                                .unwrap_or_else(|| current.clone());
                                             let mut do_write = false;
 
                                             ui.horizontal(|ui| {
@@ -852,7 +875,9 @@ impl TrainlabApp {
                                                 ui.label(format!("now: {current}"));
                                                 let text_edit = ui.add(egui::TextEdit::singleline(&mut edit_val).desired_width(70.0));
                                                 if text_edit.changed() {
-                                                    self_ptr.cheat_values.insert(field_key, edit_val.clone());
+                                                    if let Ok(mut m) = self_ptr.cheat_values.lock() {
+                                                        m.insert(field_key, edit_val.clone());
+                                                    }
                                                 }
                                                 if ui.button("Apply").clicked() {
                                                     do_write = true;
@@ -1142,20 +1167,26 @@ impl TrainlabApp {
             }
 
             // Register newly desired hotkeys.
-            for (id, (cheat_id, spec, display)) in desired {
-                if !self.registered_hotkeys.contains_key(&id) {
-                    if let Ok(()) = hotkeys::register_hotkey(raw_hwnd, id, spec) {
+            for (id, (cheat_id, spec, display)) in &desired {
+                if !self.registered_hotkeys.contains_key(id) {
+                    if let Ok(()) = hotkeys::register_hotkey(raw_hwnd, *id, *spec) {
                         self.registered_hotkeys.insert(
-                            id,
+                            *id,
                             RegisteredHotkey {
-                                cheat_id,
-                                spec,
-                                display,
+                                cheat_id: *cheat_id,
+                                spec: *spec,
+                                display: display.clone(),
                             },
                         );
                     }
                 }
             }
+
+            let hotkeys_to_sync: Vec<(i32, u64, hotkeys::HotkeySpec)> = desired
+                .iter()
+                .map(|(id, (cheat_id, spec, _))| (*id, *cheat_id, *spec))
+                .collect();
+            self.hotkey_manager.sync(hotkeys_to_sync);
         }
     }
 
@@ -1167,225 +1198,13 @@ impl TrainlabApp {
 
     /// Trigger a cheat by id with a specific origin source (e.g. "HOTKEY", "OVERLAY", "UI").
     fn trigger_cheat_with_source(&mut self, cheat_id: u64, source: &str) {
-        let (label, kind) = match self.session.lock() {
-            Ok(s) => match s.get_cheat(cheat_id) {
-                Some(c) => (c.label.clone(), c.kind.clone()),
-                None => return,
-            },
-            Err(_) => return,
-        };
-
-        match kind {
-            CheatKind::Toggle {
-                target,
-                hook,
-                enabled,
-                original_bytes,
-                ..
-            } => {
-                // T-112: Hotkey/Overlay toggle drives the real cave — install on enable, restore on disable.
-                let new_state = !enabled;
-                if new_state {
-                    // Enable: install the cave.
-                    let r = self.request(&Request::InstallCave {
-                        target,
-                        hook: hook.clone(),
-                    });
-                    match r {
-                        Some(Response::CaveInstalled { cave, original, .. }) => {
-                            let check_req = Request::Read {
-                                address: target,
-                                len: 1,
-                            };
-                            let verified = match self.request(&check_req) {
-                                Some(Response::Read { data }) => {
-                                    matches!(data.first(), Some(0xe9 | 0xff | 0xeb))
-                                }
-                                _ => false,
-                            };
-
-                            if verified {
-                                if let Ok(mut s) = self.session.lock() {
-                                    s.set_toggle_cave_info(cheat_id, original.clone(), cave);
-                                    s.set_cheat_toggle(cheat_id, true);
-                                }
-                                self.log_with_source(source, format!(
-                                    "toggled '{}' -> ENABLED (cave @ {cave:#x}, target {target:#x})",
-                                    label
-                                ));
-                            } else {
-                                if let Ok(mut s) = self.session.lock() {
-                                    s.set_cheat_toggle(cheat_id, false);
-                                }
-                                self.log_with_source(source, format!(
-                                    "toggle '{}' enable FAILED (@ {target:#x}): target memory did not show active jump hook after cave install",
-                                    label
-                                ));
-                            }
-                        }
-                        _ => {
-                            if let Ok(mut s) = self.session.lock() {
-                                s.set_cheat_toggle(cheat_id, false);
-                            }
-                            self.log_with_source(
-                                source,
-                                format!("toggle '{}' enable FAILED (cave @ {target:#x})", label),
-                            );
-                        }
-                    }
-                } else {
-                    // Disable: restore original bytes.
-                    if !original_bytes.is_empty() {
-                        let r = self.request(&Request::Write {
-                            address: target,
-                            data: original_bytes.clone(),
-                        });
-                        match r {
-                            Some(Response::Write { bytes_written }) => {
-                                if let Ok(mut s) = self.session.lock() {
-                                    s.set_cheat_toggle(cheat_id, false);
-                                }
-                                self.log_with_source(source, format!(
-                                    "toggled '{}' -> DISABLED (restored {bytes_written} bytes @ {target:#x})",
-                                    label
-                                ));
-                            }
-                            _ => self.log_with_source(
-                                source,
-                                format!(
-                                    "toggle '{}' disable FAILED (restore @ {target:#x})",
-                                    label
-                                ),
-                            ),
-                        }
-                    } else {
-                        self.log_with_source(source, format!(
-                            "toggle '{}' disable: no stored original bytes; use MCP set_cheat_toggle",
-                            label
-                        ));
-                    }
-                }
-            }
-            CheatKind::Patch {
-                target,
-                patch_bytes,
-                original_bytes,
-                enabled,
-                cave_ref,
-            } => {
-                let new_state = !enabled;
-                let desc = cave_ref.as_deref().unwrap_or("fast patch");
-                let bytes_to_write = if new_state {
-                    patch_bytes
-                } else {
-                    original_bytes
-                };
-                if !bytes_to_write.is_empty() {
-                    let r = self.request(&Request::Write {
-                        address: target,
-                        data: bytes_to_write,
-                    });
-                    match r {
-                        Some(Response::Write { bytes_written }) => {
-                            if let Ok(mut s) = self.session.lock() {
-                                s.set_cheat_toggle(cheat_id, new_state);
-                            }
-                            self.log_with_source(source, format!(
-                                "toggled patch '{}' -> {} ({bytes_written} bytes @ {target:#x}, {desc})",
-                                label,
-                                if new_state { "ENABLED" } else { "DISABLED" }
-                            ));
-                        }
-                        _ => self.log_with_source(
-                            source,
-                            format!(
-                                "toggle patch '{}' {} FAILED (@ {target:#x})",
-                                label,
-                                if new_state { "enable" } else { "disable" }
-                            ),
-                        ),
-                    }
-                }
-            }
-            CheatKind::Button { commands } => {
-                self.log_with_source(
-                    source,
-                    format!(
-                        "triggered button '{}': running {} command(s)...",
-                        label,
-                        commands.len()
-                    ),
-                );
-                match self.run_cheat_commands(&commands) {
-                    Ok(()) => {
-                        self.log_with_source(source, format!("button '{}' completed ok", label));
-                        if let Ok(mut map) = self.button_statuses.lock() {
-                            let status = map.entry(cheat_id).or_default();
-                            status.last_error = None;
-                            status.failure_count = 0;
-                            status.last_success_time = Some(std::time::Instant::now());
-                        }
-                    }
-                    Err(e) => {
-                        self.log_with_source(source, format!("button '{}' failed: {e}", label));
-                        if let Ok(mut map) = self.button_statuses.lock() {
-                            let status = map.entry(cheat_id).or_default();
-                            status.last_error = Some(e);
-                            status.last_error_time = Some(std::time::Instant::now());
-                            status.failure_count = status.failure_count.saturating_add(1);
-                        }
-                    }
-                }
-            }
-            CheatKind::Value {
-                address,
-                value_type,
-                address_expr,
-            } => {
-                let target_addr = if let Some(expr) = address_expr {
-                    mcp::parse_addr_expr(&self.session, &expr).unwrap_or(address)
-                } else {
-                    address
-                };
-                // For value cheats, re-apply the value currently in the edit box if present.
-                if let Some(val_str) = self.cheat_values.get(&cheat_id).cloned()
-                    && let Ok(bytes) = parse_value_bytes(&val_str, value_type)
-                {
-                    let r = self.request(&Request::Write {
-                        address: target_addr,
-                        data: bytes,
-                    });
-                    match r {
-                        Some(Response::Write { bytes_written }) => {
-                            self.log_with_source(
-                                source,
-                                format!("applied '{}' = {val_str} ({bytes_written} bytes)", label),
-                            );
-                        }
-                        _ => self.log_with_source(source, format!("apply for '{}' failed", label)),
-                    }
-                }
-            }
-            CheatKind::Struct {
-                base_address,
-                base_expr,
-                fields,
-            } => {
-                let base_addr = if !base_expr.is_empty() {
-                    mcp::parse_addr_expr(&self.session, &base_expr).unwrap_or(base_address)
-                } else {
-                    base_address
-                };
-                self.log_with_source(
-                    source,
-                    format!(
-                        "triggered struct '{}' (@ {base_addr:#x}): {} field(s)",
-                        label,
-                        fields.len()
-                    ),
-                );
-            }
-        }
+        execute_cheat_trigger(
+            &self.session,
+            cheat_id,
+            source,
+            Some(&self.button_statuses),
+            Some(&self.cheat_values),
+        );
     }
 
     /// Trigger a cheat by id with default "UI" source.
@@ -1773,6 +1592,387 @@ impl TrainlabApp {
     }
 }
 
+/// Standalone cheat execution driver. Runs on any background worker, UI thread,
+/// or IPC listener task decoupled from the GUI rendering frames.
+pub fn execute_cheat_trigger(
+    session: &SharedSession,
+    cheat_id: u64,
+    source: &str,
+    button_statuses: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>>,
+    cheat_values: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>>,
+) {
+    let (label, kind) = match session.lock() {
+        Ok(s) => match s.get_cheat(cheat_id) {
+            Some(c) => (c.label.clone(), c.kind.clone()),
+            None => return,
+        },
+        Err(_) => return,
+    };
+
+    match kind {
+        CheatKind::Toggle { .. } | CheatKind::Patch { .. } => {
+            execute_cheat_toggle(session, cheat_id, None, source, button_statuses, cheat_values);
+        }
+        CheatKind::Button { commands } => {
+            if let Ok(mut s) = session.lock() {
+                s.log_activity(
+                    source,
+                    format!("button '{}' triggered: running {} command(s)...", label, commands.len()),
+                );
+            }
+            match mcp::execute_profile_commands(session, &commands) {
+                Ok(()) => {
+                    if let Ok(mut s) = session.lock() {
+                        s.log_activity(source, format!("button '{}' completed ok", label));
+                    }
+                    if let Some(statuses) = button_statuses
+                        && let Ok(mut map) = statuses.lock()
+                    {
+                        let status = map.entry(cheat_id).or_default();
+                        status.last_error = None;
+                        status.failure_count = 0;
+                        status.last_success_time = Some(std::time::Instant::now());
+                    }
+                    controller::emit_event_to_dll(
+                        session,
+                        trainlab_core::protocol::Event::CheatExecuted {
+                            id: cheat_id,
+                            success: true,
+                            message: Some(format!("Executed '{label}'")),
+                        },
+                    );
+                }
+                Err(e) => {
+                    if let Ok(mut s) = session.lock() {
+                        s.log_activity(source, format!("button '{}' failed: {e}", label));
+                    }
+                    if let Some(statuses) = button_statuses
+                        && let Ok(mut map) = statuses.lock()
+                    {
+                        let status = map.entry(cheat_id).or_default();
+                        status.last_error = Some(e.clone());
+                        status.last_error_time = Some(std::time::Instant::now());
+                        status.failure_count = status.failure_count.saturating_add(1);
+                    }
+                    controller::emit_event_to_dll(
+                        session,
+                        trainlab_core::protocol::Event::CheatExecuted {
+                            id: cheat_id,
+                            success: false,
+                            message: Some(e),
+                        },
+                    );
+                }
+            }
+        }
+        CheatKind::Value {
+            address,
+            value_type,
+            address_expr,
+        } => {
+            let target_addr = if let Some(expr) = address_expr {
+                mcp::parse_addr_expr(session, &expr).unwrap_or(address)
+            } else {
+                address
+            };
+            let val_opt = cheat_values.and_then(|cv| cv.lock().ok().and_then(|m| m.get(&cheat_id).cloned()));
+            if let Some(val_str) = val_opt
+                && let Ok(bytes) = parse_value_bytes(&val_str, value_type)
+            {
+                let r = controller::request(session, &Request::Write {
+                    address: target_addr,
+                    data: bytes,
+                });
+                match r {
+                    Ok(Response::Write { bytes_written }) => {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity(
+                                source,
+                                format!("applied '{}' = {val_str} ({bytes_written} bytes)", label),
+                            );
+                        }
+                        controller::emit_event_to_dll(
+                            session,
+                            trainlab_core::protocol::Event::CheatExecuted {
+                                id: cheat_id,
+                                success: true,
+                                message: Some(format!("Applied '{label}' = {val_str}")),
+                            },
+                        );
+                    }
+                    _ => {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity(source, format!("apply for '{}' failed", label));
+                        }
+                        controller::emit_event_to_dll(
+                            session,
+                            trainlab_core::protocol::Event::CheatExecuted {
+                                id: cheat_id,
+                                success: false,
+                                message: Some(format!("Failed to apply '{label}'")),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        CheatKind::Struct {
+            base_address,
+            base_expr,
+            fields,
+        } => {
+            let base_addr = if !base_expr.is_empty() {
+                mcp::parse_addr_expr(session, &base_expr).unwrap_or(base_address)
+            } else {
+                base_address
+            };
+            if let Ok(mut s) = session.lock() {
+                s.log_activity(
+                    source,
+                    format!("triggered struct '{}' (@ {base_addr:#x}): {} field(s)", label, fields.len()),
+                );
+            }
+            controller::emit_event_to_dll(
+                session,
+                trainlab_core::protocol::Event::CheatExecuted {
+                    id: cheat_id,
+                    success: true,
+                    message: Some(format!("Triggered struct '{label}'")),
+                },
+            );
+        }
+    }
+}
+
+/// Standalone cheat toggle driver. Runs on any background worker, UI thread,
+/// or IPC listener task decoupled from the GUI rendering frames.
+pub fn execute_cheat_toggle(
+    session: &SharedSession,
+    cheat_id: u64,
+    desired_enabled: Option<bool>,
+    source: &str,
+    _button_statuses: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>>,
+    _cheat_values: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>>,
+) {
+    let (label, kind) = match session.lock() {
+        Ok(s) => match s.get_cheat(cheat_id) {
+            Some(c) => (c.label.clone(), c.kind.clone()),
+            None => return,
+        },
+        Err(_) => return,
+    };
+
+    match kind {
+        CheatKind::Toggle {
+            target,
+            hook,
+            enabled,
+            original_bytes,
+            ..
+        } => {
+            let new_state = desired_enabled.unwrap_or(!enabled);
+            if new_state {
+                // Enable: install cave
+                let r = controller::request(session, &Request::InstallCave {
+                    target,
+                    hook: hook.clone(),
+                });
+                match r {
+                    Ok(Response::CaveInstalled { cave, original, .. }) => {
+                        let check_req = Request::Read { address: target, len: 1 };
+                        let verified = match controller::request(session, &check_req) {
+                            Ok(Response::Read { data }) => {
+                                matches!(data.first(), Some(0xe9 | 0xff | 0xeb))
+                            }
+                            _ => false,
+                        };
+
+                        if verified {
+                            if let Ok(mut s) = session.lock() {
+                                s.set_toggle_cave_info(cheat_id, original.clone(), cave);
+                                s.set_cheat_toggle(cheat_id, true);
+                                s.log_activity(
+                                    source,
+                                    format!("toggled '{}' -> ENABLED (cave @ {cave:#x}, target {target:#x})", label),
+                                );
+                            }
+                            controller::emit_event_to_dll(
+                                session,
+                                trainlab_core::protocol::Event::CheatExecuted {
+                                    id: cheat_id,
+                                    success: true,
+                                    message: Some(format!("Enabled '{label}'")),
+                                },
+                            );
+                        } else {
+                            if let Ok(mut s) = session.lock() {
+                                s.set_cheat_toggle(cheat_id, false);
+                                s.log_activity(
+                                    source,
+                                    format!("toggle '{}' enable FAILED (@ {target:#x}): target memory did not show jump hook", label),
+                                );
+                            }
+                            controller::emit_event_to_dll(
+                                session,
+                                trainlab_core::protocol::Event::CheatExecuted {
+                                    id: cheat_id,
+                                    success: false,
+                                    message: Some(format!("Jump hook verification failed")),
+                                },
+                            );
+                        }
+                    }
+                    _ => {
+                        if let Ok(mut s) = session.lock() {
+                            s.set_cheat_toggle(cheat_id, false);
+                            s.log_activity(
+                                source,
+                                format!("toggle '{}' enable FAILED (cave @ {target:#x})", label),
+                            );
+                        }
+                        controller::emit_event_to_dll(
+                            session,
+                            trainlab_core::protocol::Event::CheatExecuted {
+                                id: cheat_id,
+                                success: false,
+                                message: Some(format!("Cave install failed")),
+                            },
+                        );
+                    }
+                }
+            } else {
+                // Disable: restore original bytes
+                if !original_bytes.is_empty() {
+                    let r = controller::request(session, &Request::Write {
+                        address: target,
+                        data: original_bytes.clone(),
+                    });
+                    match r {
+                        Ok(Response::Write { bytes_written }) => {
+                            if let Ok(mut s) = session.lock() {
+                                s.set_cheat_toggle(cheat_id, false);
+                                s.log_activity(
+                                    source,
+                                    format!("toggled '{}' -> DISABLED (restored {bytes_written} bytes @ {target:#x})", label),
+                                );
+                            }
+                            controller::emit_event_to_dll(
+                                session,
+                                trainlab_core::protocol::Event::CheatExecuted {
+                                    id: cheat_id,
+                                    success: true,
+                                    message: Some(format!("Disabled '{label}'")),
+                                },
+                            );
+                        }
+                        _ => {
+                            if let Ok(mut s) = session.lock() {
+                                s.log_activity(
+                                    source,
+                                    format!("toggle '{}' disable FAILED (restore @ {target:#x})", label),
+                                );
+                            }
+                            controller::emit_event_to_dll(
+                                session,
+                                trainlab_core::protocol::Event::CheatExecuted {
+                                    id: cheat_id,
+                                    success: false,
+                                    message: Some(format!("Restore failed")),
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    if let Ok(mut s) = session.lock() {
+                        s.set_cheat_toggle(cheat_id, false);
+                        s.log_activity(
+                            source,
+                            format!("toggle '{}' disable: no stored original bytes", label),
+                        );
+                    }
+                    controller::emit_event_to_dll(
+                        session,
+                        trainlab_core::protocol::Event::CheatExecuted {
+                            id: cheat_id,
+                            success: true,
+                            message: Some(format!("Disabled '{label}'")),
+                        },
+                    );
+                }
+            }
+        }
+        CheatKind::Patch {
+            target,
+            patch_bytes,
+            original_bytes,
+            enabled,
+            cave_ref,
+        } => {
+            let new_state = desired_enabled.unwrap_or(!enabled);
+            let desc = cave_ref.as_deref().unwrap_or("fast patch");
+            let bytes_to_write = if new_state {
+                patch_bytes
+            } else {
+                original_bytes
+            };
+            if !bytes_to_write.is_empty() {
+                let r = controller::request(session, &Request::Write {
+                    address: target,
+                    data: bytes_to_write,
+                });
+                match r {
+                    Ok(Response::Write { bytes_written }) => {
+                        if let Ok(mut s) = session.lock() {
+                            s.set_cheat_toggle(cheat_id, new_state);
+                            s.log_activity(
+                                source,
+                                format!(
+                                    "toggled patch '{}' -> {} ({bytes_written} bytes @ {target:#x}, {desc})",
+                                    label,
+                                    if new_state { "ENABLED" } else { "DISABLED" }
+                                ),
+                            );
+                        }
+                        controller::emit_event_to_dll(
+                            session,
+                            trainlab_core::protocol::Event::CheatExecuted {
+                                id: cheat_id,
+                                success: true,
+                                message: Some(format!(
+                                    "Patch '{}' -> {}",
+                                    label,
+                                    if new_state { "ENABLED" } else { "DISABLED" }
+                                )),
+                            },
+                        );
+                    }
+                    _ => {
+                        if let Ok(mut s) = session.lock() {
+                            s.log_activity(
+                                source,
+                                format!(
+                                    "toggle patch '{}' {} FAILED (@ {target:#x})",
+                                    label,
+                                    if new_state { "enable" } else { "disable" }
+                                ),
+                            );
+                        }
+                        controller::emit_event_to_dll(
+                            session,
+                            trainlab_core::protocol::Event::CheatExecuted {
+                                id: cheat_id,
+                                success: false,
+                                message: Some(format!("Patch toggle failed")),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -1916,6 +2116,15 @@ fn main() -> eframe::Result<()> {
                 }
             });
 
+            let button_statuses = std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            ));
+            let cheat_values = std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            ));
+            let app_button_statuses = button_statuses.clone();
+            let app_cheat_values = cheat_values.clone();
+
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -1929,6 +2138,9 @@ fn main() -> eframe::Result<()> {
                         let s = event_session.lock().unwrap();
                         s.event_bus().subscribe()
                     };
+                    let bg_session = event_session.clone();
+                    let bg_btn = button_statuses.clone();
+                    let bg_cv = cheat_values.clone();
                     tokio::spawn(async move {
                         while let Ok(evt) = rx.recv().await {
                             // Always request a repaint to keep UI live
@@ -1936,6 +2148,49 @@ fn main() -> eframe::Result<()> {
 
                             // Forward relevant session mutations as protocol::Event to the DLL
                             match &evt {
+                                trainlab_core::event::BusEvent::Protocol(
+                                    trainlab_core::protocol::Event::CheatTriggered { id },
+                                ) => {
+                                    let s_clone = bg_session.clone();
+                                    let btn_clone = bg_btn.clone();
+                                    let cv_clone = bg_cv.clone();
+                                    let cheat_id = *id;
+                                    tokio::task::spawn_blocking(move || {
+                                        execute_cheat_trigger(
+                                            &s_clone,
+                                            cheat_id,
+                                            "OVERLAY",
+                                            Some(&btn_clone),
+                                            Some(&cv_clone),
+                                        );
+                                    });
+                                }
+                                trainlab_core::event::BusEvent::Protocol(
+                                    trainlab_core::protocol::Event::CheatToggled { id, enabled },
+                                ) => {
+                                    let s_clone = bg_session.clone();
+                                    let btn_clone = bg_btn.clone();
+                                    let cv_clone = bg_cv.clone();
+                                    let cheat_id = *id;
+                                    let en = *enabled;
+                                    tokio::task::spawn_blocking(move || {
+                                        execute_cheat_toggle(
+                                            &s_clone,
+                                            cheat_id,
+                                            Some(en),
+                                            "OVERLAY",
+                                            Some(&btn_clone),
+                                            Some(&cv_clone),
+                                        );
+                                    });
+                                }
+                                trainlab_core::event::BusEvent::Protocol(
+                                    trainlab_core::protocol::Event::WindowCommand { command },
+                                ) => {
+                                    if let Ok(mut s) = bg_session.lock() {
+                                        s.request_window_cmd(command);
+                                    }
+                                }
                                 trainlab_core::event::BusEvent::Session(
                                     crate::event::SessionEvent::CheatUpdated {
                                         id,
@@ -1946,7 +2201,7 @@ fn main() -> eframe::Result<()> {
                                 ) => {
                                     if let Some(en) = enabled {
                                         controller::emit_event_to_dll(
-                                            &event_session,
+                                            &bg_session,
                                             trainlab_core::protocol::Event::CheatToggled {
                                                 id: *id,
                                                 enabled: *en,
@@ -1960,7 +2215,7 @@ fn main() -> eframe::Result<()> {
                                             None
                                         };
                                         controller::emit_event_to_dll(
-                                            &event_session,
+                                            &bg_session,
                                             trainlab_core::protocol::Event::CheatValueChanged {
                                                 id: *id,
                                                 value_str: val_str.clone(),
@@ -1972,13 +2227,13 @@ fn main() -> eframe::Result<()> {
                                 trainlab_core::event::BusEvent::Session(
                                     crate::event::SessionEvent::ProfileLoaded { .. },
                                 ) => {
-                                    let cheats_dto = if let Ok(s) = event_session.lock() {
+                                    let cheats_dto = if let Ok(s) = bg_session.lock() {
                                         s.export_overlay_cheats()
                                     } else {
                                         Vec::new()
                                     };
                                     controller::emit_event_to_dll(
-                                        &event_session,
+                                        &bg_session,
                                         trainlab_core::protocol::Event::SyncCheats {
                                             cheats: cheats_dto,
                                         },
@@ -1994,7 +2249,7 @@ fn main() -> eframe::Result<()> {
 
                                     if let Some(ptr) = staged_ptr {
                                         // Out-of-band shared memory retrieval
-                                        if let Ok(proc) = crate::mcp::game_process(&event_session)
+                                        if let Ok(proc) = crate::mcp::game_process(&bg_session)
                                             && let Ok(full_payload) = proc.read(ptr, payload_len)
                                         {
                                             let _ = std::fs::create_dir_all("captures");
@@ -2005,7 +2260,7 @@ fn main() -> eframe::Result<()> {
                                         }
                                         // Fast-ACK: tell the injected DLL to free the staging buffer immediately
                                         controller::emit_event_to_dll(
-                                            &event_session,
+                                            &bg_session,
                                             trainlab_core::protocol::Event::AcknowledgePacket {
                                                 id,
                                                 discard: false,
@@ -2014,7 +2269,7 @@ fn main() -> eframe::Result<()> {
                                     }
 
                                     // Store updated packet in session ring buffer
-                                    if let Ok(mut s) = event_session.lock() {
+                                    if let Ok(mut s) = bg_session.lock() {
                                         s.record_network_packet(pkt);
                                     }
                                 }
@@ -2030,7 +2285,7 @@ fn main() -> eframe::Result<()> {
                             {
                                 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
                                 use windows_sys::Win32::UI::WindowsAndMessaging::{
-                                    EnumWindows, FindWindowA, GetWindowTextA, SW_HIDE, SW_RESTORE,
+                                    EnumWindows, FindWindowA, GetWindowTextA, IsWindowVisible, SW_HIDE, SW_RESTORE,
                                     SW_SHOW, SetForegroundWindow, ShowWindow,
                                 };
 
@@ -2073,10 +2328,18 @@ fn main() -> eframe::Result<()> {
                                     if !hwnd.is_null() {
                                         if command == "hide" {
                                             ShowWindow(hwnd, SW_HIDE);
-                                        } else {
+                                        } else if command == "show" {
                                             ShowWindow(hwnd, SW_SHOW);
                                             ShowWindow(hwnd, SW_RESTORE);
                                             SetForegroundWindow(hwnd);
+                                        } else if command == "toggle" {
+                                            if IsWindowVisible(hwnd) != 0 {
+                                                ShowWindow(hwnd, SW_HIDE);
+                                            } else {
+                                                ShowWindow(hwnd, SW_SHOW);
+                                                ShowWindow(hwnd, SW_RESTORE);
+                                                SetForegroundWindow(hwnd);
+                                            }
                                         }
                                     }
                                 }
@@ -2107,7 +2370,12 @@ fn main() -> eframe::Result<()> {
                 });
             });
 
-            Box::new(TrainlabApp::with_config(session, app_config))
+            Box::new(TrainlabApp::with_config(
+                session,
+                app_config,
+                app_button_statuses,
+                app_cheat_values,
+            ))
         }),
     )
 }
@@ -2236,29 +2504,11 @@ impl eframe::App for TrainlabApp {
         while let Ok(evt) = self.bus_rx.try_recv() {
             match evt {
                 trainlab_core::event::BusEvent::Protocol(
-                    trainlab_core::protocol::Event::CheatTriggered { id },
-                ) => {
-                    self.trigger_cheat_with_source(id, "OVERLAY");
-                }
+                    trainlab_core::protocol::Event::CheatTriggered { .. },
+                ) => {}
                 trainlab_core::event::BusEvent::Protocol(
-                    trainlab_core::protocol::Event::CheatToggled { id, enabled },
-                ) => {
-                    let should_toggle = if let Ok(s) = self.session.lock()
-                        && let Some(c) = s.get_cheat(id)
-                    {
-                        let cur_enabled = match &c.kind {
-                            CheatKind::Toggle { enabled: e, .. } => *e,
-                            CheatKind::Patch { enabled: e, .. } => *e,
-                            _ => false,
-                        };
-                        cur_enabled != enabled
-                    } else {
-                        false
-                    };
-                    if should_toggle {
-                        self.trigger_cheat_with_source(id, "OVERLAY");
-                    }
-                }
+                    trainlab_core::protocol::Event::CheatToggled { .. },
+                ) => {}
                 trainlab_core::event::BusEvent::Protocol(
                     trainlab_core::protocol::Event::WindowCommand { command },
                 ) => {
