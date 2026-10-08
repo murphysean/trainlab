@@ -88,9 +88,9 @@ for arg in "$@"; do
     fi
 done
 
-AUTO_ARGS="--auto-attach"
+AUTO_ARGS="--auto-attach --no-fullscreen"
 if [ -n "$GAME_EXE" ]; then
-    AUTO_ARGS="--auto-attach --game $GAME_EXE"
+    AUTO_ARGS="$AUTO_ARGS --game $GAME_EXE"
 fi
 if [ -n "$TRAINLAB_SCALE" ]; then
     AUTO_ARGS="$AUTO_ARGS --scale $TRAINLAB_SCALE"

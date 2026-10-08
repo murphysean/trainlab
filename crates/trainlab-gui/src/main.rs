@@ -1997,6 +1997,7 @@ fn main() -> eframe::Result<()> {
     let mut target_game: Option<String> = std::env::var("TRAINLAB_GAME").ok();
     let mut target_dll: Option<String> = std::env::var("TRAINLAB_DLL").ok();
     let mut cli_scale: Option<f32> = None;
+    let mut force_fullscreen: Option<bool> = None;
 
     let mut arg_idx = 1;
     while arg_idx < cli_args.len() {
@@ -2018,6 +2019,12 @@ fn main() -> eframe::Result<()> {
                 }
                 arg_idx += 1;
             }
+            "--fullscreen" => {
+                force_fullscreen = Some(true);
+            }
+            "--no-fullscreen" | "--windowed" => {
+                force_fullscreen = Some(false);
+            }
             _ => {}
         }
         arg_idx += 1;
@@ -2025,6 +2032,9 @@ fn main() -> eframe::Result<()> {
 
     if let Some(s) = cli_scale {
         config.gui.scale = s;
+    }
+    if let Some(f) = force_fullscreen {
+        config.gui.fullscreen = f;
     }
 
     // One shared session state across the GUI and the MCP server. The GUI sets
@@ -2046,27 +2056,36 @@ fn main() -> eframe::Result<()> {
     // Detect launch environment: Gamescope / Steam Deck handheld mode vs Standard Desktop
     let is_gamescope = std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok()
         || std::env::var("SteamGamepadUI").is_ok()
-        || std::env::var("STEAM_DECK").is_ok()
-        || config.gui.fullscreen;
+        || std::env::var("STEAM_DECK").is_ok();
 
     let mut viewport_builder = egui::ViewportBuilder::default()
         .with_title("trainlab")
         .with_min_inner_size([800.0, 540.0]);
 
-    if let (Some(w), Some(h)) = (config.gui.width, config.gui.height) {
-        viewport_builder = viewport_builder.with_inner_size([w, h]);
-    } else if !is_gamescope {
-        // Desktop default: comfortable 1080p canvas (1920x1080)
-        viewport_builder = viewport_builder.with_inner_size([1920.0, 1080.0]);
-    }
-
-    let viewport_builder = if is_gamescope {
-        // Dedicated display / Gamescope mode: expand edge-to-edge without letterboxing
-        viewport_builder.with_fullscreen(true).with_maximized(true)
+    if config.gui.fullscreen {
+        // Explicitly requested exclusive fullscreen (via config or --fullscreen)
+        viewport_builder = viewport_builder.with_fullscreen(true).with_maximized(true);
+    } else if is_gamescope {
+        // Under Gamescope / SteamOS Game Mode:
+        // Do NOT assert exclusive fullscreen (`with_fullscreen(true)`), which flags _NET_WM_STATE_FULLSCREEN
+        // and causes Gamescope to treat trainlab as the primary game window (stealing Remote Play capture & focus).
+        // Instead, run as a maximized window that fills the virtual screen canvas, allowing Gamescope to recognize
+        // it as a companion/launcher window while the game process remains the primary base layer.
+        let target_w = config.gui.width.unwrap_or(1920.0);
+        let target_h = config.gui.height.unwrap_or(1080.0);
+        viewport_builder = viewport_builder
+            .with_inner_size([target_w, target_h])
+            .with_maximized(true)
+            .with_fullscreen(false);
     } else {
-        // Desktop windowing mode: natural floating window
-        viewport_builder.with_maximized(false)
-    };
+        // Standard desktop windowing mode: floating window
+        if let (Some(w), Some(h)) = (config.gui.width, config.gui.height) {
+            viewport_builder = viewport_builder.with_inner_size([w, h]);
+        } else {
+            viewport_builder = viewport_builder.with_inner_size([1920.0, 1080.0]);
+        }
+        viewport_builder = viewport_builder.with_maximized(false).with_fullscreen(false);
+    }
 
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
@@ -2409,10 +2428,10 @@ impl eframe::App for TrainlabApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
 
         // Check window OS focus state to ensure controller / navigation inputs
-        // only affect the GUI when the trainer window is focused.
-        // Prefer Win32 foreground PID check if available, falling back to egui viewport focus.
+        // only affect the GUI when the trainer window is actually focused.
+        // Prefer Win32 foreground PID check if available, falling back to egui viewport focus (defaulting to false).
         let is_focused = is_trainer_focused()
-            .unwrap_or_else(|| ctx.input(|i| i.viewport().focused.unwrap_or(true)));
+            .unwrap_or_else(|| ctx.input(|i| i.viewport().focused.unwrap_or(false)));
 
         // Process remote window visibility commands from REST API / MCP / Web Dashboard / Overlay
         if let Ok(mut s) = self.session.lock()
@@ -2423,7 +2442,6 @@ impl eframe::App for TrainlabApp {
                 self.window_visible = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             } else if cmd == "hide" {
                 s.log_activity("GUI", "executing remote 'hide' window command");
                 self.window_visible = false;
@@ -2516,7 +2534,6 @@ impl eframe::App for TrainlabApp {
                         self.window_visible = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     } else if command == "hide" {
                         self.window_visible = false;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
