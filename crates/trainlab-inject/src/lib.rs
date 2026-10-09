@@ -784,12 +784,14 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             if let Ok(mut lock) = render::overlay::ACTIVE_PINS.lock() {
                 *lock = pins;
             }
+            render::overlay::refresh_has_active_pins();
             Response::PinsSynced { count }
         }
         Request::ClearPins => {
             if let Ok(mut lock) = render::overlay::ACTIVE_PINS.lock() {
                 lock.clear();
             }
+            render::overlay::refresh_has_active_pins();
             Response::PinsCleared
         }
     }

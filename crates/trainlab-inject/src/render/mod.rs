@@ -55,6 +55,9 @@ pub static STATE: RenderState = RenderState {
 };
 
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static CONFIGURED: AtomicBool = AtomicBool::new(false);
+static LOG_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Check if the process is currently shutting down.
 pub fn is_shutting_down() -> bool {
@@ -63,7 +66,9 @@ pub fn is_shutting_down() -> bool {
 
 /// Clean up in-game render and input hooks during process detachment.
 pub fn shutdown() {
-    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+        return; // Idempotent teardown guard: run at most once per process lifetime
+    }
     log_render("render::shutdown initiated");
 
     #[cfg(windows)]
@@ -80,13 +85,18 @@ pub fn shutdown() {
 }
 
 pub fn log_render(msg: impl std::fmt::Display) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("trainlab_inject.log")
-    {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true);
+    if !LOG_INITIALIZED.swap(true, Ordering::SeqCst) {
+        opts.truncate(true);
+    } else {
+        opts.append(true);
+    }
+
+    if let Ok(mut f) = opts.open("trainlab_inject.log") {
         use std::io::Write;
-        let _ = writeln!(f, "[RENDER] {msg}");
+        let pid = std::process::id();
+        let _ = writeln!(f, "[{pid}][RENDER] {msg}");
     }
 }
 
@@ -140,35 +150,38 @@ pub fn init() {
 
 /// Configure and optionally initialize in-game render and input hooks via IPC instructions.
 pub fn configure(overlay: bool, hook_wndproc: bool, xinput_hooks: bool) {
+    // Always update runtime visibility state
+    STATE.overlay_visible.store(overlay, Ordering::Relaxed);
+
     #[cfg(windows)]
     {
         let _ = hook_wndproc; // Used when present hook resolves HWND
 
-        static DXGI_HOOK_THREAD_SPAWNED: AtomicBool = AtomicBool::new(false);
-        static XINPUT_HOOK_THREAD_SPAWNED: AtomicBool = AtomicBool::new(false);
+        if CONFIGURED.swap(true, Ordering::SeqCst) {
+            log_render(format!(
+                "render::configure: already initialized for this process; updated overlay_visible={overlay}"
+            ));
+            return;
+        }
+
+        log_render(format!(
+            "render::configure: process-lifetime first setup (overlay={overlay}, xinput={xinput_hooks})"
+        ));
 
         if overlay {
-            if !DXGI_HOOK_THREAD_SPAWNED.swap(true, Ordering::SeqCst) {
-                tracing::info!("Enabling in-game DXGI overlay hooking via IPC (first spawn)");
-                std::thread::spawn(|| {
-                    dxgi::init_dxgi_hook();
-                });
-            } else {
-                tracing::debug!("DXGI overlay hook thread already spawned; ignoring redundant configure");
-            }
+            tracing::info!("Enabling in-game DXGI overlay hooking via IPC (first spawn)");
+            std::thread::spawn(|| {
+                dxgi::init_dxgi_hook();
+            });
         } else {
             tracing::info!("In-game DXGI overlay hooking disabled via IPC configuration");
         }
 
         if xinput_hooks {
-            if !XINPUT_HOOK_THREAD_SPAWNED.swap(true, Ordering::SeqCst) {
-                tracing::info!("Enabling XInput controller hooking via IPC (first spawn)");
-                std::thread::spawn(|| {
-                    xinput::init_xinput_hook();
-                });
-            } else {
-                tracing::debug!("XInput controller hook thread already spawned; ignoring redundant configure");
-            }
+            tracing::info!("Enabling XInput controller hooking via IPC (first spawn)");
+            std::thread::spawn(|| {
+                xinput::init_xinput_hook();
+            });
         } else {
             tracing::info!("XInput controller hooking disabled via IPC configuration");
         }

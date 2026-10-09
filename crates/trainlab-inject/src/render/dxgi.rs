@@ -99,11 +99,11 @@ pub unsafe extern "system" fn hooked_present(
     // 1. Increment live frame counter
     let fc = super::STATE.frame_count.fetch_add(1, Ordering::Relaxed) + 1;
     let vis = super::STATE.overlay_visible.load(Ordering::Relaxed);
-    if fc == 1 || fc % 600 == 0 || (vis && fc % 60 == 0) {
-        super::log_render(format!("hooked_present: frame={fc}, overlay_visible={vis}, swapchain={swapchain:?}"));
+    if fc == 1 {
+        super::log_render(format!("hooked_present: first frame confirmed (swapchain={swapchain:?})"));
     }
 
-    // 2. On the first few frames, extract the game's actual HWND from swapchain description safely
+    // 2. On the first frame, extract the game's actual HWND from swapchain description safely
     if !HWND_INITIALIZED.load(Ordering::Relaxed) && !swapchain.is_null() {
         let vtable_ptr = *(swapchain as *mut *mut usize);
         if !vtable_ptr.is_null() {
@@ -130,10 +130,12 @@ pub unsafe extern "system" fn hooked_present(
         }
     }
 
-    // 3. Run frame-synchronous cheat value pinning cadence
-    super::overlay::execute_pinning_cadence();
+    // 3. Run frame-synchronous cheat value pinning cadence ONLY if active pins exist
+    if super::overlay::HAS_ACTIVE_PINS.load(Ordering::Relaxed) {
+        super::overlay::execute_pinning_cadence();
+    }
 
-    // 4. Run in-game overlay render pass if overlay is active
+    // 4. Run in-game overlay render pass only if overlay is visible
     if vis {
         if !super::d3d12::try_render_d3d12_overlay(swapchain) {
             super::d3d11::render_overlay_frame(swapchain);

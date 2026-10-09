@@ -6,6 +6,20 @@ use trainlab_core::protocol::{Event, OverlayCheatDto, PinOp, PinSpec};
 
 pub static CHEATS: Mutex<Vec<OverlayCheatDto>> = Mutex::new(Vec::new());
 pub static ACTIVE_PINS: Mutex<Vec<PinSpec>> = Mutex::new(Vec::new());
+pub static HAS_ACTIVE_PINS: AtomicBool = AtomicBool::new(false);
+
+/// Refresh whether any cheats or pin specs are actively pinned on-frame.
+pub fn refresh_has_active_pins() {
+    let has_cheats = CHEATS
+        .lock()
+        .map(|c| c.iter().any(|cheat| cheat.enabled && cheat.pinned_bytes.is_some()))
+        .unwrap_or(false);
+    let has_pins = ACTIVE_PINS
+        .lock()
+        .map(|p| p.iter().any(|pin| pin.enabled))
+        .unwrap_or(false);
+    HAS_ACTIVE_PINS.store(has_cheats || has_pins, Ordering::Release);
+}
 
 // Outbound event queue (events generated inside the overlay to be broadcasted over IPC)
 pub static OUTBOUND_EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
@@ -378,6 +392,7 @@ pub fn apply_event(event: Event) {
                     lock.push(cheat);
                 }
             }
+            refresh_has_active_pins();
         }
         Event::CheatToggled { id, enabled } => {
             if let Ok(mut lock) = CHEATS.lock()
@@ -385,6 +400,7 @@ pub fn apply_event(event: Event) {
             {
                 cheat.enabled = enabled;
             }
+            refresh_has_active_pins();
         }
         Event::CheatValueChanged {
             id,
@@ -397,16 +413,19 @@ pub fn apply_event(event: Event) {
                 cheat.current_value = Some(value_str);
                 cheat.pinned_bytes = pinned_bytes;
             }
+            refresh_has_active_pins();
         }
         Event::CheatRemoved { id } => {
             if let Ok(mut lock) = CHEATS.lock() {
                 lock.retain(|c| c.id != id);
             }
+            refresh_has_active_pins();
         }
         Event::SyncCheats { cheats } => {
             if let Ok(mut lock) = CHEATS.lock() {
                 *lock = cheats;
             }
+            refresh_has_active_pins();
         }
         Event::OverlayVisibilityChanged { visible } => {
             super::set_overlay_visible(visible);
@@ -450,6 +469,11 @@ pub fn drain_outbound_events() -> Vec<Event> {
 
 /// Execute on-frame value pinning for any pinned cheats and dynamic PinSpecs.
 pub fn execute_pinning_cadence() {
+    // Ultra fast-path: if no pins are active, avoid acquiring CHEATS and ACTIVE_PINS mutexes every frame
+    if !HAS_ACTIVE_PINS.load(Ordering::Acquire) {
+        return;
+    }
+
     use trainlab_core::memory::ProcessMemory;
     let mem = trainlab_core::memory::SelfProcess;
 
