@@ -241,6 +241,8 @@ pub enum Request {
     SyncPins { pins: Vec<PinSpec> },
     /// Clear all active dynamic memory pins in the injected DLL.
     ClearPins,
+    /// Request the injected DLL to restore all hooks and shut down gracefully.
+    Shutdown,
 }
 
 /// The response to a [`Request`].
@@ -390,6 +392,8 @@ pub enum Response {
     PinsSynced { count: usize },
     /// Reply to [`Request::ClearPins`].
     PinsCleared,
+    /// Reply to [`Request::Shutdown`].
+    ShutdownAcknowledged,
     /// An error occurred while handling the request.
     Error { message: String },
 }

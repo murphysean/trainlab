@@ -227,9 +227,11 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
     const D3D_DRIVER_TYPE_WARP: u32 = 2;
     const D3D11_SDK_VERSION: u32 = 7;
 
+    // Try D3D_DRIVER_TYPE_WARP (software rasterizer) FIRST to discover the IDXGISwapChain
+    // VMT without creating a hardware Vulkan/D3D11 device on the GPU that Steam's encoder shares.
     let mut hr = d3d11_create(
         std::ptr::null_mut(),
-        D3D_DRIVER_TYPE_HARDWARE,
+        D3D_DRIVER_TYPE_WARP,
         std::ptr::null_mut(),
         0,
         std::ptr::null(),
@@ -242,11 +244,13 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
         &mut context,
     );
 
-    if hr != 0 || swapchain.is_null() {
-        super::log_render(format!("find_dxgi_present_vmt: HARDWARE driver failed (hr=0x{hr:08X}), trying WARP..."));
+    if hr == 0 && !swapchain.is_null() {
+        super::log_render("find_dxgi_present_vmt: successfully created WARP software swapchain (zero GPU queue footprint)");
+    } else {
+        super::log_render(format!("find_dxgi_present_vmt: WARP software driver failed (hr=0x{hr:08X}), falling back to HARDWARE..."));
         hr = d3d11_create(
             std::ptr::null_mut(),
-            D3D_DRIVER_TYPE_WARP,
+            D3D_DRIVER_TYPE_HARDWARE,
             std::ptr::null_mut(),
             0,
             std::ptr::null(),

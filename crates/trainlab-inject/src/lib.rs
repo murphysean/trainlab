@@ -794,6 +794,14 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             render::overlay::refresh_has_active_pins();
             Response::PinsCleared
         }
+        Request::Shutdown => {
+            render::log_render("dispatch_request: received Shutdown IPC request; scheduling graceful teardown");
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                shutdown();
+            });
+            Response::ShutdownAcknowledged
+        }
     }
 }
 
@@ -1046,12 +1054,57 @@ pub extern "C" fn trainlab_init() -> i32 {
     }
 }
 
+extern "C" fn on_posix_signal(sig: i32) {
+    render::log_render(format!(
+        "on_posix_signal: caught signal {sig}, initiating emergency shutdown"
+    ));
+    shutdown();
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn on_console_ctrl(ctrl_type: u32) -> i32 {
+    render::log_render(format!(
+        "on_console_ctrl: caught ctrl event {ctrl_type}, initiating emergency shutdown"
+    ));
+    shutdown();
+    0
+}
+
+fn install_termination_handlers() {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGTERM, on_posix_signal as *const () as usize);
+        libc::signal(libc::SIGINT, on_posix_signal as *const () as usize);
+        libc::signal(libc::SIGHUP, on_posix_signal as *const () as usize);
+    }
+
+    #[cfg(windows)]
+    unsafe {
+        unsafe extern "C" {
+            fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+        }
+        signal(15, on_posix_signal); // SIGTERM
+        signal(2, on_posix_signal);  // SIGINT
+        signal(21, on_posix_signal); // SIGBREAK
+        signal(22, on_posix_signal); // SIGABRT
+
+        unsafe extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<unsafe extern "system" fn(u32) -> i32>,
+                add: i32,
+            ) -> i32;
+        }
+        SetConsoleCtrlHandler(Some(on_console_ctrl), 1);
+    }
+}
+
 /// Automatic library constructor on Unix/Linux. When loaded via `LD_PRELOAD` or
 /// `dlopen`, this function runs automatically and spawns the listener thread,
 /// perfectly matching `DllMain` behavior on Windows.
 #[cfg(unix)]
 #[unsafe(no_mangle)]
 pub extern "C" fn trainlab_constructor() {
+    install_termination_handlers();
     let _ = start(DEFAULT_PORT);
 }
 
@@ -1087,6 +1140,7 @@ pub extern "system" fn DllMain(
     const DLL_PROCESS_DETACH: u32 = 0;
 
     if reason == DLL_PROCESS_ATTACH {
+        install_termination_handlers();
         // Start the listener in a detached thread so DllMain returns promptly.
         let _ = start(DEFAULT_PORT);
     } else if reason == DLL_PROCESS_DETACH {

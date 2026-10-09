@@ -198,7 +198,7 @@ fi
 
 # 4. Cleanup routine to tear down companion trainer processes
 cleanup() {
-    # If this invocation did not acquire the companion lock, only manage its own GAME_PID
+    # If this invocation did not acquire the companion lock, forward signal to GAME_PID and exit
     if [ "$SPAWN_TRAINER" -ne 1 ]; then
         if [ -n "$GAME_PID" ] && kill -0 "$GAME_PID" 2>/dev/null; then
             kill -TERM "$GAME_PID" 2>/dev/null
@@ -206,31 +206,46 @@ cleanup() {
         return
     fi
 
+    # 1. If the game process is still alive when cleanup is invoked (e.g. SIGTERM/INT from Steam),
+    # forward SIGTERM first and grant a grace period so the injected library's signal handler
+    # can run render::shutdown() and restore original Present bytes cleanly.
+    if [ -n "$GAME_PID" ] && kill -0 "$GAME_PID" 2>/dev/null; then
+        kill -TERM "$GAME_PID" 2>/dev/null
+        for _ in $(seq 1 15); do
+            if ! kill -0 "$GAME_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        # If the game is still alive after grace period, terminate forcefully
+        if kill -0 "$GAME_PID" 2>/dev/null; then
+            kill -9 "$GAME_PID" 2>/dev/null
+        fi
+    fi
+
+    # 2. Reap guardian background worker
     if [ -n "$GUARDIAN_PID" ]; then
         kill "$GUARDIAN_PID" 2>/dev/null
     fi
 
-    # Terminate Trainlab GUI
+    # 3. Promptly terminate all Trainlab GUI and helper processes to ensure zero lingering D3D devices
     if [ -n "$TRAINER_PID" ]; then
-        kill "$TRAINER_PID" 2>/dev/null
+        kill -TERM "$TRAINER_PID" 2>/dev/null
     fi
     pkill -TERM -f trainlab-gui.exe 2>/dev/null
     pkill -TERM -f trainlab.exe 2>/dev/null
     pkill -TERM -f trainlab-gui-linux 2>/dev/null
     pkill -TERM -x trainlab 2>/dev/null
     sleep 0.2
+    if [ -n "$TRAINER_PID" ]; then
+        kill -9 "$TRAINER_PID" 2>/dev/null
+    fi
     pkill -9 -f trainlab-gui.exe 2>/dev/null
     pkill -9 -f trainlab.exe 2>/dev/null
     pkill -9 -f trainlab-gui-linux 2>/dev/null
     pkill -9 -x trainlab 2>/dev/null
 
-    # If the game launcher/process is still running when an external signal (INT/TERM) arrives,
-    # forward SIGTERM and give it a chance to shut down cleanly without corrupting wineserver.
-    if [ -n "$GAME_PID" ] && kill -0 "$GAME_PID" 2>/dev/null; then
-        kill -TERM "$GAME_PID" 2>/dev/null
-    fi
-
-    # Release and remove lock
+    # 4. Release and remove lock
     flock -u 200 2>/dev/null || true
     exec 200>&-
     rm -f "$LOCK_FILE" 2>/dev/null
