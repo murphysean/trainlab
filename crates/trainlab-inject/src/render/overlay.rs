@@ -1036,3 +1036,14 @@ pub fn render_in_game_egui(
     let clipped_primitives = ctx.tessellate(full_output.shapes, 1.0);
     Some((ctx, clipped_primitives, full_output.textures_delta))
 }
+
+/// Reset controller stick triggers and clear any pending egui input events on shutdown.
+pub fn reset_input_state() {
+    for i in 0..4 {
+        STICK_TRIGGERED_Y[i].store(false, Ordering::SeqCst);
+        STICK_TRIGGERED_X[i].store(false, Ordering::SeqCst);
+    }
+    if let Ok(mut events) = PENDING_EGUI_EVENTS.lock() {
+        events.clear();
+    }
+}

@@ -4455,6 +4455,7 @@ dependencies = [
  "embed-resource",
  "futures-util",
  "iced-x86",
+ "libc",
  "reqwest",
  "rmcp",
  "schemars",

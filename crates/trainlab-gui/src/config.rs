@@ -40,6 +40,12 @@ pub struct GuiConfig {
     /// Force fullscreen / maximized mode.
     #[serde(default)]
     pub fullscreen: bool,
+    /// Launch with window hidden / in background (e.g. for companion / overlay mode).
+    #[serde(default)]
+    pub hidden: bool,
+    /// Automatically exit trainlab when the attached target game process terminates.
+    #[serde(default)]
+    pub auto_exit: bool,
     /// UI Theme ("dark" or "light").
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -55,6 +61,8 @@ impl Default for GuiConfig {
             width: None,
             height: None,
             fullscreen: false,
+            hidden: false,
+            auto_exit: false,
             theme: default_theme(),
             pin_rate_hz: default_pin_rate_hz(),
         }
@@ -276,6 +284,16 @@ impl AppConfig {
         // Fullscreen
         if let Ok(val) = std::env::var("TRAINLAB_FULLSCREEN") {
             self.gui.fullscreen = val == "1" || val.eq_ignore_ascii_case("true");
+        }
+
+        // Hidden / background launch
+        if let Ok(val) = std::env::var("TRAINLAB_HIDDEN") {
+            self.gui.hidden = val == "1" || val.eq_ignore_ascii_case("true");
+        }
+
+        // Auto exit when target terminates
+        if let Ok(val) = std::env::var("TRAINLAB_AUTO_EXIT") {
+            self.gui.auto_exit = val == "1" || val.eq_ignore_ascii_case("true");
         }
 
         // Server Toggles

@@ -135,6 +135,8 @@ struct TrainlabApp {
     editing_cheat: Option<EditCheatModal>,
     // Auto-run profile init_commands on attach
     auto_init: bool,
+    // Whether to automatically exit when the target game terminates
+    auto_exit: bool,
     // Window visibility state for toggle hotkey
     window_visible: bool,
     // In-flight attachment / initialization indicator & lock
@@ -152,6 +154,8 @@ struct TrainlabApp {
     log_stick_to_bottom: bool,
     // UI DPI scaling multiplier
     ui_scale: f32,
+    // Configured / target window inner dimensions
+    target_window_size: [f32; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -248,7 +252,8 @@ impl TrainlabApp {
             active_tab: ActiveTab::Cheats,
             editing_cheat: None,
             auto_init: true,
-            window_visible: true,
+            auto_exit: config.gui.auto_exit,
+            window_visible: !config.gui.hidden,
             is_attaching: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             is_scanning: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bus_rx,
@@ -257,6 +262,10 @@ impl TrainlabApp {
             markers_live_sync: true,
             log_stick_to_bottom: true,
             ui_scale: config.gui.scale,
+            target_window_size: [
+                config.gui.width.unwrap_or(1920.0),
+                config.gui.height.unwrap_or(1080.0),
+            ],
         };
         app.auto_match_profile();
         app.sync_registered_hotkeys();
@@ -1973,6 +1982,105 @@ pub fn execute_cheat_toggle(
     }
 }
 
+struct SingleInstanceGuard {
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    #[cfg(unix)]
+    fd: std::os::unix::io::RawFd,
+    #[cfg(unix)]
+    path: std::path::PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if !self.handle.is_null()
+            && self.handle != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
+        {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            unsafe {
+                libc::flock(self.fd, libc::LOCK_UN);
+                libc::close(self.fd);
+            }
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn acquire_single_instance(game_name: Option<&str>) -> Option<SingleInstanceGuard> {
+    let raw_name = game_name.unwrap_or("default");
+    let sanitized: String = raw_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+        use windows_sys::Win32::System::Threading::CreateMutexA;
+
+        let mutex_name = format!("Trainlab_Instance_{}\0", sanitized);
+        unsafe {
+            let handle = CreateMutexA(std::ptr::null(), 1, mutex_name.as_ptr());
+            if handle.is_null() {
+                tracing::warn!("Failed to create single-instance mutex {}: {:?}", mutex_name, GetLastError());
+                return None;
+            }
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                tracing::warn!("Another trainlab instance is already running (mutex {} exists)", mutex_name);
+                CloseHandle(handle);
+                return None;
+            }
+            Some(SingleInstanceGuard { handle })
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let lock_path = std::path::PathBuf::from(format!("/tmp/trainlab-gui-{}.lock", sanitized));
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o666)
+            .open(&lock_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Failed to open lockfile {:?}: {e}", lock_path);
+                return None;
+            }
+        };
+
+        use std::os::unix::io::IntoRawFd;
+        let fd = file.into_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            tracing::warn!("Another trainlab instance is already running (lock {:?} held)", lock_path);
+            unsafe {
+                libc::close(fd);
+            }
+            return None;
+        }
+
+        Some(SingleInstanceGuard {
+            fd,
+            path: lock_path,
+        })
+    }
+}
+
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -2025,6 +2133,15 @@ fn main() -> eframe::Result<()> {
             "--no-fullscreen" | "--windowed" => {
                 force_fullscreen = Some(false);
             }
+            "--hidden" => {
+                config.gui.hidden = true;
+            }
+            "--visible" => {
+                config.gui.hidden = false;
+            }
+            "--auto-exit" => {
+                config.gui.auto_exit = true;
+            }
             _ => {}
         }
         arg_idx += 1;
@@ -2036,6 +2153,18 @@ fn main() -> eframe::Result<()> {
     if let Some(f) = force_fullscreen {
         config.gui.fullscreen = f;
     }
+
+    // Single-instance enforcement: prevent duplicate trainlab instances from attaching to the same game
+    let _instance_guard = match acquire_single_instance(target_game.as_deref()) {
+        Some(guard) => guard,
+        None => {
+            tracing::info!(
+                "trainlab-gui single-instance guard: another instance is already running for {:?}. Exiting cleanly.",
+                target_game
+            );
+            return Ok(());
+        }
+    };
 
     // One shared session state across the GUI and the MCP server. The GUI sets
     // `game_pid` when it injects the game; the MCP server reads it to open the
@@ -2056,27 +2185,42 @@ fn main() -> eframe::Result<()> {
     // Detect launch environment: Gamescope / Steam Deck handheld mode vs Standard Desktop
     let is_gamescope = std::env::var("GAMESCOPE_WAYLAND_DISPLAY").is_ok()
         || std::env::var("SteamGamepadUI").is_ok()
-        || std::env::var("STEAM_DECK").is_ok();
+        || std::env::var("STEAM_DECK").is_ok()
+        || std::env::var("TRAINLAB_GAMESCOPE").is_ok();
 
     let mut viewport_builder = egui::ViewportBuilder::default()
-        .with_title("trainlab")
-        .with_min_inner_size([800.0, 540.0]);
+        .with_title("trainlab");
 
     if config.gui.fullscreen {
         // Explicitly requested exclusive fullscreen (via config or --fullscreen)
-        viewport_builder = viewport_builder.with_fullscreen(true).with_maximized(true);
+        viewport_builder = viewport_builder
+            .with_min_inner_size([800.0, 540.0])
+            .with_fullscreen(true)
+            .with_maximized(true);
     } else if is_gamescope {
         // Under Gamescope / SteamOS Game Mode:
-        // Do NOT assert exclusive fullscreen (`with_fullscreen(true)`), which flags _NET_WM_STATE_FULLSCREEN
-        // and causes Gamescope to treat trainlab as the primary game window (stealing Remote Play capture & focus).
-        // Instead, run as a maximized window that fills the virtual screen canvas, allowing Gamescope to recognize
-        // it as a companion/launcher window while the game process remains the primary base layer.
+        // Do NOT assert fullscreen or maximized state! A maximized window triggers Gamescope's window manager
+        // to latch Remote Play capture onto trainlab instead of the game, resulting in a black stream buffer.
+        // Instead, configure as an undecorated tool/companion window pinned to AlwaysOnBottom.
         let target_w = config.gui.width.unwrap_or(1920.0);
         let target_h = config.gui.height.unwrap_or(1080.0);
+        if config.gui.hidden {
+            // When launched hidden, start with a tiny off-canvas utility footprint so Gamescope never allocates
+            // a full display layer to this surface.
+            viewport_builder = viewport_builder
+                .with_inner_size([320.0, 240.0])
+                .with_min_inner_size([100.0, 100.0])
+                .with_visible(false);
+        } else {
+            viewport_builder = viewport_builder
+                .with_inner_size([target_w, target_h])
+                .with_min_inner_size([800.0, 540.0]);
+        }
         viewport_builder = viewport_builder
-            .with_inner_size([target_w, target_h])
-            .with_maximized(true)
-            .with_fullscreen(false);
+            .with_maximized(false)
+            .with_fullscreen(false)
+            .with_decorations(false)
+            .with_window_level(egui::viewport::WindowLevel::AlwaysOnBottom);
     } else {
         // Standard desktop windowing mode: floating window
         if let (Some(w), Some(h)) = (config.gui.width, config.gui.height) {
@@ -2084,7 +2228,14 @@ fn main() -> eframe::Result<()> {
         } else {
             viewport_builder = viewport_builder.with_inner_size([1920.0, 1080.0]);
         }
-        viewport_builder = viewport_builder.with_maximized(false).with_fullscreen(false);
+        viewport_builder = viewport_builder
+            .with_min_inner_size([800.0, 540.0])
+            .with_maximized(false)
+            .with_fullscreen(false);
+    }
+
+    if config.gui.hidden {
+        viewport_builder = viewport_builder.with_visible(false);
     }
 
     let options = eframe::NativeOptions {
@@ -2095,6 +2246,16 @@ fn main() -> eframe::Result<()> {
     let app_config = config.clone();
     let auto_attach_flag = auto_attach;
     let auto_attach_game = target_game.clone();
+
+    // Pre-emptively apply companion window hints (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE on Windows,
+    // STEAM_GAME property removal on Linux X11) as soon as any window is mapped by this process so
+    // Gamescope never selects it as the base streamed surface.
+    std::thread::spawn(|| {
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            apply_companion_window_hints();
+        }
+    });
 
     eframe::run_native(
         "trainlab",
@@ -2347,6 +2508,10 @@ fn main() -> eframe::Result<()> {
                                     if !hwnd.is_null() {
                                         if command == "hide" {
                                             ShowWindow(hwnd, SW_HIDE);
+                                            let s_clone = bg_session.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                let _ = controller::request(&s_clone, &trainlab_core::protocol::Request::FocusGameWindow);
+                                            });
                                         } else if command == "show" {
                                             ShowWindow(hwnd, SW_SHOW);
                                             ShowWindow(hwnd, SW_RESTORE);
@@ -2354,6 +2519,10 @@ fn main() -> eframe::Result<()> {
                                         } else if command == "toggle" {
                                             if IsWindowVisible(hwnd) != 0 {
                                                 ShowWindow(hwnd, SW_HIDE);
+                                                let s_clone = bg_session.clone();
+                                                tokio::task::spawn_blocking(move || {
+                                                    let _ = controller::request(&s_clone, &trainlab_core::protocol::Request::FocusGameWindow);
+                                                });
                                             } else {
                                                 ShowWindow(hwnd, SW_SHOW);
                                                 ShowWindow(hwnd, SW_RESTORE);
@@ -2400,6 +2569,146 @@ fn main() -> eframe::Result<()> {
 }
 
 #[cfg(windows)]
+fn apply_companion_window_hints() {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowLongPtrA, GetWindowThreadProcessId, SetWindowLongPtrA, SetWindowPos,
+        GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        WS_EX_TOOLWINDOW,
+    };
+
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let mut pid: u32 = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            let my_pid = lparam as u32;
+            if pid == my_pid {
+                let ex_style = GetWindowLongPtrA(hwnd, GWL_EXSTYLE);
+                const WS_EX_NOACTIVATE: u32 = 0x08000000;
+                let required = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                if (ex_style as u32 & required) != required {
+                    let new_ex_style = ex_style as u32 | required;
+                    SetWindowLongPtrA(hwnd, GWL_EXSTYLE, new_ex_style as isize);
+                    SetWindowPos(
+                        hwnd,
+                        std::ptr::null_mut(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                    );
+                    tracing::info!("Applied WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE companion hint to HWND {:?}", hwnd);
+                }
+            }
+        }
+        1 // continue
+    }
+
+    unsafe {
+        let my_pid = GetCurrentProcessId();
+        EnumWindows(Some(enum_proc), my_pid as LPARAM);
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_companion_window_hints() {
+    // Under Linux/Gamescope/X11, inspect mapped windows belonging to trainlab.
+    // Strip STEAM_GAME atom so Gamescope never latches onto trainlab as the game surface.
+    unsafe {
+        let x11_handle = libc::dlopen(b"libX11.so.6\0".as_ptr() as *const _, libc::RTLD_LAZY);
+        if x11_handle.is_null() {
+            return;
+        }
+
+        type XOpenDisplayFn = unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void;
+        type XCloseDisplayFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_int;
+        type XDefaultRootWindowFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_ulong;
+        type XInternAtomFn = unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_char, std::ffi::c_int) -> std::ffi::c_ulong;
+        type XQueryTreeFn = unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            std::ffi::c_ulong,
+            *mut std::ffi::c_ulong,
+            *mut std::ffi::c_ulong,
+            *mut *mut std::ffi::c_ulong,
+            *mut std::ffi::c_uint,
+        ) -> std::ffi::c_int;
+        type XFetchNameFn = unsafe extern "C" fn(*mut std::ffi::c_void, std::ffi::c_ulong, *mut *mut std::ffi::c_char) -> std::ffi::c_int;
+        type XDeletePropertyFn = unsafe extern "C" fn(*mut std::ffi::c_void, std::ffi::c_ulong, std::ffi::c_ulong) -> std::ffi::c_int;
+        type XSyncFn = unsafe extern "C" fn(*mut std::ffi::c_void, std::ffi::c_int) -> std::ffi::c_int;
+        type XFreeFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_int;
+
+        macro_rules! get_sym {
+            ($sym:literal, $t:ty) => {{
+                let p = libc::dlsym(x11_handle, $sym.as_ptr() as *const _);
+                if p.is_null() {
+                    libc::dlclose(x11_handle);
+                    return;
+                }
+                std::mem::transmute::<*mut libc::c_void, $t>(p)
+            }};
+        }
+
+        let open_display: XOpenDisplayFn = get_sym!(b"XOpenDisplay\0", XOpenDisplayFn);
+        let close_display: XCloseDisplayFn = get_sym!(b"XCloseDisplay\0", XCloseDisplayFn);
+        let default_root_window: XDefaultRootWindowFn = get_sym!(b"XDefaultRootWindow\0", XDefaultRootWindowFn);
+        let intern_atom: XInternAtomFn = get_sym!(b"XInternAtom\0", XInternAtomFn);
+        let query_tree: XQueryTreeFn = get_sym!(b"XQueryTree\0", XQueryTreeFn);
+        let fetch_name: XFetchNameFn = get_sym!(b"XFetchName\0", XFetchNameFn);
+        let delete_property: XDeletePropertyFn = get_sym!(b"XDeleteProperty\0", XDeletePropertyFn);
+        let sync: XSyncFn = get_sym!(b"XSync\0", XSyncFn);
+        let free: XFreeFn = get_sym!(b"XFree\0", XFreeFn);
+
+        for disp_str in [b":0\0".as_ptr(), b":1\0".as_ptr()] {
+            let dpy = open_display(disp_str as *const _);
+            if dpy.is_null() {
+                continue;
+            }
+
+            let atom_steam_game = intern_atom(dpy, b"STEAM_GAME\0".as_ptr() as *const _, 0);
+            let root = default_root_window(dpy);
+            let mut root_ret = 0u64;
+            let mut parent_ret = 0u64;
+            let mut children_ret: *mut std::ffi::c_ulong = std::ptr::null_mut();
+            let mut nchildren_ret = 0u32;
+
+            if query_tree(
+                dpy,
+                root,
+                &mut root_ret,
+                &mut parent_ret,
+                &mut children_ret,
+                &mut nchildren_ret,
+            ) == 1
+                && !children_ret.is_null()
+            {
+                let children = std::slice::from_raw_parts(children_ret, nchildren_ret as usize);
+                for &w in children {
+                    let mut name_ptr: *mut std::ffi::c_char = std::ptr::null_mut();
+                    if fetch_name(dpy, w, &mut name_ptr) != 0 && !name_ptr.is_null() {
+                        let name = std::ffi::CStr::from_ptr(name_ptr).to_string_lossy();
+                        if name.to_lowercase().contains("trainlab") {
+                            tracing::info!(
+                                "Found trainlab window 0x{:X} on X11 display; stripping STEAM_GAME property",
+                                w
+                            );
+                            if atom_steam_game != 0 {
+                                delete_property(dpy, w, atom_steam_game);
+                            }
+                        }
+                        free(name_ptr as *mut _);
+                    }
+                }
+                free(children_ret as *mut _);
+            }
+            sync(dpy, 0);
+            close_display(dpy);
+        }
+    }
+}
+
+#[cfg(windows)]
 fn is_trainer_focused() -> Option<bool> {
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -2427,6 +2736,17 @@ impl eframe::App for TrainlabApp {
         // Keep UI active and responsive to background thread status updates (20 Hz repaint cadence)
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
 
+        // Ensure companion window hints (WS_EX_TOOLWINDOW) are applied on Windows/Wine so Gamescope
+        // treats trainlab as a tool/utility window and does not steal remote play capture or base focus.
+        static HINTS_APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !HINTS_APPLIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            apply_companion_window_hints();
+            if !self.window_visible {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+
         // Check window OS focus state to ensure controller / navigation inputs
         // only affect the GUI when the trainer window is actually focused.
         // Prefer Win32 foreground PID check if available, falling back to egui viewport focus (defaulting to false).
@@ -2440,13 +2760,16 @@ impl eframe::App for TrainlabApp {
             if cmd == "show" {
                 s.log_activity("GUI", "executing remote 'show' window command");
                 self.window_visible = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.target_window_size.into()));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             } else if cmd == "hide" {
                 s.log_activity("GUI", "executing remote 'hide' window command");
                 self.window_visible = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                let _ = controller::request(&self.session, &trainlab_core::protocol::Request::FocusGameWindow);
             }
         }
 
@@ -2456,12 +2779,14 @@ impl eframe::App for TrainlabApp {
                 // ID 9999 is the global window-toggle key ('J')
                 self.window_visible = !self.window_visible;
                 if self.window_visible {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.target_window_size.into()));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 } else {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    let _ = controller::request(&self.session, &trainlab_core::protocol::Request::FocusGameWindow);
                 }
             } else if let Some(reg) = self.registered_hotkeys.get(&hotkey_id) {
                 let cheat_id = reg.cheat_id;
@@ -2532,12 +2857,15 @@ impl eframe::App for TrainlabApp {
                 ) => {
                     if command == "show" {
                         self.window_visible = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.target_window_size.into()));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     } else if command == "hide" {
                         self.window_visible = false;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                        let _ = controller::request(&self.session, &trainlab_core::protocol::Request::FocusGameWindow);
                     }
                 }
                 trainlab_core::event::BusEvent::Protocol(
@@ -2594,9 +2922,15 @@ impl eframe::App for TrainlabApp {
                 });
                 s.log_activity(
                     "GUI",
-                    format!("target game '{game}' (pid {pid}) exited; returning to welcome screen"),
+                    format!("target game '{game}' (pid {pid}) exited; shutting down companion"),
                 );
                 self.active_tab = ActiveTab::Cheats;
+
+                if self.auto_exit {
+                    tracing::info!("Target game '{game}' (pid {pid}) exited and auto_exit is enabled — exiting trainlab");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    std::process::exit(0);
+                }
             }
 
             self.connected = s.connected();
@@ -2641,6 +2975,17 @@ impl eframe::App for TrainlabApp {
                     self.window_visible = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    let _ = controller::request(&self.session, &trainlab_core::protocol::Request::FocusGameWindow);
+                }
+
+                ui.separator();
+                if ui
+                    .button("✖ Close Trainlab")
+                    .on_hover_text("Cleanly terminate Trainlab process")
+                    .clicked()
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    std::process::exit(0);
                 }
 
                 if self.connected {

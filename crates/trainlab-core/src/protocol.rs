@@ -198,6 +198,8 @@ pub enum Request {
     WaitForReady,
     /// Set the visibility of the in-game cheat overlay.
     SetOverlayVisible { visible: bool },
+    /// Request the injected DLL to assert foreground focus and top Z-order on the game window.
+    FocusGameWindow,
     /// Sync active cheats from GUI to the in-game overlay & pinning loop.
     SyncCheats { cheats: Vec<OverlayCheatDto> },
     /// Configure or initialize in-game render and input hooks via IPC.
@@ -358,6 +360,8 @@ pub enum Response {
     },
     /// Reply to [`Request::SetOverlayVisible`].
     OverlayVisibilitySet { visible: bool },
+    /// Reply to [`Request::FocusGameWindow`].
+    GameFocused { ok: bool },
     /// Reply to [`Request::SyncCheats`].
     CheatsSynced { count: usize },
     /// Reply to [`Request::ConfigureRender`].
@@ -440,17 +444,17 @@ impl Default for InputFeatures {
 /// Network traffic interception features.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkFeatures {
-    /// Winsock socket hook (`send`, `recv`, `sendto`, `recvfrom`). Default: true.
-    #[serde(default = "default_true")]
+    /// Winsock socket hook (`send`, `recv`, `sendto`, `recvfrom`). Default: false (opt-in).
+    #[serde(default = "default_false")]
     pub winsock: bool,
-    /// WinHTTP API hook (`WinHttpSendRequest`, `WinHttpReadData`). Default: true.
-    #[serde(default = "default_true")]
+    /// WinHTTP API hook (`WinHttpSendRequest`, `WinHttpReadData`). Default: false (opt-in).
+    #[serde(default = "default_false")]
     pub winhttp: bool,
-    /// SChannel TLS/HTTPS plaintext hook (`EncryptMessage`, `DecryptMessage`). Default: true.
-    #[serde(default = "default_true")]
+    /// SChannel TLS/HTTPS plaintext hook (`EncryptMessage`, `DecryptMessage`). Default: false (opt-in).
+    #[serde(default = "default_false")]
     pub schannel: bool,
-    /// Steamworks P2P & networking hook (`steam_api64.dll`). Default: true.
-    #[serde(default = "default_true")]
+    /// Steamworks P2P & networking hook (`steam_api64.dll`). Default: false (opt-in).
+    #[serde(default = "default_false")]
     pub steamworks: bool,
     /// Whether to capture loopback (127.0.0.1 / localhost) traffic. Default: false.
     #[serde(default = "default_false")]
@@ -466,10 +470,10 @@ pub struct NetworkFeatures {
 impl Default for NetworkFeatures {
     fn default() -> Self {
         Self {
-            winsock: true,
-            winhttp: true,
-            schannel: true,
-            steamworks: true,
+            winsock: false,
+            winhttp: false,
+            schannel: false,
+            steamworks: false,
             capture_loopback: false,
             ignore_ports: Vec::new(),
             ignore_hosts: Vec::new(),

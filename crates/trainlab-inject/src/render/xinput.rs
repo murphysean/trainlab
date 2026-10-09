@@ -47,8 +47,11 @@ pub const XINPUT_GAMEPAD_Y: u16 = 0x8000;
 type FnXInputGetState = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
 
 static ORIGINAL_XINPUT_GET_STATE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static XINPUT_TARGET_ADDR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static XINPUT_ORIGINAL_BYTES: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+static XINPUT_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
 static COMBO_WAS_DOWN: AtomicBool = AtomicBool::new(false);
-static PREV_BUTTONS: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
 // Per-controller (per XInput user slot) input state. Games poll EVERY connected
 // controller through XInputGetState in rotation, several times per frame. If edge
@@ -78,6 +81,15 @@ pub unsafe extern "system" fn hooked_xinput_get_state(
     state: *mut XINPUT_STATE,
 ) -> u32 {
     let orig = ORIGINAL_XINPUT_GET_STATE.load(Ordering::Relaxed);
+    if super::is_shutting_down() {
+        return if !orig.is_null() {
+            let orig_fn: FnXInputGetState = unsafe { std::mem::transmute(orig) };
+            unsafe { orig_fn(user_index, state) }
+        } else {
+            0
+        };
+    }
+
     let ret = if !orig.is_null() {
         let orig_fn: FnXInputGetState = unsafe { std::mem::transmute(orig) };
         unsafe { orig_fn(user_index, state) }
@@ -184,10 +196,23 @@ const SDL_CONTROLLER_BUTTON_BACK: i32 = 4;
 const SDL_CONTROLLER_BUTTON_START: i32 = 6;
 
 static ORIGINAL_SDL_GET_BUTTON: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static SDL_TARGET_ADDR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SDL_ORIGINAL_BYTES: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+static SDL_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Hooked `SDL_GameControllerGetButton` callback.
 pub unsafe extern "C" fn hooked_sdl_get_button(controller: *mut c_void, button: i32) -> u8 {
     let orig = ORIGINAL_SDL_GET_BUTTON.load(Ordering::Relaxed);
+    if super::is_shutting_down() {
+        return if !orig.is_null() {
+            let orig_fn: unsafe extern "C" fn(*mut c_void, i32) -> u8 =
+                unsafe { std::mem::transmute(orig) };
+            unsafe { orig_fn(controller, button) }
+        } else {
+            0
+        };
+    }
+
     let ret = if !orig.is_null() {
         let orig_fn: unsafe extern "C" fn(*mut c_void, i32) -> u8 =
             unsafe { std::mem::transmute(orig) };
@@ -228,6 +253,11 @@ pub fn init_xinput_hook() {
     std::thread::sleep(Duration::from_millis(300));
 
     for _ in 0..10 {
+        if super::is_shutting_down() {
+            super::log_render("init_xinput_hook: aborted due to shutdown in progress");
+            return;
+        }
+
         if !ORIGINAL_XINPUT_GET_STATE.load(Ordering::SeqCst).is_null()
             || !ORIGINAL_SDL_GET_BUTTON.load(Ordering::SeqCst).is_null()
         {
@@ -244,7 +274,7 @@ pub fn init_xinput_hook() {
                     let callback_addr = hooked_sdl_get_button as *const () as u64;
                     let payload = trainlab_cave::emitter::jmp_abs(callback_addr);
                     let hook = trainlab_cave::cave::HookKind::Trampoline {
-                        payload,
+                        payload: payload.clone(),
                         jump: trainlab_cave::cave::JumpStyle::Absolute,
                     };
 
@@ -261,19 +291,48 @@ pub fn init_xinput_hook() {
                         crate::allocate(size, exec)
                     };
 
-                    if let Ok(installed) =
-                        trainlab_cave::cave::install(target_u64, hook, read, write, allocate)
-                    {
-                        ORIGINAL_SDL_GET_BUTTON
-                            .store((installed.cave_addr + 14) as *mut c_void, Ordering::SeqCst);
-                        if let Ok(mut lock) = ACTIVE_INPUT_HOOK.lock() {
-                            *lock = "SDL2 GameController".to_string();
+                    // Atomic reservation for SDL2 hook
+                    if SDL_HOOK_INSTALLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        // Verify target site is not already detoured
+                        if let Ok(current_bytes) = read(target_u64, 14) {
+                            if current_bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
+                                let dest = u64::from_le_bytes(current_bytes[6..14].try_into().unwrap_or_default());
+                                if dest == callback_addr {
+                                    super::log_render(format!(
+                                        "init_xinput_hook: SDL2 target 0x{:X} already detoured to 0x{:X}, skipping install",
+                                        target_u64, dest
+                                    ));
+                                    break;
+                                }
+                            }
                         }
-                        tracing::info!(
-                            "Successfully hooked SDL2 GameController (Select + Start) at 0x{:X}",
-                            target_u64
-                        );
-                        break;
+
+                        if let Ok(installed) =
+                            trainlab_cave::cave::install(target_u64, hook, read, write, allocate)
+                        {
+                            SDL_TARGET_ADDR.store(installed.target, Ordering::SeqCst);
+                            if let Ok(mut bytes) = SDL_ORIGINAL_BYTES.lock() {
+                                if bytes.is_empty() {
+                                    *bytes = installed.original.clone();
+                                }
+                            }
+                            ORIGINAL_SDL_GET_BUTTON
+                                .store((installed.cave_addr + payload.len() as u64) as *mut c_void, Ordering::SeqCst);
+                            if let Ok(mut lock) = ACTIVE_INPUT_HOOK.lock() {
+                                *lock = "SDL2 GameController".to_string();
+                            }
+                            tracing::info!(
+                                "Successfully hooked SDL2 GameController (Select + Start) at 0x{:X}",
+                                target_u64
+                            );
+                            super::log_render(format!(
+                                "init_xinput_hook: hooked SDL2 GameController at 0x{:X} -> cave 0x{:X}",
+                                target_u64, installed.cave_addr
+                            ));
+                            break;
+                        } else {
+                            SDL_HOOK_INSTALLED.store(false, Ordering::SeqCst);
+                        }
                     }
                 }
             }
@@ -298,7 +357,7 @@ pub fn init_xinput_hook() {
                         let callback_addr = hooked_xinput_get_state as *const () as u64;
                         let payload = trainlab_cave::emitter::jmp_abs(callback_addr);
                         let hook = trainlab_cave::cave::HookKind::Trampoline {
-                            payload,
+                            payload: payload.clone(),
                             jump: trainlab_cave::cave::JumpStyle::Absolute,
                         };
 
@@ -315,28 +374,56 @@ pub fn init_xinput_hook() {
                             crate::allocate(size, exec)
                         };
 
-                        match trainlab_cave::cave::install(target_u64, hook, read, write, allocate)
-                        {
-                            Ok(installed) => {
-                                ORIGINAL_XINPUT_GET_STATE.store(
-                                    (installed.cave_addr + 14) as *mut c_void,
-                                    Ordering::SeqCst,
-                                );
-                                if let Ok(mut lock) = ACTIVE_INPUT_HOOK.lock() {
-                                    *lock = "XInput (Select + Start)".to_string();
+                        // Atomic reservation for XInput hook
+                        if XINPUT_HOOK_INSTALLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                            // Verify target site is not already detoured
+                            if let Ok(current_bytes) = read(target_u64, 14) {
+                                if current_bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
+                                    let dest = u64::from_le_bytes(current_bytes[6..14].try_into().unwrap_or_default());
+                                    if dest == callback_addr {
+                                        super::log_render(format!(
+                                            "init_xinput_hook: XInput target 0x{:X} already detoured to 0x{:X}, skipping install",
+                                            target_u64, dest
+                                        ));
+                                        break;
+                                    }
                                 }
-                                tracing::info!(
-                                    "Successfully hooked XInputGetState at 0x{:X} for Select + Start toggle",
-                                    target_u64
-                                );
-                                break;
                             }
-                            Err(err) => {
-                                tracing::warn!(
-                                    "Failed to hook XInputGetState at 0x{:X}: {:?}",
-                                    target_u64,
-                                    err
-                                );
+
+                            match trainlab_cave::cave::install(target_u64, hook, read, write, allocate)
+                            {
+                                Ok(installed) => {
+                                    XINPUT_TARGET_ADDR.store(installed.target, Ordering::SeqCst);
+                                    if let Ok(mut bytes) = XINPUT_ORIGINAL_BYTES.lock() {
+                                        if bytes.is_empty() {
+                                            *bytes = installed.original.clone();
+                                        }
+                                    }
+                                    ORIGINAL_XINPUT_GET_STATE.store(
+                                        (installed.cave_addr + payload.len() as u64) as *mut c_void,
+                                        Ordering::SeqCst,
+                                    );
+                                    if let Ok(mut lock) = ACTIVE_INPUT_HOOK.lock() {
+                                        *lock = "XInput (Select + Start)".to_string();
+                                    }
+                                    tracing::info!(
+                                        "Successfully hooked XInputGetState at 0x{:X} for Select + Start toggle",
+                                        target_u64
+                                    );
+                                    super::log_render(format!(
+                                        "init_xinput_hook: hooked XInputGetState at 0x{:X} -> cave 0x{:X}",
+                                        target_u64, installed.cave_addr
+                                    ));
+                                    break;
+                                }
+                                Err(err) => {
+                                    XINPUT_HOOK_INSTALLED.store(false, Ordering::SeqCst);
+                                    tracing::warn!(
+                                        "Failed to hook XInputGetState at 0x{:X}: {:?}",
+                                        target_u64,
+                                        err
+                                    );
+                                }
                             }
                         }
                     }
@@ -356,4 +443,92 @@ pub fn init_xinput_hook() {
 
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Unhook XInput and SDL2 GameController detours and restore original code bytes at hook sites.
+pub fn unhook_input_hooks() {
+    super::log_render("unhook_input_hooks initiated");
+
+    // 1. Unhook SDL2 GameController if installed
+    if SDL_HOOK_INSTALLED.swap(false, Ordering::SeqCst) {
+        let target = SDL_TARGET_ADDR.swap(0, Ordering::SeqCst);
+        let original = if let Ok(mut bytes) = SDL_ORIGINAL_BYTES.lock() {
+            std::mem::take(&mut *bytes)
+        } else {
+            Vec::new()
+        };
+
+        if target != 0 && !original.is_empty() {
+            super::log_render(format!(
+                "unhook_input_hooks: restoring {} original bytes for SDL2 at 0x{:X}",
+                original.len(),
+                target
+            ));
+            let mem = trainlab_core::memory::SelfProcess;
+            let write = |addr: u64, data: &[u8]| -> Result<usize, String> {
+                use trainlab_core::memory::ProcessMemory;
+                mem.write(addr, data).map_err(|e| e.to_string())
+            };
+            if let Err(e) = trainlab_cave::cave::restore(target, &original, write) {
+                super::log_render(format!(
+                    "unhook_input_hooks: FAILED to restore SDL2 hook site at 0x{:X}: {e}",
+                    target
+                ));
+            } else {
+                super::log_render(format!(
+                    "unhook_input_hooks: successfully restored SDL2 hook site at 0x{:X}",
+                    target
+                ));
+            }
+        }
+        ORIGINAL_SDL_GET_BUTTON.store(std::ptr::null_mut(), Ordering::SeqCst);
+    }
+
+    // 2. Unhook XInput if installed
+    if XINPUT_HOOK_INSTALLED.swap(false, Ordering::SeqCst) {
+        let target = XINPUT_TARGET_ADDR.swap(0, Ordering::SeqCst);
+        let original = if let Ok(mut bytes) = XINPUT_ORIGINAL_BYTES.lock() {
+            std::mem::take(&mut *bytes)
+        } else {
+            Vec::new()
+        };
+
+        if target != 0 && !original.is_empty() {
+            super::log_render(format!(
+                "unhook_input_hooks: restoring {} original bytes for XInput at 0x{:X}",
+                original.len(),
+                target
+            ));
+            let mem = trainlab_core::memory::SelfProcess;
+            let write = |addr: u64, data: &[u8]| -> Result<usize, String> {
+                use trainlab_core::memory::ProcessMemory;
+                mem.write(addr, data).map_err(|e| e.to_string())
+            };
+            if let Err(e) = trainlab_cave::cave::restore(target, &original, write) {
+                super::log_render(format!(
+                    "unhook_input_hooks: FAILED to restore XInput hook site at 0x{:X}: {e}",
+                    target
+                ));
+            } else {
+                super::log_render(format!(
+                    "unhook_input_hooks: successfully restored XInput hook site at 0x{:X}",
+                    target
+                ));
+            }
+        }
+        ORIGINAL_XINPUT_GET_STATE.store(std::ptr::null_mut(), Ordering::SeqCst);
+    }
+
+    // 3. Reset active hook descriptor
+    if let Ok(mut lock) = ACTIVE_INPUT_HOOK.lock() {
+        lock.clear();
+    }
+
+    // 4. Release all latches and held combo states
+    COMBO_WAS_DOWN.store(false, Ordering::SeqCst);
+    for slot in 0..XINPUT_SLOT_COUNT {
+        SLOT_PREV_BUTTONS[slot].store(0, Ordering::SeqCst);
+        SLOT_COMBO_WAS_DOWN[slot].store(false, Ordering::SeqCst);
+    }
+    super::overlay::reset_input_state();
 }

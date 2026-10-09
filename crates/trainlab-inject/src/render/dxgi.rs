@@ -75,6 +75,8 @@ type FnD3D11CreateDeviceAndSwapChain = unsafe extern "system" fn(
 static ORIGINAL_PRESENT: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 static HWND_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static HOOK_TARGET_ADDR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ORIGINAL_BYTES: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
 /// Our hooked `IDXGISwapChain::Present` callback.
 pub unsafe extern "system" fn hooked_present(
@@ -82,6 +84,18 @@ pub unsafe extern "system" fn hooked_present(
     sync_interval: u32,
     flags: u32,
 ) -> i32 {
+    let orig = ORIGINAL_PRESENT.load(Ordering::Relaxed);
+
+    // If shutting down or invalid swapchain pointer, bypass overlay and invoke original Present directly
+    if super::is_shutting_down() || swapchain.is_null() {
+        return if !orig.is_null() {
+            let orig_fn: FnPresent = std::mem::transmute(orig);
+            orig_fn(swapchain, sync_interval, flags)
+        } else {
+            0
+        };
+    }
+
     // 1. Increment live frame counter
     let fc = super::STATE.frame_count.fetch_add(1, Ordering::Relaxed) + 1;
     let vis = super::STATE.overlay_visible.load(Ordering::Relaxed);
@@ -108,6 +122,9 @@ pub unsafe extern "system" fn hooked_present(
                     super::log_render(format!("hooked_present: captured game HWND={:?}", desc.output_window));
                     super::input::install_wndproc_hook(desc.output_window);
                     HWND_INITIALIZED.store(true, Ordering::Relaxed);
+                    // Proactively assert foreground focus on the game window so Gamescope/Remote Play
+                    // immediately latches onto the game instead of any background companion window.
+                    super::input::focus_game_window();
                 }
             }
         }
@@ -124,7 +141,6 @@ pub unsafe extern "system" fn hooked_present(
     }
 
     // 5. Call original Present trampoline
-    let orig = ORIGINAL_PRESENT.load(Ordering::Relaxed);
     if !orig.is_null() {
         let orig_fn: FnPresent = std::mem::transmute(orig);
         orig_fn(swapchain, sync_interval, flags)
@@ -166,10 +182,11 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
     windows_sys::Win32::UI::WindowsAndMessaging::RegisterClassA(&wnd_class);
 
     let hwnd = CreateWindowExA(
-        0,
+        windows_sys::Win32::UI::WindowsAndMessaging::WS_EX_TOOLWINDOW,
         class_name.as_ptr(),
         b"TrainlabDummyWindow\0".as_ptr(),
-        WS_OVERLAPPEDWINDOW,
+        windows_sys::Win32::UI::WindowsAndMessaging::WS_POPUP
+            | windows_sys::Win32::UI::WindowsAndMessaging::WS_DISABLED,
         0,
         0,
         100,
@@ -320,14 +337,48 @@ pub fn init_dxgi_hook() {
                         crate::allocate(size, exec)
                     };
 
+                    // Atomic reservation: only ONE thread in the entire process can attempt installation
+                    if HOOK_INSTALLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                        super::log_render("init_dxgi_hook: already installed by another thread, skipping");
+                        break;
+                    }
+
+                    // Verify target site is not already detoured to our hooked_present callback
+                    if let Ok(current_bytes) = read(target_u64, 14) {
+                        if current_bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
+                            let dest = u64::from_le_bytes(current_bytes[6..14].try_into().unwrap_or_default());
+                            if dest == callback_addr {
+                                super::log_render(format!(
+                                    "init_dxgi_hook: target 0x{:X} is ALREADY hooked with our callback 0x{:X}, skipping install",
+                                    target_u64, dest
+                                ));
+                                break;
+                            }
+                        }
+                    }
+
                     match trainlab_cave::cave::install(target_u64, hook, read, write, allocate) {
                         Ok(installed) => {
+                            // Save target address and original instructions for unhook on shutdown.
+                            // CRITICAL: only store original bytes if not already captured to preserve
+                            // true game instructions and never overwrite with a trainlab trampoline.
+                            HOOK_TARGET_ADDR.store(installed.target, Ordering::SeqCst);
+                            if let Ok(mut bytes) = ORIGINAL_BYTES.lock() {
+                                if bytes.is_empty() {
+                                    *bytes = installed.original.clone();
+                                    super::log_render(format!(
+                                        "init_dxgi_hook: captured {} true original bytes at 0x{:X}",
+                                        bytes.len(),
+                                        installed.target
+                                    ));
+                                }
+                            }
+
                             // Point original present to the trampoline return path
                             ORIGINAL_PRESENT.store(
                                 (installed.cave_addr + payload.len() as u64) as *mut c_void,
                                 Ordering::SeqCst,
                             );
-                            HOOK_INSTALLED.store(true, Ordering::SeqCst);
                             super::STATE.present_hooked.store(true, Ordering::SeqCst);
 
                             let api_name = if d3d12_mod != std::ptr::null_mut() {
@@ -349,6 +400,8 @@ pub fn init_dxgi_hook() {
                             break;
                         }
                         Err(err) => {
+                            // Release reservation so a future attempt can retry if needed
+                            HOOK_INSTALLED.store(false, Ordering::SeqCst);
                             super::log_render(format!(
                                 "init_dxgi_hook: cave::install FAILED at 0x{:X}: {:?}",
                                 target_u64,
@@ -364,4 +417,47 @@ pub fn init_dxgi_hook() {
 
         std::thread::sleep(Duration::from_millis(1000));
     }
+}
+
+/// Unhook DXGI Present trampoline and restore original code bytes at the hook site.
+pub fn unhook_dxgi_present() {
+    if !HOOK_INSTALLED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+
+    let target = HOOK_TARGET_ADDR.swap(0, Ordering::SeqCst);
+    let original = if let Ok(mut bytes) = ORIGINAL_BYTES.lock() {
+        std::mem::take(&mut *bytes)
+    } else {
+        Vec::new()
+    };
+
+    if target != 0 && !original.is_empty() {
+        super::log_render(format!(
+            "unhook_dxgi_present: restoring {} original bytes at 0x{:X}",
+            original.len(),
+            target
+        ));
+
+        let mem = trainlab_core::memory::SelfProcess;
+        let write = |addr: u64, data: &[u8]| -> Result<usize, String> {
+            use trainlab_core::memory::ProcessMemory;
+            mem.write(addr, data).map_err(|e| e.to_string())
+        };
+
+        if let Err(e) = trainlab_cave::cave::restore(target, &original, write) {
+            super::log_render(format!(
+                "unhook_dxgi_present: FAILED to restore original bytes at 0x{:X}: {e}",
+                target
+            ));
+        } else {
+            super::log_render(format!(
+                "unhook_dxgi_present: successfully restored Present hook site at 0x{:X}",
+                target
+            ));
+        }
+    }
+
+    ORIGINAL_PRESENT.store(std::ptr::null_mut(), Ordering::SeqCst);
+    super::STATE.present_hooked.store(false, Ordering::SeqCst);
 }

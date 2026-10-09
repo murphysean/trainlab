@@ -85,6 +85,36 @@ mod watch {
 pub const DEFAULT_PORT: u16 = 31337;
 
 static STARTED: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static BOUND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// Check if trainlab-inject has been requested to shut down.
+pub fn is_shutting_down() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
+}
+
+/// Gracefully shut down trainlab-inject inside the target game process.
+/// Restores all detours (DXGI Present, WndProc, code cave captures),
+/// disarms hardware watchpoints, and signals the TCP listener to terminate.
+pub fn shutdown() {
+    if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
+        return; // Already shutting down
+    }
+
+    tracing::info!("trainlab-inject: shutting down in-process hooks and listener");
+
+    // 1. Shut down render and input hooks (unhooks DXGI Present & WndProc)
+    render::shutdown();
+
+    // 2. Uninstall all register captures and disarm watchpoints/breakpoints
+    uninstall_all_captures();
+
+    // 3. Unblock and terminate the TCP listener thread by issuing a local loopback ping
+    let port = BOUND_PORT.load(Ordering::SeqCst);
+    if port != 0 {
+        let _ = TcpStream::connect(("127.0.0.1", port));
+    }
+}
 
 /// Start the listener thread. Safe to call multiple times; only the first
 /// call actually spawns the thread. Returns the bound port.
@@ -109,6 +139,7 @@ pub fn start(port: u16) -> std::io::Result<u16> {
 
     let listener = TcpListener::bind((bind_addr, port))?;
     let actual = listener.local_addr()?.port();
+    BOUND_PORT.store(actual, Ordering::SeqCst);
     tracing::info!(host = bind_addr, port = actual, "trainlab-inject listening");
 
     // Initialize passive detection (e.g. third-party overlay scanning) without installing hooks
@@ -118,6 +149,10 @@ pub fn start(port: u16) -> std::io::Result<u16> {
         .name("trainlab-inject".into())
         .spawn(move || {
             for conn in listener.incoming() {
+                if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                    tracing::info!("trainlab-inject listener thread exiting on shutdown request");
+                    break;
+                }
                 match conn {
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
@@ -134,6 +169,9 @@ pub fn start(port: u16) -> std::io::Result<u16> {
                             .spawn(move || handle_client(stream));
                     }
                     Err(e) => {
+                        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                            break;
+                        }
                         tracing::warn!(error = %e, "error accepting connection");
                     }
                 }
@@ -164,6 +202,10 @@ fn handle_client(mut stream: TcpStream) {
         .name("trainlab-inject-push".into())
         .spawn(move || {
             loop {
+                if is_shutting_down() {
+                    return;
+                }
+
                 let outbound = render::overlay::drain_outbound_events();
                 for evt in outbound {
                     let evt_msg = Message::Event(evt);
@@ -189,6 +231,10 @@ fn handle_client(mut stream: TcpStream) {
         });
 
     loop {
+        if is_shutting_down() {
+            break;
+        }
+
         // Read the 4-byte length prefix.
         let mut len_buf = [0u8; 4];
         if read_exact(&mut stream, &mut len_buf).is_err() {
@@ -597,6 +643,10 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
         Request::SetOverlayVisible { visible } => {
             render::set_overlay_visible(visible);
             Response::OverlayVisibilitySet { visible }
+        }
+        Request::FocusGameWindow => {
+            let ok = render::focus_game_window();
+            Response::GameFocused { ok }
         }
         Request::SyncCheats { cheats } => {
             let count = cheats.len();
@@ -1008,9 +1058,22 @@ pub extern "C" fn trainlab_constructor() {
 #[unsafe(link_section = ".init_array")]
 static INIT_ARRAY: extern "C" fn() = trainlab_constructor;
 
+/// Automatic library destructor on Unix/Linux. Runs on process teardown or `dlclose`.
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub extern "C" fn trainlab_destructor() {
+    shutdown();
+}
+
+#[cfg(unix)]
+#[used]
+#[unsafe(link_section = ".fini_array")]
+static FINI_ARRAY: extern "C" fn() = trainlab_destructor;
+
 /// Windows `DllMain`. On `DLL_PROCESS_ATTACH` we start the listener thread so
 /// that simply `LoadLibrary`-ing the DLL (via injection) brings up the TCP
-/// server automatically.
+/// server automatically. On `DLL_PROCESS_DETACH` we cleanly restore detours,
+/// unblock threads, and release resources.
 #[cfg(windows)]
 #[unsafe(no_mangle)]
 pub extern "system" fn DllMain(
@@ -1019,9 +1082,13 @@ pub extern "system" fn DllMain(
     _reserved: *mut core::ffi::c_void,
 ) -> i32 {
     const DLL_PROCESS_ATTACH: u32 = 1;
+    const DLL_PROCESS_DETACH: u32 = 0;
+
     if reason == DLL_PROCESS_ATTACH {
         // Start the listener in a detached thread so DllMain returns promptly.
         let _ = start(DEFAULT_PORT);
+    } else if reason == DLL_PROCESS_DETACH {
+        shutdown();
     }
     1 // TRUE
 }
@@ -1078,6 +1145,7 @@ mod tests {
     fn test_initialize_session_handshake() {
         let _guard = network::TEST_MUTEX.lock().unwrap();
         let mem = SelfProcess;
+        // Default features: network hooks are opt-in (disabled by default)
         let req = Request::InitializeSession {
             features: trainlab_core::protocol::InjectFeaturesConfig::default(),
         };
@@ -1092,8 +1160,24 @@ mod tests {
                 assert!(capabilities.contains(&"memory".to_string()));
                 assert!(capabilities.contains(&"aob_scan".to_string()));
                 assert!(capabilities.contains(&"overlay".to_string()));
-                assert!(capabilities.contains(&"network_capture".to_string()));
+                assert!(!capabilities.contains(&"network_capture".to_string()));
                 assert!(!diagnostics.target_os.is_empty());
+            }
+            other => panic!("expected SessionReady, got {other:?}"),
+        }
+
+        // Explicitly opted-in network features: network_capture is advertised
+        let mut net_features = trainlab_core::protocol::InjectFeaturesConfig::default();
+        net_features.network.winsock = true;
+        let req2 = Request::InitializeSession {
+            features: net_features,
+        };
+        let frame2 = protocol::encode(&req2).unwrap();
+        let decoded2: Request = protocol::decode(&frame2).unwrap();
+        let resp2 = handle_request_guarded(&mem, decoded2);
+        match resp2 {
+            Response::SessionReady { capabilities, .. } => {
+                assert!(capabilities.contains(&"network_capture".to_string()));
             }
             other => panic!("expected SessionReady, got {other:?}"),
         }

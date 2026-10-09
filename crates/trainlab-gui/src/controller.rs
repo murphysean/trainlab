@@ -595,13 +595,19 @@ pub fn attach_and_initialize(
             features.input.xinput = render_cfg.xinput_hooks;
         }
         if let Some(net_cfg) = &prof.network {
-            if let Some(en) = net_cfg.enabled
-                && !en
-            {
-                features.network.winsock = false;
-                features.network.winhttp = false;
-                features.network.schannel = false;
-                features.network.steamworks = false;
+            if let Some(en) = net_cfg.enabled {
+                if !en {
+                    features.network.winsock = false;
+                    features.network.winhttp = false;
+                    features.network.schannel = false;
+                    features.network.steamworks = false;
+                } else {
+                    // Profile explicitly opted into network capture: enable requested hooks or default to true
+                    features.network.winsock = net_cfg.winsock.unwrap_or(true);
+                    features.network.winhttp = net_cfg.winhttp.unwrap_or(true);
+                    features.network.schannel = net_cfg.schannel.unwrap_or(true);
+                    features.network.steamworks = net_cfg.steamworks.unwrap_or(true);
+                }
             }
             if let Some(ws) = net_cfg.winsock {
                 features.network.winsock = ws;
@@ -751,6 +757,14 @@ pub fn spawn_auto_attach_worker(
                 match attach_and_initialize(&session, target, true, "AUTO-ATTACH") {
                     Ok(v) => {
                         tracing::info!("Auto-attach succeeded (inject v{v})!");
+                        // Automatically background the trainer window now that injection, handshake,
+                        // and profile cheats are loaded and primed.
+                        if let Ok(mut s) = session.lock() {
+                            s.request_window_cmd("hide");
+                        }
+                        // Assert foreground focus on the game window via the injected DLL
+                        let _ = request(&session, &Request::FocusGameWindow);
+
                         if let Some(ctx) = &egui_ctx {
                             ctx.request_repaint();
                         }

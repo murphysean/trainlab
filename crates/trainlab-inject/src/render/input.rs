@@ -27,6 +27,17 @@ pub unsafe extern "system" fn hooked_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if super::is_shutting_down() {
+        let orig = ORIGINAL_WNDPROC.load(Ordering::Relaxed);
+        return if !orig.is_null() {
+            let orig_fn: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT =
+                unsafe { std::mem::transmute(orig) };
+            unsafe { CallWindowProcA(Some(orig_fn), hwnd, msg, wparam, lparam) }
+        } else {
+            unsafe { DefWindowProcA(hwnd, msg, wparam, lparam) }
+        };
+    }
+
     // 1. Check for Overlay Toggle Hotkey (INSERT key, F11, or Select/Back raw scan)
     if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
         if wparam == VK_INSERT as usize || wparam == 0x7A
@@ -126,5 +137,37 @@ pub fn install_wndproc_hook(hwnd: HWND) -> bool {
             tracing::warn!("Failed to hook WndProc on HWND {:?}", hwnd);
             false
         }
+    }
+}
+
+/// Restore the original WndProc on the hooked window.
+pub fn uninstall_wndproc_hook() {
+    let hwnd = HOOKED_HWND.swap(std::ptr::null_mut(), Ordering::SeqCst);
+    let orig = ORIGINAL_WNDPROC.swap(std::ptr::null_mut(), Ordering::SeqCst);
+    if !hwnd.is_null() && !orig.is_null() {
+        unsafe {
+            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, orig as isize);
+        }
+        super::STATE.wndproc_hooked.store(false, Ordering::SeqCst);
+        tracing::info!("Successfully restored original WndProc on HWND {:?}", hwnd);
+    }
+}
+
+/// Assert foreground and active focus on the hooked game window.
+pub fn focus_game_window() -> bool {
+    let hwnd = HOOKED_HWND.load(Ordering::Relaxed);
+    if !hwnd.is_null() {
+        unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                BringWindowToTop, SetForegroundWindow, ShowWindow, SW_SHOW,
+            };
+            ShowWindow(hwnd, SW_SHOW);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+        super::log_render(format!("focus_game_window: asserted foreground on game HWND {:?}", hwnd));
+        true
+    } else {
+        false
     }
 }

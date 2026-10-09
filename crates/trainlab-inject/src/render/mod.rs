@@ -54,6 +54,31 @@ pub static STATE: RenderState = RenderState {
     detected_overlays: Mutex::new(Vec::new()),
 };
 
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Check if the process is currently shutting down.
+pub fn is_shutting_down() -> bool {
+    SHUTTING_DOWN.load(Ordering::Relaxed)
+}
+
+/// Clean up in-game render and input hooks during process detachment.
+pub fn shutdown() {
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
+    log_render("render::shutdown initiated");
+
+    #[cfg(windows)]
+    {
+        // 1. Unhook controller input hooks (XInput and SDL2 GameController)
+        xinput::unhook_input_hooks();
+
+        // 2. First restore original WndProc so game receives window messages directly
+        input::uninstall_wndproc_hook();
+
+        // 3. Unhook DXGI Present and restore original code bytes at the hook site
+        dxgi::unhook_dxgi_present();
+    }
+}
+
 pub fn log_render(msg: impl std::fmt::Display) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -119,20 +144,31 @@ pub fn configure(overlay: bool, hook_wndproc: bool, xinput_hooks: bool) {
     {
         let _ = hook_wndproc; // Used when present hook resolves HWND
 
+        static DXGI_HOOK_THREAD_SPAWNED: AtomicBool = AtomicBool::new(false);
+        static XINPUT_HOOK_THREAD_SPAWNED: AtomicBool = AtomicBool::new(false);
+
         if overlay {
-            tracing::info!("Enabling in-game DXGI overlay hooking via IPC");
-            std::thread::spawn(|| {
-                dxgi::init_dxgi_hook();
-            });
+            if !DXGI_HOOK_THREAD_SPAWNED.swap(true, Ordering::SeqCst) {
+                tracing::info!("Enabling in-game DXGI overlay hooking via IPC (first spawn)");
+                std::thread::spawn(|| {
+                    dxgi::init_dxgi_hook();
+                });
+            } else {
+                tracing::debug!("DXGI overlay hook thread already spawned; ignoring redundant configure");
+            }
         } else {
             tracing::info!("In-game DXGI overlay hooking disabled via IPC configuration");
         }
 
         if xinput_hooks {
-            tracing::info!("Enabling XInput controller hooking via IPC");
-            std::thread::spawn(|| {
-                xinput::init_xinput_hook();
-            });
+            if !XINPUT_HOOK_THREAD_SPAWNED.swap(true, Ordering::SeqCst) {
+                tracing::info!("Enabling XInput controller hooking via IPC (first spawn)");
+                std::thread::spawn(|| {
+                    xinput::init_xinput_hook();
+                });
+            } else {
+                tracing::debug!("XInput controller hook thread already spawned; ignoring redundant configure");
+            }
         } else {
             tracing::info!("XInput controller hooking disabled via IPC configuration");
         }
@@ -186,4 +222,16 @@ pub fn set_overlay_visible(visible: bool) {
 pub fn toggle_overlay() {
     let current = STATE.overlay_visible.load(Ordering::Relaxed);
     STATE.overlay_visible.store(!current, Ordering::Relaxed);
+}
+
+/// Assert foreground and active focus on the game window.
+pub fn focus_game_window() -> bool {
+    #[cfg(windows)]
+    {
+        input::focus_game_window()
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }

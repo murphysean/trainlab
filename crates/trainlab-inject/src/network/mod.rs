@@ -20,11 +20,11 @@ pub mod winhttp;
 pub mod winsock;
 
 /// Global network hook configuration and captured packet ring buffer.
-static NETWORK_ENABLED: AtomicBool = AtomicBool::new(true);
-static WINSOCK_ENABLED: AtomicBool = AtomicBool::new(true);
-static WINHTTP_ENABLED: AtomicBool = AtomicBool::new(true);
-static SCHANNEL_ENABLED: AtomicBool = AtomicBool::new(true);
-static STEAMWORKS_ENABLED: AtomicBool = AtomicBool::new(true);
+static NETWORK_ENABLED: AtomicBool = AtomicBool::new(false);
+static WINSOCK_ENABLED: AtomicBool = AtomicBool::new(false);
+static WINHTTP_ENABLED: AtomicBool = AtomicBool::new(false);
+static SCHANNEL_ENABLED: AtomicBool = AtomicBool::new(false);
+static STEAMWORKS_ENABLED: AtomicBool = AtomicBool::new(false);
 static CAPTURE_LOOPBACK: AtomicBool = AtomicBool::new(false);
 static IGNORE_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static IGNORE_HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -179,6 +179,9 @@ pub fn reset_stats() {
 
 /// Whether network capture is globally active.
 pub fn is_enabled() -> bool {
+    if crate::is_shutting_down() {
+        return false;
+    }
     NETWORK_ENABLED.load(Ordering::Relaxed)
 }
 
