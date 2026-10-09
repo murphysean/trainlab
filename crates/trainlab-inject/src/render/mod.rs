@@ -81,6 +81,10 @@ pub fn shutdown() {
 
         // 3. Unhook DXGI Present and restore original code bytes at the hook site
         dxgi::unhook_dxgi_present();
+
+        // 4. Release all D3D11 and D3D12 device, context, and swapchain backbuffer references
+        d3d11::shutdown();
+        d3d12::shutdown();
     }
 }
 

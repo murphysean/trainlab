@@ -83,6 +83,16 @@ struct D3D12RendererState {
 
 static D3D12_RENDERER: Mutex<Option<D3D12RendererState>> = Mutex::new(None);
 
+/// Release all Direct3D 12 resources, render target views, and device references.
+pub fn shutdown() {
+    if let Ok(mut lock) = D3D12_RENDERER.lock() {
+        if lock.is_some() {
+            super::log_render("d3d12::shutdown: releasing all D3D12 render targets, command lists, and device references");
+            *lock = None;
+        }
+    }
+}
+
 const HLSL_SHADER: &[u8] = b"
 cbuffer ProjectionMatrixBuffer : register(b0) {
     float4x4 ProjectionMatrix;

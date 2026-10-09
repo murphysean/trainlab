@@ -136,8 +136,11 @@ if [ "$SPAWN_TRAINER" -eq 1 ]; then
     if [ -n "$PROTON_RUNNER" ] && [ -x "$PROTON_RUNNER" ] && [ -n "$TARGET_WIN_EXE" ]; then
         echo "[trainlab] Launching Windows trainer via Proton: $PROTON_RUNNER ($TARGET_WIN_EXE $AUTO_ARGS)" >>/tmp/trainlab_launch_out.log
         # Scrub Steam AppID, LD_PRELOAD (to avoid 32-bit gameoverlayrenderer mismatch), and client launch env
+        # Completely disable Wine audio drivers (winepulse, winealsa, mmdevapi) so companion never touches PipeWire/PulseAudio
         env -u LD_PRELOAD -u SteamAppId -u SteamGameId -u STEAM_COMPAT_APP_ID -u SteamClientLaunch \
             SteamAppId=0 SteamGameId=0 \
+            WINEDLLOVERRIDES="winepulse.drv=d;winealsa.drv=d;mmdevapi=d" \
+            WINELOADERNOEXEC=1 \
             TRAINLAB_GAMESCOPE="${TRAINLAB_GAMESCOPE:-0}" TRAINLAB_AUTO_INJECT=1 TRAINLAB_AUTO_EXIT=1 TRAINLAB_SCALE="${TRAINLAB_SCALE:-1.0}" \
             "$PROTON_RUNNER" run "$TARGET_WIN_EXE" $AUTO_ARGS 200>&- >>/tmp/trainlab_launch_out.log 2>&1 &
         TRAINER_PID=$!
@@ -236,7 +239,15 @@ cleanup() {
     pkill -TERM -f trainlab.exe 2>/dev/null
     pkill -TERM -f trainlab-gui-linux 2>/dev/null
     pkill -TERM -x trainlab 2>/dev/null
-    sleep 0.2
+
+    # Allow companion processes up to 1.5s to shut down cleanly before SIGKILL
+    for _ in $(seq 1 15); do
+        if ! pgrep -f "trainlab" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+
     if [ -n "$TRAINER_PID" ]; then
         kill -9 "$TRAINER_PID" 2>/dev/null
     fi
@@ -245,7 +256,19 @@ cleanup() {
     pkill -9 -f trainlab-gui-linux 2>/dev/null
     pkill -9 -x trainlab 2>/dev/null
 
-    # 4. Release and remove lock
+    # 4. Proactively clear any stuck PipeWire streaming metadata if left lingering by Steam teardown
+    if command -v pw-metadata >/dev/null 2>&1; then
+        cur_sink=$(pw-metadata 0 default.configured.audio.sink 2>/dev/null | grep -o 'steam-streaming' || true)
+        if [ -n "$cur_sink" ]; then
+            pw-metadata 0 default.configured.audio.sink null 2>/dev/null || true
+        fi
+        cur_src=$(pw-metadata 0 default.configured.audio.source 2>/dev/null | grep -o 'steam-streaming' || true)
+        if [ -n "$cur_src" ]; then
+            pw-metadata 0 default.configured.audio.source null 2>/dev/null || true
+        fi
+    fi
+
+    # 5. Release and remove lock
     flock -u 200 2>/dev/null || true
     exec 200>&-
     rm -f "$LOCK_FILE" 2>/dev/null

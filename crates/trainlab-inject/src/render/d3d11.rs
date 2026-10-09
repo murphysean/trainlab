@@ -70,6 +70,16 @@ struct RendererState {
 
 static RENDERER: Mutex<Option<RendererState>> = Mutex::new(None);
 
+/// Release all Direct3D 11 resources, render target views, and device references.
+pub fn shutdown() {
+    if let Ok(mut lock) = RENDERER.lock() {
+        if lock.is_some() {
+            super::log_render("d3d11::shutdown: releasing all D3D11 render targets, textures, buffers, and device references");
+            *lock = None;
+        }
+    }
+}
+
 const HLSL_SHADER: &[u8] = b"
 cbuffer ProjectionMatrixBuffer : register(b0) {
     float4x4 ProjectionMatrix;
