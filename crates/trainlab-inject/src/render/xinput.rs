@@ -292,11 +292,16 @@ pub fn init_xinput_hook() {
                     };
 
                     // Atomic reservation for SDL2 hook
-                    if SDL_HOOK_INSTALLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                    if SDL_HOOK_INSTALLED
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
                         // Verify target site is not already detoured
                         if let Ok(current_bytes) = read(target_u64, 14) {
                             if current_bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
-                                let dest = u64::from_le_bytes(current_bytes[6..14].try_into().unwrap_or_default());
+                                let dest = u64::from_le_bytes(
+                                    current_bytes[6..14].try_into().unwrap_or_default(),
+                                );
                                 if dest == callback_addr {
                                     super::log_render(format!(
                                         "init_xinput_hook: SDL2 target 0x{:X} already detoured to 0x{:X}, skipping install",
@@ -316,8 +321,10 @@ pub fn init_xinput_hook() {
                                     *bytes = installed.original.clone();
                                 }
                             }
-                            ORIGINAL_SDL_GET_BUTTON
-                                .store((installed.cave_addr + payload.len() as u64) as *mut c_void, Ordering::SeqCst);
+                            ORIGINAL_SDL_GET_BUTTON.store(
+                                (installed.cave_addr + payload.len() as u64) as *mut c_void,
+                                Ordering::SeqCst,
+                            );
                             if let Ok(mut lock) = ACTIVE_INPUT_HOOK.lock() {
                                 *lock = "SDL2 GameController".to_string();
                             }
@@ -375,11 +382,17 @@ pub fn init_xinput_hook() {
                         };
 
                         // Atomic reservation for XInput hook
-                        if XINPUT_HOOK_INSTALLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                        if XINPUT_HOOK_INSTALLED
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
                             // Verify target site is not already detoured
                             if let Ok(current_bytes) = read(target_u64, 14) {
-                                if current_bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
-                                    let dest = u64::from_le_bytes(current_bytes[6..14].try_into().unwrap_or_default());
+                                if current_bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00])
+                                {
+                                    let dest = u64::from_le_bytes(
+                                        current_bytes[6..14].try_into().unwrap_or_default(),
+                                    );
                                     if dest == callback_addr {
                                         super::log_render(format!(
                                             "init_xinput_hook: XInput target 0x{:X} already detoured to 0x{:X}, skipping install",
@@ -390,8 +403,9 @@ pub fn init_xinput_hook() {
                                 }
                             }
 
-                            match trainlab_cave::cave::install(target_u64, hook, read, write, allocate)
-                            {
+                            match trainlab_cave::cave::install(
+                                target_u64, hook, read, write, allocate,
+                            ) {
                                 Ok(installed) => {
                                     XINPUT_TARGET_ADDR.store(installed.target, Ordering::SeqCst);
                                     if let Ok(mut bytes) = XINPUT_ORIGINAL_BYTES.lock() {

@@ -159,13 +159,16 @@ pub fn focus_game_window() -> bool {
     if !hwnd.is_null() {
         unsafe {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                BringWindowToTop, SetForegroundWindow, ShowWindow, SW_SHOW,
+                BringWindowToTop, SW_SHOW, SetForegroundWindow, ShowWindow,
             };
             ShowWindow(hwnd, SW_SHOW);
             BringWindowToTop(hwnd);
             SetForegroundWindow(hwnd);
         }
-        super::log_render(format!("focus_game_window: asserted foreground on game HWND {:?}", hwnd));
+        super::log_render(format!(
+            "focus_game_window: asserted foreground on game HWND {:?}",
+            hwnd
+        ));
         true
     } else {
         false

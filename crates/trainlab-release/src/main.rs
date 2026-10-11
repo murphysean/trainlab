@@ -202,9 +202,24 @@ fn main() -> Result<()> {
     if args.deploy {
         println!("\n\x1b[1;36m=== 5. Deploying to Remote Devices ===\x1b[0m");
         let targets: [(&str, &str, &[&str], Option<String>); 3] = [
-            ("Steam Deck", "deck", &["192.168.0.32", "192.168.254.27"], std::env::var("STEAM_DECK_IP").ok()),
-            ("Steam Machine", "deck", &["192.168.0.30", "192.168.254.143"], std::env::var("STEAM_MACHINE_IP").ok()),
-            ("Steam Frame", "steamos", &["192.168.0.36"], std::env::var("STEAM_FRAME_IP").ok()),
+            (
+                "Steam Deck",
+                "deck",
+                &["192.168.0.32", "192.168.254.27"],
+                std::env::var("STEAM_DECK_IP").ok(),
+            ),
+            (
+                "Steam Machine",
+                "deck",
+                &["192.168.0.30", "192.168.254.143"],
+                std::env::var("STEAM_MACHINE_IP").ok(),
+            ),
+            (
+                "Steam Frame",
+                "steamos",
+                &["192.168.0.36"],
+                std::env::var("STEAM_FRAME_IP").ok(),
+            ),
         ];
         for (name, user, default_ips, override_ip) in &targets {
             let mut resolved_ip = None;
@@ -213,15 +228,20 @@ fn main() -> Result<()> {
             } else {
                 for candidate in *default_ips {
                     let probe = Command::new("ssh")
-                        .args(&[
-                            "-o", "ConnectTimeout=2",
-                            "-o", "StrictHostKeyChecking=accept-new",
-                            "-o", "BatchMode=yes",
+                        .args([
+                            "-o",
+                            "ConnectTimeout=2",
+                            "-o",
+                            "StrictHostKeyChecking=accept-new",
+                            "-o",
+                            "BatchMode=yes",
                             &format!("{user}@{candidate}"),
                             "true",
                         ])
                         .status();
-                    if let Ok(st) = probe && st.success() {
+                    if let Ok(st) = probe
+                        && st.success()
+                    {
                         resolved_ip = Some(candidate.to_string());
                         break;
                     }
@@ -231,7 +251,10 @@ fn main() -> Result<()> {
             let ip = match resolved_ip {
                 Some(ip) => ip,
                 None => {
-                    eprintln!("\x1b[1;33m[warn]\x1b[0m {} is currently offline / unreachable across {:?}", name, default_ips);
+                    eprintln!(
+                        "\x1b[1;33m[warn]\x1b[0m {} is currently offline / unreachable across {:?}",
+                        name, default_ips
+                    );
                     continue;
                 }
             };
@@ -272,7 +295,10 @@ fn main() -> Result<()> {
                 ],
             );
             if let Err(e) = run_cmd("scp", &str_args) {
-                eprintln!("\x1b[1;33m[warn]\x1b[0m Remote deploy to {} ({}) failed: {e}", name, ip);
+                eprintln!(
+                    "\x1b[1;33m[warn]\x1b[0m Remote deploy to {} ({}) failed: {e}",
+                    name, ip
+                );
             } else {
                 let chmod_cmd = "chmod +x ~/Documents/Trainers/Trainlab/trainlab ~/Documents/Trainers/Trainlab/trainlab.exe ~/Documents/Trainers/Trainlab/launch.sh 2>/dev/null || true";
                 let _ = run_cmd(
@@ -286,7 +312,10 @@ fn main() -> Result<()> {
                         chmod_cmd,
                     ],
                 );
-                println!("\x1b[1;32m[ok]\x1b[0m Successfully deployed to {} ({})", name, ip);
+                println!(
+                    "\x1b[1;32m[ok]\x1b[0m Successfully deployed to {} ({})",
+                    name, ip
+                );
             }
         }
     }

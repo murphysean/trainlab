@@ -1134,10 +1134,10 @@ impl TrainlabMcpServer {
         &self,
         Parameters(args): Parameters<AttachGameArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        if let Some(p) = &args.dll_path {
-            if let Ok(mut s) = self.session.lock() {
-                s.set_dll_path(p.clone());
-            }
+        if let Some(p) = &args.dll_path
+            && let Ok(mut s) = self.session.lock()
+        {
+            s.set_dll_path(p.clone());
         }
 
         let result = if args.inject {

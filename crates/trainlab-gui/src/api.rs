@@ -1166,10 +1166,10 @@ async fn attach_handler(
     let egui_ctx = state.egui_ctx.clone();
 
     tokio::task::spawn_blocking(move || {
-        if let Some(dll) = req.dll_path {
-            if let Ok(mut s) = session.lock() {
-                s.set_dll_path(dll);
-            }
+        if let Some(dll) = req.dll_path
+            && let Ok(mut s) = session.lock()
+        {
+            s.set_dll_path(dll);
         }
         let auto_init = req.auto_init.unwrap_or(true);
         match crate::controller::attach_and_initialize(
@@ -1229,4 +1229,3 @@ async fn attach_handler(
         )
     })?
 }
-

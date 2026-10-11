@@ -235,7 +235,7 @@ impl HotkeyManager {
             .name("trainlab-hotkeys".into())
             .spawn(move || {
                 use windows_sys::Win32::UI::WindowsAndMessaging::{
-                    PeekMessageW, PM_REMOVE, WM_HOTKEY, MSG,
+                    MSG, PM_REMOVE, PeekMessageW, WM_HOTKEY,
                 };
                 let mut current_specs: std::collections::HashMap<i32, (u64, HotkeySpec)> =
                     std::collections::HashMap::new();
@@ -302,4 +302,3 @@ impl HotkeyManager {
         let _ = self.cmd_tx.send(HotkeyCommand::Sync(hotkeys));
     }
 }
-

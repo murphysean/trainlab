@@ -799,7 +799,9 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
             Response::PinsCleared
         }
         Request::Shutdown => {
-            render::log_render("dispatch_request: received Shutdown IPC request; scheduling graceful teardown");
+            render::log_render(
+                "dispatch_request: received Shutdown IPC request; scheduling graceful teardown",
+            );
             std::thread::spawn(|| {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 shutdown();
@@ -1097,7 +1099,7 @@ fn install_termination_handlers() {
             fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
         }
         signal(15, on_posix_signal); // SIGTERM
-        signal(2, on_posix_signal);  // SIGINT
+        signal(2, on_posix_signal); // SIGINT
         signal(21, on_posix_signal); // SIGBREAK
         signal(22, on_posix_signal); // SIGABRT
 

@@ -498,7 +498,9 @@ pub fn attach_and_initialize(
                 let profiles = crate::profile::discover_profiles();
                 let mut detected = None;
                 for cand in &candidates {
-                    if let Some((_file, _p)) = crate::profile::find_profile_for_game(&profiles, &cand.name) {
+                    if let Some((_file, _p)) =
+                        crate::profile::find_profile_for_game(&profiles, &cand.name)
+                    {
                         detected = Some(cand.name.clone());
                         break;
                     }
@@ -507,7 +509,8 @@ pub fn attach_and_initialize(
                     detected = Some(candidates[0].name.clone());
                 }
                 detected.ok_or_else(|| {
-                    "no game executable specified and no running game candidate detected".to_string()
+                    "no game executable specified and no running game candidate detected"
+                        .to_string()
                 })?
             }
         }
@@ -523,7 +526,10 @@ pub fn attach_and_initialize(
             let resolved = resolve_dll_path(&current_dll);
             s.set_dll_path(resolved);
         }
-        s.log_activity(source, format!("attaching and injecting into '{game_name}'..."));
+        s.log_activity(
+            source,
+            format!("attaching and injecting into '{game_name}'..."),
+        );
     }
 
     // 2. Perform find & inject & TCP connect
@@ -659,9 +665,7 @@ pub fn attach_and_initialize(
         }) => {
             if let Ok(mut s) = session.lock() {
                 s.set_dll_capabilities(capabilities.clone());
-                s.set_network_hooks_enabled(
-                    capabilities.contains(&"network_capture".to_string()),
-                );
+                s.set_network_hooks_enabled(capabilities.contains(&"network_capture".to_string()));
                 s.log_activity(
                     source,
                     format!(
@@ -746,11 +750,11 @@ pub fn spawn_auto_attach_worker(
             std::thread::sleep(Duration::from_millis(1500));
 
             while start.elapsed() < timeout {
-                if let Ok(s) = session.lock() {
-                    if s.connected() {
-                        tracing::info!("Auto-attach: session already connected, worker exiting.");
-                        return;
-                    }
+                if let Ok(s) = session.lock()
+                    && s.connected()
+                {
+                    tracing::info!("Auto-attach: session already connected, worker exiting.");
+                    return;
                 }
 
                 let target = target_game.as_deref();
@@ -781,4 +785,3 @@ pub fn spawn_auto_attach_worker(
         })
         .ok();
 }
-
