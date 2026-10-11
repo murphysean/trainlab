@@ -172,12 +172,7 @@ unsafe fn install_hook(
 
     let fn_ptr = unsafe { GetProcAddress(secur32_mod, proc_name.as_ptr()) };
     if let Some(target_fn) = fn_ptr {
-        let target_u64 = target_fn as u64;
-        let payload = trainlab_cave::emitter::jmp_abs(callback_addr);
-        let hook = trainlab_cave::cave::HookKind::Trampoline {
-            payload: payload.clone(),
-            jump: trainlab_cave::cave::JumpStyle::Absolute,
-        };
+        let mut target_u64 = target_fn as u64;
 
         let mem = trainlab_core::memory::SelfProcess;
         let read = |addr: u64, len: usize| -> Result<Vec<u8>, String> {
@@ -188,6 +183,29 @@ unsafe fn install_hook(
             use trainlab_core::memory::ProcessMemory;
             mem.write(addr, data).map_err(|e| e.to_string())
         };
+
+        // Resolve Wine/Proton export jump stubs (E9 rel32) so we hook the
+        // real function body rather than splicing the stub incorrectly.
+        if let Ok(lead) = read(target_u64, 5) {
+            if lead.len() == 5 && lead[0] == 0xE9 {
+                let rel = i32::from_le_bytes([lead[1], lead[2], lead[3], lead[4]]);
+                let resolved = (target_u64 as i64 + 5 + rel as i64) as u64;
+                tracing::info!(
+                    "SChannel {}: following Wine export jump stub 0x{:X} -> 0x{:X}",
+                    proc_name_str,
+                    target_u64,
+                    resolved
+                );
+                target_u64 = resolved;
+            }
+        }
+
+        let payload = trainlab_cave::emitter::jmp_abs(callback_addr);
+        let hook = trainlab_cave::cave::HookKind::Trampoline {
+            payload: payload.clone(),
+            jump: trainlab_cave::cave::JumpStyle::Absolute,
+        };
+
         let allocate = |size: usize, exec: bool| -> Result<u64, String> {
             crate::allocate_near(target_u64, size, exec)
         };

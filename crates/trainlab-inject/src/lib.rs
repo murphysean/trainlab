@@ -18,6 +18,10 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
+#[cfg(unix)]
+static UNIX_ALLOCS: std::sync::Mutex<Option<std::collections::HashMap<u64, usize>>> =
+    std::sync::Mutex::new(None);
+
 use trainlab_core::memory::{ProcessMemory, SelfProcess};
 use trainlab_core::protocol::{self, Request, Response};
 
@@ -880,16 +884,25 @@ fn allocate(size: usize, executable: bool) -> Result<u64, String> {
     if ptr == libc::MAP_FAILED {
         return Err(std::io::Error::last_os_error().to_string());
     }
+    if let Ok(mut map) = UNIX_ALLOCS.lock() {
+        map.get_or_insert_with(std::collections::HashMap::new)
+            .insert(ptr as u64, size);
+    }
     Ok(ptr as u64)
 }
 
 /// Free a block of memory allocated by [`allocate`].
 #[cfg(unix)]
 fn free(address: u64) -> bool {
-    // We don't track sizes; this is a best-effort no-op for now.
-    // A real implementation would keep a size map.
-    let _ = address;
-    true
+    let size = UNIX_ALLOCS
+        .lock()
+        .ok()
+        .and_then(|mut map| map.as_mut().and_then(|m| m.remove(&address)));
+    if let Some(len) = size {
+        unsafe { libc::munmap(address as *mut libc::c_void, len) == 0 }
+    } else {
+        false
+    }
 }
 
 #[cfg(windows)]

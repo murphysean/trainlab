@@ -12,7 +12,10 @@ pub static HAS_ACTIVE_PINS: AtomicBool = AtomicBool::new(false);
 pub fn refresh_has_active_pins() {
     let has_cheats = CHEATS
         .lock()
-        .map(|c| c.iter().any(|cheat| cheat.enabled && cheat.pinned_bytes.is_some()))
+        .map(|c| {
+            c.iter()
+                .any(|cheat| cheat.enabled && cheat.pinned_bytes.is_some())
+        })
         .unwrap_or(false);
     let has_pins = ACTIVE_PINS
         .lock()
@@ -433,9 +436,17 @@ pub fn apply_event(event: Event) {
         Event::AcknowledgePacket { id, .. } => {
             crate::network::acknowledge_packet(id);
         }
-        Event::CheatExecuted { id, success, message } => {
+        Event::CheatExecuted {
+            id,
+            success,
+            message,
+        } => {
             let label = if let Ok(cheats) = CHEATS.lock() {
-                cheats.iter().find(|c| c.id == id).map(|c| c.label.clone()).unwrap_or_else(|| format!("Cheat #{id}"))
+                cheats
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.label.clone())
+                    .unwrap_or_else(|| format!("Cheat #{id}"))
             } else {
                 format!("Cheat #{id}")
             };
@@ -450,7 +461,11 @@ pub fn apply_event(event: Event) {
             } else {
                 if let Ok(mut toast) = STATUS_TOAST.lock() {
                     let err = message.unwrap_or_else(|| "Command failed".to_string());
-                    *toast = Some((format!("✗ Error: '{label}': {err}"), false, std::time::Instant::now()));
+                    *toast = Some((
+                        format!("✗ Error: '{label}': {err}"),
+                        false,
+                        std::time::Instant::now(),
+                    ));
                 }
             }
         }

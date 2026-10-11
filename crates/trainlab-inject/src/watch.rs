@@ -40,7 +40,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows_sys::Win32::System::Memory::{
-    MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_GUARD, VirtualProtect, VirtualQuery,
+    IsBadReadPtr, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_GUARD, VirtualProtect,
+    VirtualQuery,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId, OpenThread,
@@ -354,7 +355,10 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
         // 1. Handle single-step re-arm cadence (TF fired after stepping over an instruction)
         if code == EXCEPTION_SINGLE_STEP {
             let pending = {
-                let mut map = runtime().pending_steps.lock().unwrap();
+                let mut map = match runtime().pending_steps.lock() {
+                    Ok(m) => m,
+                    Err(e) => e.into_inner(),
+                };
                 map.remove(&tid)
             };
 
@@ -392,7 +396,10 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
         }
 
         // 2. Check for active watch/break
-        let mut guard = runtime().state.lock().unwrap();
+        let mut guard = match runtime().state.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         if let Some(active) = guard.as_ref() {
             match active.kind {
                 WatchKind::PageGuard {
@@ -444,20 +451,40 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
 
                         // Off-target or multi-shot: set TF to step over and reapply PAGE_GUARD
                         (*ctx).EFlags |= TRAP_FLAG;
-                        runtime().pending_steps.lock().unwrap().insert(
-                            tid,
-                            PendingStep::ReapplyPageGuard {
-                                page_base,
-                                page_size,
-                            },
-                        );
+                        match runtime().pending_steps.lock() {
+                            Ok(mut m) => {
+                                m.insert(
+                                    tid,
+                                    PendingStep::ReapplyPageGuard {
+                                        page_base,
+                                        page_size,
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                e.into_inner().insert(
+                                    tid,
+                                    PendingStep::ReapplyPageGuard {
+                                        page_base,
+                                        page_size,
+                                    },
+                                );
+                            }
+                        }
 
                         return EXCEPTION_CONTINUE_EXECUTION;
                     }
                 }
 
                 WatchKind::DataWrite => {
-                    if code == EXCEPTION_SINGLE_STEP || code == EXCEPTION_ACCESS_VIOLATION {
+                    // Only handle this exception if DR6 confirms our DR0
+                    // watchpoint fired (bit 0). Without this check, unrelated
+                    // AVs or single-steps from other code get misattributed.
+                    let dr6_hit = (code == EXCEPTION_SINGLE_STEP
+                        || code == EXCEPTION_ACCESS_VIOLATION)
+                        && ((*ctx).Dr6 & 0x1) != 0;
+                    if dr6_hit {
+                        (*ctx).Dr6 &= !0xF;
                         let hit = HitInfo {
                             rip: (*ctx).Rip,
                             rax: (*ctx).Rax,
@@ -486,11 +513,20 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                             let dr7_saved = (*ctx).Dr7;
                             (*ctx).Dr7 = 0;
                             (*ctx).EFlags |= TRAP_FLAG;
-                            runtime()
-                                .pending_steps
-                                .lock()
-                                .unwrap()
-                                .insert(tid, PendingStep::ReapplyHardwareDr { dr7: dr7_saved });
+                            match runtime().pending_steps.lock() {
+                                Ok(mut m) => {
+                                    m.insert(
+                                        tid,
+                                        PendingStep::ReapplyHardwareDr { dr7: dr7_saved },
+                                    );
+                                }
+                                Err(e) => {
+                                    e.into_inner().insert(
+                                        tid,
+                                        PendingStep::ReapplyHardwareDr { dr7: dr7_saved },
+                                    );
+                                }
+                            }
                             return EXCEPTION_CONTINUE_EXECUTION;
                         }
                     }
@@ -658,10 +694,18 @@ fn write_byte(address: u64, byte: u8) -> Result<(), String> {
 }
 
 /// Read `count` u64 words upward from `rsp` and format them as hex.
+/// Stops early if the next address is unreadable to avoid faulting near
+/// the stack guard page (a nested exception inside the VEH is fatal).
 fn capture_stack(rsp: u64, count: usize) -> Vec<String> {
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let addr = rsp.wrapping_add((i as u64) * 8);
+        #[cfg(windows)]
+        {
+            if unsafe { IsBadReadPtr(addr as *const c_void, 8) } != 0 {
+                break;
+            }
+        }
         let val = unsafe { *(addr as *const u64) };
         out.push(format!("0x{val:016x}"));
     }

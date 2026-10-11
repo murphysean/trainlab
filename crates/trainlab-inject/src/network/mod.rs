@@ -76,7 +76,8 @@ static STAGED_PACKETS: Mutex<std::collections::BTreeMap<u64, StagedBuffer>> =
     Mutex::new(std::collections::BTreeMap::new());
 
 /// Outbound queue of captured network packet events awaiting transmission over IPC.
-static CAPTURED_PACKETS: Mutex<Vec<NetworkPacketDto>> = Mutex::new(Vec::new());
+static CAPTURED_PACKETS: Mutex<std::collections::VecDeque<NetworkPacketDto>> =
+    Mutex::new(std::collections::VecDeque::new());
 
 /// Increment raw packet and byte counters at hook invocation sites.
 pub fn count_raw_packet(kind: PacketKind, direction: PacketDirection, bytes: usize) {
@@ -441,9 +442,9 @@ pub fn record_packet(
 
     if let Ok(mut lock) = CAPTURED_PACKETS.lock() {
         if lock.len() >= MAX_QUEUED_PACKETS {
-            lock.remove(0);
+            lock.pop_front();
         }
-        lock.push(dto);
+        lock.push_back(dto);
         STATS_TOTAL_LOGGED.fetch_add(1, Ordering::Relaxed);
     }
 }

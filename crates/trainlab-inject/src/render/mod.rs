@@ -237,8 +237,7 @@ pub fn set_overlay_visible(visible: bool) {
 
 /// Toggle overlay visibility.
 pub fn toggle_overlay() {
-    let current = STATE.overlay_visible.load(Ordering::Relaxed);
-    STATE.overlay_visible.store(!current, Ordering::Relaxed);
+    STATE.overlay_visible.fetch_xor(true, Ordering::Relaxed);
 }
 
 /// Assert foreground and active focus on the game window.
