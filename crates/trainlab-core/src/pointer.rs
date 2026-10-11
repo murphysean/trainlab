@@ -128,13 +128,10 @@ pub fn chase_object<P: ProcessMemory + ?Sized>(
     Ok(hops)
 }
 
-/// Read a single native-width pointer (usize) from a process.
+/// Read a single 64-bit pointer from a process.
 fn read_ptr<P: ProcessMemory + ?Sized>(proc: &P, address: u64) -> Result<u64, MemoryError> {
-    let size = std::mem::size_of::<usize>();
-    let buf = proc.read(address, size)?;
-    let mut arr = [0u8; 8];
-    arr[..size].copy_from_slice(&buf);
-    Ok(u64::from_le_bytes(arr))
+    let buf = proc.read(address, 8)?;
+    Ok(u64::from_le_bytes(buf.try_into().unwrap_or([0u8; 8])))
 }
 
 /// A reverse-reference / pointer-scan: find addresses in writable memory whose

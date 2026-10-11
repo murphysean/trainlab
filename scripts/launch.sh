@@ -242,7 +242,7 @@ cleanup() {
 
     # Allow companion processes up to 1.5s to shut down cleanly before SIGKILL
     for _ in $(seq 1 15); do
-        if ! pgrep -f "trainlab" >/dev/null 2>&1; then
+        if ! pgrep -x "trainlab" >/dev/null 2>&1 && ! pgrep -f "trainlab-gui" >/dev/null 2>&1 && ! pgrep -f "trainlab.exe" >/dev/null 2>&1; then
             break
         fi
         sleep 0.1
@@ -277,8 +277,6 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 # 5. Monitor game process: wait on GAME_PID or exit if the game process disappears
+# The EXIT trap fires cleanup automatically when this script exits.
 wait "$GAME_PID" 2>/dev/null
-
-# 6. Run cleanup explicitly upon exit
-cleanup
 

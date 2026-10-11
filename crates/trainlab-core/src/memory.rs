@@ -128,6 +128,7 @@ pub trait ProcessMemory {
         let mut matches = Vec::new();
         // Overlap by 256 bytes across chunks so regexes straddling chunk boundaries are found
         let overlap = 256usize;
+        let mut last_addr: Option<u64> = None;
         crate::scan::scan_region_chunks(
             self,
             region,
@@ -137,6 +138,10 @@ pub trait ProcessMemory {
                 for m in re.find_iter(chunk_buf) {
                     let addr = chunk_base + m.start() as u64;
                     if alignment <= 1 || addr.is_multiple_of(alignment as u64) {
+                        if last_addr == Some(addr) {
+                            continue;
+                        }
+                        last_addr = Some(addr);
                         matches.push((addr, m.as_bytes().to_vec()));
                     }
                 }
@@ -689,12 +694,17 @@ fn region_covers(address: u64, len: usize, need_readable: bool) -> bool {
     }
     #[cfg(unix)]
     {
-        // Walk /proc/self/maps for a region covering [address, end).
+        // Walk /proc/self/maps for contiguous regions covering [address, end).
         let maps = match std::fs::read_to_string("/proc/self/maps") {
             Ok(m) => m,
             Err(_) => return false,
         };
+        let mut cur = address;
+        let target = end;
         for line in maps.lines() {
+            if cur >= target {
+                break;
+            }
             let mut it = line.split_whitespace();
             let range = match it.next() {
                 Some(r) => r,
@@ -711,19 +721,22 @@ fn region_covers(address: u64, len: usize, need_readable: bool) -> bool {
                 ),
                 None => continue,
             };
-            // Does this region cover [address, end)?
-            if start <= address && end_r >= end {
-                let readable = perms.contains('r');
-                let writable = perms.contains('w');
-                let ok = if need_readable {
-                    readable
-                } else {
-                    readable && writable
-                };
-                return ok;
+            if end_r <= cur || start > cur {
+                continue;
             }
+            let readable = perms.contains('r');
+            let writable = perms.contains('w');
+            let ok = if need_readable {
+                readable
+            } else {
+                readable && writable
+            };
+            if !ok {
+                return false;
+            }
+            cur = end_r;
         }
-        false
+        cur >= target
     }
     #[cfg(not(any(unix, windows)))]
     {

@@ -231,7 +231,8 @@ fn op_matches(op: ScanOp, prev: f64, cur: f64, value_type: ValueType) -> bool {
             _ => cur >= min && cur <= max,
         },
         ScanOp::Changed => match value_type {
-            ValueType::F32 => (cur as f32) != (prev as f32),
+            ValueType::F32 => (cur as f32 - prev as f32).abs() >= 1e-4,
+            ValueType::F64 => (cur - prev).abs() >= 1e-7,
             _ => cur != prev,
         },
         ScanOp::Unchanged => match value_type {

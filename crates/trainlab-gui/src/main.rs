@@ -200,15 +200,24 @@ impl Default for TrainlabApp {
 
 impl TrainlabApp {
     fn new(session: SharedSession) -> Self {
-        let button_statuses = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let cheat_values = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        Self::with_config(session, config::AppConfig::load(), button_statuses, cheat_values)
+        let button_statuses =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let cheat_values =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        Self::with_config(
+            session,
+            config::AppConfig::load(),
+            button_statuses,
+            cheat_values,
+        )
     }
 
     fn with_config(
         session: SharedSession,
         config: config::AppConfig,
-        button_statuses: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>,
+        button_statuses: std::sync::Arc<
+            std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>,
+        >,
         cheat_values: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>,
     ) -> Self {
         // The game executable to inject into. Overridable via TRAINLAB_GAME env var.
@@ -468,10 +477,10 @@ impl TrainlabApp {
                                     .hint_text("new value")
                                     .desired_width(90.0),
                             );
-                            if text_edit.changed() {
-                                if let Ok(mut m) = self.cheat_values.lock() {
-                                    m.insert(*addr, edit_val.clone());
-                                }
+                            if text_edit.changed()
+                                && let Ok(mut m) = self.cheat_values.lock()
+                            {
+                                m.insert(*addr, edit_val.clone());
                             }
                             if ui.button("Write i32").clicked() {
                                 write_op = Some((
@@ -786,11 +795,10 @@ impl TrainlabApp {
                                     .ok()
                                     .and_then(|m| m.get(&cheat.id).cloned())
                                     .unwrap_or_else(|| current.clone());
-                                if ui.text_edit_singleline(&mut field_val).changed() {
-                                    if let Ok(mut m) = self_ptr.cheat_values.lock() {
+                                if ui.text_edit_singleline(&mut field_val).changed()
+                                    && let Ok(mut m) = self_ptr.cheat_values.lock() {
                                         m.insert(cheat.id, field_val.clone());
                                     }
-                                }
 
                                 if ui.button("Apply").clicked() {
                                     if target_addr != 0 {
@@ -883,11 +891,10 @@ impl TrainlabApp {
                                                 ui.monospace(format!("@ {field_target:#x}"));
                                                 ui.label(format!("now: {current}"));
                                                 let text_edit = ui.add(egui::TextEdit::singleline(&mut edit_val).desired_width(70.0));
-                                                if text_edit.changed() {
-                                                    if let Ok(mut m) = self_ptr.cheat_values.lock() {
+                                                if text_edit.changed()
+                                                    && let Ok(mut m) = self_ptr.cheat_values.lock() {
                                                         m.insert(field_key, edit_val.clone());
                                                     }
-                                                }
                                                 if ui.button("Apply").clicked() {
                                                     do_write = true;
                                                 }
@@ -1607,7 +1614,9 @@ pub fn execute_cheat_trigger(
     session: &SharedSession,
     cheat_id: u64,
     source: &str,
-    button_statuses: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>>,
+    button_statuses: Option<
+        &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>,
+    >,
     cheat_values: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>>,
 ) {
     let (label, kind) = match session.lock() {
@@ -1620,13 +1629,24 @@ pub fn execute_cheat_trigger(
 
     match kind {
         CheatKind::Toggle { .. } | CheatKind::Patch { .. } => {
-            execute_cheat_toggle(session, cheat_id, None, source, button_statuses, cheat_values);
+            execute_cheat_toggle(
+                session,
+                cheat_id,
+                None,
+                source,
+                button_statuses,
+                cheat_values,
+            );
         }
         CheatKind::Button { commands } => {
             if let Ok(mut s) = session.lock() {
                 s.log_activity(
                     source,
-                    format!("button '{}' triggered: running {} command(s)...", label, commands.len()),
+                    format!(
+                        "button '{}' triggered: running {} command(s)...",
+                        label,
+                        commands.len()
+                    ),
                 );
             }
             match mcp::execute_profile_commands(session, &commands) {
@@ -1684,14 +1704,18 @@ pub fn execute_cheat_trigger(
             } else {
                 address
             };
-            let val_opt = cheat_values.and_then(|cv| cv.lock().ok().and_then(|m| m.get(&cheat_id).cloned()));
+            let val_opt =
+                cheat_values.and_then(|cv| cv.lock().ok().and_then(|m| m.get(&cheat_id).cloned()));
             if let Some(val_str) = val_opt
                 && let Ok(bytes) = parse_value_bytes(&val_str, value_type)
             {
-                let r = controller::request(session, &Request::Write {
-                    address: target_addr,
-                    data: bytes,
-                });
+                let r = controller::request(
+                    session,
+                    &Request::Write {
+                        address: target_addr,
+                        data: bytes,
+                    },
+                );
                 match r {
                     Ok(Response::Write { bytes_written }) => {
                         if let Ok(mut s) = session.lock() {
@@ -1738,7 +1762,11 @@ pub fn execute_cheat_trigger(
             if let Ok(mut s) = session.lock() {
                 s.log_activity(
                     source,
-                    format!("triggered struct '{}' (@ {base_addr:#x}): {} field(s)", label, fields.len()),
+                    format!(
+                        "triggered struct '{}' (@ {base_addr:#x}): {} field(s)",
+                        label,
+                        fields.len()
+                    ),
                 );
             }
             controller::emit_event_to_dll(
@@ -1760,8 +1788,12 @@ pub fn execute_cheat_toggle(
     cheat_id: u64,
     desired_enabled: Option<bool>,
     source: &str,
-    _button_statuses: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>>,
-    _cheat_values: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>>,
+    _button_statuses: Option<
+        &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, ButtonStatus>>>,
+    >,
+    _cheat_values: Option<
+        &std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, String>>>,
+    >,
 ) {
     let (label, kind) = match session.lock() {
         Ok(s) => match s.get_cheat(cheat_id) {
@@ -1782,13 +1814,19 @@ pub fn execute_cheat_toggle(
             let new_state = desired_enabled.unwrap_or(!enabled);
             if new_state {
                 // Enable: install cave
-                let r = controller::request(session, &Request::InstallCave {
-                    target,
-                    hook: hook.clone(),
-                });
+                let r = controller::request(
+                    session,
+                    &Request::InstallCave {
+                        target,
+                        hook: hook.clone(),
+                    },
+                );
                 match r {
                     Ok(Response::CaveInstalled { cave, original, .. }) => {
-                        let check_req = Request::Read { address: target, len: 1 };
+                        let check_req = Request::Read {
+                            address: target,
+                            len: 1,
+                        };
                         let verified = match controller::request(session, &check_req) {
                             Ok(Response::Read { data }) => {
                                 matches!(data.first(), Some(0xe9 | 0xff | 0xeb))
@@ -1826,7 +1864,7 @@ pub fn execute_cheat_toggle(
                                 trainlab_core::protocol::Event::CheatExecuted {
                                     id: cheat_id,
                                     success: false,
-                                    message: Some(format!("Jump hook verification failed")),
+                                    message: Some("Jump hook verification failed".to_string()),
                                 },
                             );
                         }
@@ -1844,7 +1882,7 @@ pub fn execute_cheat_toggle(
                             trainlab_core::protocol::Event::CheatExecuted {
                                 id: cheat_id,
                                 success: false,
-                                message: Some(format!("Cave install failed")),
+                                message: Some("Cave install failed".to_string()),
                             },
                         );
                     }
@@ -1852,10 +1890,13 @@ pub fn execute_cheat_toggle(
             } else {
                 // Disable: restore original bytes
                 if !original_bytes.is_empty() {
-                    let r = controller::request(session, &Request::Write {
-                        address: target,
-                        data: original_bytes.clone(),
-                    });
+                    let r = controller::request(
+                        session,
+                        &Request::Write {
+                            address: target,
+                            data: original_bytes.clone(),
+                        },
+                    );
                     match r {
                         Ok(Response::Write { bytes_written }) => {
                             if let Ok(mut s) = session.lock() {
@@ -1878,7 +1919,10 @@ pub fn execute_cheat_toggle(
                             if let Ok(mut s) = session.lock() {
                                 s.log_activity(
                                     source,
-                                    format!("toggle '{}' disable FAILED (restore @ {target:#x})", label),
+                                    format!(
+                                        "toggle '{}' disable FAILED (restore @ {target:#x})",
+                                        label
+                                    ),
                                 );
                             }
                             controller::emit_event_to_dll(
@@ -1886,7 +1930,7 @@ pub fn execute_cheat_toggle(
                                 trainlab_core::protocol::Event::CheatExecuted {
                                     id: cheat_id,
                                     success: false,
-                                    message: Some(format!("Restore failed")),
+                                    message: Some("Restore failed".to_string()),
                                 },
                             );
                         }
@@ -1925,10 +1969,13 @@ pub fn execute_cheat_toggle(
                 original_bytes
             };
             if !bytes_to_write.is_empty() {
-                let r = controller::request(session, &Request::Write {
-                    address: target,
-                    data: bytes_to_write,
-                });
+                let r = controller::request(
+                    session,
+                    &Request::Write {
+                        address: target,
+                        data: bytes_to_write,
+                    },
+                );
                 match r {
                     Ok(Response::Write { bytes_written }) => {
                         if let Ok(mut s) = session.lock() {
@@ -1971,7 +2018,7 @@ pub fn execute_cheat_toggle(
                             trainlab_core::protocol::Event::CheatExecuted {
                                 id: cheat_id,
                                 success: false,
-                                message: Some(format!("Patch toggle failed")),
+                                message: Some("Patch toggle failed".to_string()),
                             },
                         );
                     }
@@ -2026,18 +2073,25 @@ fn acquire_single_instance(game_name: Option<&str>) -> Option<SingleInstanceGuar
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
         use windows_sys::Win32::System::Threading::CreateMutexA;
 
         let mutex_name = format!("Trainlab_Instance_{}\0", sanitized);
         unsafe {
             let handle = CreateMutexA(std::ptr::null(), 1, mutex_name.as_ptr());
             if handle.is_null() {
-                tracing::warn!("Failed to create single-instance mutex {}: {:?}", mutex_name, GetLastError());
+                tracing::warn!(
+                    "Failed to create single-instance mutex {}: {:?}",
+                    mutex_name,
+                    GetLastError()
+                );
                 return None;
             }
             if GetLastError() == ERROR_ALREADY_EXISTS {
-                tracing::warn!("Another trainlab instance is already running (mutex {} exists)", mutex_name);
+                tracing::warn!(
+                    "Another trainlab instance is already running (mutex {} exists)",
+                    mutex_name
+                );
                 CloseHandle(handle);
                 return None;
             }
@@ -2053,6 +2107,7 @@ fn acquire_single_instance(game_name: Option<&str>) -> Option<SingleInstanceGuar
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o666)
             .open(&lock_path)
         {
@@ -2067,7 +2122,10 @@ fn acquire_single_instance(game_name: Option<&str>) -> Option<SingleInstanceGuar
         let fd = file.into_raw_fd();
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
         if ret != 0 {
-            tracing::warn!("Another trainlab instance is already running (lock {:?} held)", lock_path);
+            tracing::warn!(
+                "Another trainlab instance is already running (lock {:?} held)",
+                lock_path
+            );
             unsafe {
                 libc::close(fd);
             }
@@ -2171,15 +2229,15 @@ fn main() -> eframe::Result<()> {
     // game process externally for scan-family tools (see D7).
     let session: SharedSession = std::sync::Arc::new(std::sync::Mutex::new(SessionState::new()));
 
-    if let Some(ref g) = target_game {
-        if let Ok(mut s) = session.lock() {
-            s.set_game_name(g.clone());
-        }
+    if let Some(ref g) = target_game
+        && let Ok(mut s) = session.lock()
+    {
+        s.set_game_name(g.clone());
     }
-    if let Some(ref d) = target_dll {
-        if let Ok(mut s) = session.lock() {
-            s.set_dll_path(d.clone());
-        }
+    if let Some(ref d) = target_dll
+        && let Ok(mut s) = session.lock()
+    {
+        s.set_dll_path(d.clone());
     }
 
     // Detect launch environment: Gamescope / Steam Deck handheld mode vs Standard Desktop
@@ -2188,8 +2246,7 @@ fn main() -> eframe::Result<()> {
         || std::env::var("STEAM_DECK").is_ok()
         || std::env::var("TRAINLAB_GAMESCOPE").is_ok();
 
-    let mut viewport_builder = egui::ViewportBuilder::default()
-        .with_title("trainlab");
+    let mut viewport_builder = egui::ViewportBuilder::default().with_title("trainlab");
 
     if config.gui.fullscreen {
         // Explicitly requested exclusive fullscreen (via config or --fullscreen)
@@ -2296,12 +2353,10 @@ fn main() -> eframe::Result<()> {
                 }
             });
 
-            let button_statuses = std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            ));
-            let cheat_values = std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            ));
+            let button_statuses =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let cheat_values =
+                std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
             let app_button_statuses = button_statuses.clone();
             let app_cheat_values = cheat_values.clone();
 
@@ -2573,8 +2628,8 @@ fn apply_companion_window_hints() {
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowLongPtrA, GetWindowThreadProcessId, SetWindowLongPtrA, SetWindowPos,
-        GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        EnumWindows, GWL_EXSTYLE, GetWindowLongPtrA, GetWindowThreadProcessId, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrA, SetWindowPos,
         WS_EX_TOOLWINDOW,
     };
 
@@ -2599,7 +2654,10 @@ fn apply_companion_window_hints() {
                         0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
                     );
-                    tracing::info!("Applied WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE companion hint to HWND {:?}", hwnd);
+                    tracing::info!(
+                        "Applied WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE companion hint to HWND {:?}",
+                        hwnd
+                    );
                 }
             }
         }
@@ -2617,15 +2675,21 @@ fn apply_companion_window_hints() {
     // Under Linux/Gamescope/X11, inspect mapped windows belonging to trainlab.
     // Strip STEAM_GAME atom so Gamescope never latches onto trainlab as the game surface.
     unsafe {
-        let x11_handle = libc::dlopen(b"libX11.so.6\0".as_ptr() as *const _, libc::RTLD_LAZY);
+        let x11_handle = libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_LAZY);
         if x11_handle.is_null() {
             return;
         }
 
-        type XOpenDisplayFn = unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void;
+        type XOpenDisplayFn =
+            unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void;
         type XCloseDisplayFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_int;
-        type XDefaultRootWindowFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_ulong;
-        type XInternAtomFn = unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_char, std::ffi::c_int) -> std::ffi::c_ulong;
+        type XDefaultRootWindowFn =
+            unsafe extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_ulong;
+        type XInternAtomFn = unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const std::ffi::c_char,
+            std::ffi::c_int,
+        ) -> std::ffi::c_ulong;
         type XQueryTreeFn = unsafe extern "C" fn(
             *mut std::ffi::c_void,
             std::ffi::c_ulong,
@@ -2634,9 +2698,18 @@ fn apply_companion_window_hints() {
             *mut *mut std::ffi::c_ulong,
             *mut std::ffi::c_uint,
         ) -> std::ffi::c_int;
-        type XFetchNameFn = unsafe extern "C" fn(*mut std::ffi::c_void, std::ffi::c_ulong, *mut *mut std::ffi::c_char) -> std::ffi::c_int;
-        type XDeletePropertyFn = unsafe extern "C" fn(*mut std::ffi::c_void, std::ffi::c_ulong, std::ffi::c_ulong) -> std::ffi::c_int;
-        type XSyncFn = unsafe extern "C" fn(*mut std::ffi::c_void, std::ffi::c_int) -> std::ffi::c_int;
+        type XFetchNameFn = unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            std::ffi::c_ulong,
+            *mut *mut std::ffi::c_char,
+        ) -> std::ffi::c_int;
+        type XDeletePropertyFn = unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            std::ffi::c_ulong,
+            std::ffi::c_ulong,
+        ) -> std::ffi::c_int;
+        type XSyncFn =
+            unsafe extern "C" fn(*mut std::ffi::c_void, std::ffi::c_int) -> std::ffi::c_int;
         type XFreeFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> std::ffi::c_int;
 
         macro_rules! get_sym {
@@ -2652,7 +2725,8 @@ fn apply_companion_window_hints() {
 
         let open_display: XOpenDisplayFn = get_sym!(b"XOpenDisplay\0", XOpenDisplayFn);
         let close_display: XCloseDisplayFn = get_sym!(b"XCloseDisplay\0", XCloseDisplayFn);
-        let default_root_window: XDefaultRootWindowFn = get_sym!(b"XDefaultRootWindow\0", XDefaultRootWindowFn);
+        let default_root_window: XDefaultRootWindowFn =
+            get_sym!(b"XDefaultRootWindow\0", XDefaultRootWindowFn);
         let intern_atom: XInternAtomFn = get_sym!(b"XInternAtom\0", XInternAtomFn);
         let query_tree: XQueryTreeFn = get_sym!(b"XQueryTree\0", XQueryTreeFn);
         let fetch_name: XFetchNameFn = get_sym!(b"XFetchName\0", XFetchNameFn);
@@ -2660,13 +2734,13 @@ fn apply_companion_window_hints() {
         let sync: XSyncFn = get_sym!(b"XSync\0", XSyncFn);
         let free: XFreeFn = get_sym!(b"XFree\0", XFreeFn);
 
-        for disp_str in [b":0\0".as_ptr(), b":1\0".as_ptr()] {
-            let dpy = open_display(disp_str as *const _);
+        for disp_str in [c":0".as_ptr(), c":1".as_ptr()] {
+            let dpy = open_display(disp_str);
             if dpy.is_null() {
                 continue;
             }
 
-            let atom_steam_game = intern_atom(dpy, b"STEAM_GAME\0".as_ptr() as *const _, 0);
+            let atom_steam_game = intern_atom(dpy, c"STEAM_GAME".as_ptr(), 0);
             let root = default_root_window(dpy);
             let mut root_ret = 0u64;
             let mut parent_ret = 0u64;
@@ -2738,7 +2812,8 @@ impl eframe::App for TrainlabApp {
 
         // Ensure companion window hints (WS_EX_TOOLWINDOW) are applied on Windows/Wine so Gamescope
         // treats trainlab as a tool/utility window and does not steal remote play capture or base focus.
-        static HINTS_APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static HINTS_APPLIED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if !HINTS_APPLIED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             apply_companion_window_hints();
             if !self.window_visible {
@@ -2760,7 +2835,9 @@ impl eframe::App for TrainlabApp {
             if cmd == "show" {
                 s.log_activity("GUI", "executing remote 'show' window command");
                 self.window_visible = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.target_window_size.into()));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                    self.target_window_size.into(),
+                ));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -2769,7 +2846,10 @@ impl eframe::App for TrainlabApp {
                 self.window_visible = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                let _ = controller::request(&self.session, &trainlab_core::protocol::Request::FocusGameWindow);
+                let _ = controller::request(
+                    &self.session,
+                    &trainlab_core::protocol::Request::FocusGameWindow,
+                );
             }
         }
 
@@ -2779,14 +2859,19 @@ impl eframe::App for TrainlabApp {
                 // ID 9999 is the global window-toggle key ('J')
                 self.window_visible = !self.window_visible;
                 if self.window_visible {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.target_window_size.into()));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                        self.target_window_size.into(),
+                    ));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 } else {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    let _ = controller::request(&self.session, &trainlab_core::protocol::Request::FocusGameWindow);
+                    let _ = controller::request(
+                        &self.session,
+                        &trainlab_core::protocol::Request::FocusGameWindow,
+                    );
                 }
             } else if let Some(reg) = self.registered_hotkeys.get(&hotkey_id) {
                 let cheat_id = reg.cheat_id;
@@ -2857,7 +2942,9 @@ impl eframe::App for TrainlabApp {
                 ) => {
                     if command == "show" {
                         self.window_visible = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.target_window_size.into()));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                            self.target_window_size.into(),
+                        ));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -2865,7 +2952,10 @@ impl eframe::App for TrainlabApp {
                         self.window_visible = false;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                        let _ = controller::request(&self.session, &trainlab_core::protocol::Request::FocusGameWindow);
+                        let _ = controller::request(
+                            &self.session,
+                            &trainlab_core::protocol::Request::FocusGameWindow,
+                        );
                     }
                 }
                 trainlab_core::event::BusEvent::Protocol(
@@ -2927,9 +3017,10 @@ impl eframe::App for TrainlabApp {
                 self.active_tab = ActiveTab::Cheats;
 
                 if self.auto_exit {
-                    tracing::info!("Target game '{game}' (pid {pid}) exited and auto_exit is enabled — exiting trainlab");
+                    tracing::info!(
+                        "Target game '{game}' (pid {pid}) exited and auto_exit is enabled — exiting trainlab"
+                    );
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    std::process::exit(0);
                 }
             }
 
@@ -2975,7 +3066,10 @@ impl eframe::App for TrainlabApp {
                     self.window_visible = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    let _ = controller::request(&self.session, &trainlab_core::protocol::Request::FocusGameWindow);
+                    let _ = controller::request(
+                        &self.session,
+                        &trainlab_core::protocol::Request::FocusGameWindow,
+                    );
                 }
 
                 ui.separator();
@@ -2985,7 +3079,6 @@ impl eframe::App for TrainlabApp {
                     .clicked()
                 {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    std::process::exit(0);
                 }
 
                 if self.connected {
@@ -4186,7 +4279,6 @@ fn parse_value_bytes(s: &str, vt: trainlab_core::scan::ValueType) -> Result<Vec<
             .to_vec()),
     }
 }
-
 
 fn parse_addr(s: &str) -> Result<u64, std::num::ParseIntError> {
     let s = s.trim();

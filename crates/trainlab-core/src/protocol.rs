@@ -446,7 +446,7 @@ impl Default for InputFeatures {
 }
 
 /// Network traffic interception features.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NetworkFeatures {
     /// Winsock socket hook (`send`, `recv`, `sendto`, `recvfrom`). Default: false (opt-in).
     #[serde(default = "default_false")]
@@ -469,20 +469,6 @@ pub struct NetworkFeatures {
     /// Hosts, domains, or URL substrings to ignore from capture (e.g. "api.helldivers.com", "telemetry.arrowhead.com").
     #[serde(default)]
     pub ignore_hosts: Vec<String>,
-}
-
-impl Default for NetworkFeatures {
-    fn default() -> Self {
-        Self {
-            winsock: false,
-            winhttp: false,
-            schannel: false,
-            steamworks: false,
-            capture_loopback: false,
-            ignore_ports: Vec::new(),
-            ignore_hosts: Vec::new(),
-        }
-    }
 }
 
 /// Memory scanning, debugging, and value enforcement features.
@@ -642,6 +628,9 @@ pub struct WatchHitInfo {
 /// Serialize a message into a length-prefixed frame.
 pub fn encode<T: Serialize>(msg: &T) -> Result<Vec<u8>, bincode::Error> {
     let body = bincode::serialize(msg)?;
+    if body.len() > u32::MAX as usize {
+        return Err(bincode::ErrorKind::SizeLimit.into());
+    }
     let mut out = Vec::with_capacity(4 + body.len());
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
     out.extend_from_slice(&body);
