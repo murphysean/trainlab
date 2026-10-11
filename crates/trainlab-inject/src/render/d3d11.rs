@@ -74,7 +74,9 @@ static RENDERER: Mutex<Option<RendererState>> = Mutex::new(None);
 pub fn shutdown() {
     if let Ok(mut lock) = RENDERER.lock() {
         if lock.is_some() {
-            super::log_render("d3d11::shutdown: releasing all D3D11 render targets, textures, buffers, and device references");
+            super::log_render(
+                "d3d11::shutdown: releasing all D3D11 render targets, textures, buffers, and device references",
+            );
             *lock = None;
         }
     }
@@ -296,7 +298,9 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
     static CALL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let c = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     if c == 1 || c % 300 == 0 {
-        crate::render::log_render(format!("render_overlay_frame call #{c} for swapchain {swapchain_ptr:?}"));
+        crate::render::log_render(format!(
+            "render_overlay_frame call #{c} for swapchain {swapchain_ptr:?}"
+        ));
     }
 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -311,7 +315,9 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             let device: ID3D11Device = match unsafe { sc.GetDevice() } {
                 Ok(d) => d,
                 Err(e) => {
-                    crate::render::log_render(format!("render_overlay_frame: sc.GetDevice() FAILED: {e:?}"));
+                    crate::render::log_render(format!(
+                        "render_overlay_frame: sc.GetDevice() FAILED: {e:?}"
+                    ));
                     return;
                 }
             };
@@ -319,12 +325,16 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             let context: ID3D11DeviceContext = match unsafe { device.GetImmediateContext() } {
                 Ok(ctx) => ctx,
                 Err(e) => {
-                    crate::render::log_render(format!("render_overlay_frame: device.GetImmediateContext() FAILED: {e:?}"));
+                    crate::render::log_render(format!(
+                        "render_overlay_frame: device.GetImmediateContext() FAILED: {e:?}"
+                    ));
                     return;
                 }
             };
 
-            crate::render::log_render("render_overlay_frame: acquired D3D11 device and immediate context");
+            crate::render::log_render(
+                "render_overlay_frame: acquired D3D11 device and immediate context",
+            );
 
             *lock = Some(RendererState {
                 device,
@@ -354,26 +364,46 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
         // Capture Game Pipeline State before applying overlay render pipeline states
         let _state_guard = unsafe { D3D11StateBackup::capture(&state.context) };
 
-        // 1. Resolve Backbuffer Render Target View
-        if state.rtv.is_none() {
-            let sc: &IDXGISwapChain = unsafe { std::mem::transmute(&swapchain_ptr) };
-            match unsafe { sc.GetBuffer::<ID3D11Texture2D>(0) } {
-                Ok(backbuffer) => {
-                    let mut rtv = None;
-                    if let Err(e) = unsafe {
-                        state
-                            .device
-                            .CreateRenderTargetView(&backbuffer, None, Some(&mut rtv))
-                    } {
-                        crate::render::log_render(format!("render_overlay_frame: CreateRenderTargetView FAILED: {e:?}"));
-                    } else {
-                        crate::render::log_render("render_overlay_frame: created RenderTargetView");
-                        state.rtv = rtv;
-                    }
+        // 1. Re-acquire backbuffer and swapchain dimensions every frame.
+        //    ResizeBuffers (called by Steam streaming encoder on resolution
+        //    changes, player joins, HEVC renegotiation) invalidates all prior
+        //    backbuffer references — a cached RTV would use-after-free.
+        let sc: &IDXGISwapChain = unsafe { std::mem::transmute(&swapchain_ptr) };
+        let (screen_w, screen_h) = match unsafe { sc.GetDesc() } {
+            Ok(desc) => (
+                if desc.BufferDesc.Width > 0 {
+                    desc.BufferDesc.Width as f32
+                } else {
+                    1280.0
+                },
+                if desc.BufferDesc.Height > 0 {
+                    desc.BufferDesc.Height as f32
+                } else {
+                    800.0
+                },
+            ),
+            Err(_) => (1280.0, 800.0),
+        };
+        state.rtv = None;
+        match unsafe { sc.GetBuffer::<ID3D11Texture2D>(0) } {
+            Ok(backbuffer) => {
+                let mut rtv = None;
+                if let Err(e) = unsafe {
+                    state
+                        .device
+                        .CreateRenderTargetView(&backbuffer, None, Some(&mut rtv))
+                } {
+                    crate::render::log_render(format!(
+                        "render_overlay_frame: CreateRenderTargetView FAILED: {e:?}"
+                    ));
+                } else {
+                    state.rtv = rtv;
                 }
-                Err(e) => {
-                    crate::render::log_render(format!("render_overlay_frame: sc.GetBuffer(0) FAILED: {e:?}"));
-                }
+            }
+            Err(e) => {
+                crate::render::log_render(format!(
+                    "render_overlay_frame: sc.GetBuffer(0) FAILED: {e:?}"
+                ));
             }
         }
 
@@ -396,7 +426,9 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             }
 
             if compiler_dll == std::ptr::null_mut() {
-                crate::render::log_render("render_overlay_frame: FAILED to load any d3dcompiler DLL");
+                crate::render::log_render(
+                    "render_overlay_frame: FAILED to load any d3dcompiler DLL",
+                );
                 return;
             }
 
@@ -558,12 +590,11 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             }
         }
 
-        // Update Projection Matrix (Screen 1280x800 to NDC [-1, 1])
         if let Some(cb) = state.constant_buffer.as_ref() {
             let l = 0.0f32;
-            let r = 1280.0f32;
+            let r = screen_w;
             let t = 0.0f32;
-            let b = 800.0f32;
+            let b = screen_h;
             let proj_matrix: [f32; 16] = [
                 2.0 / (r - l),
                 0.0,
@@ -687,8 +718,8 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             let vp = [D3D11_VIEWPORT {
                 TopLeftX: 0.0,
                 TopLeftY: 0.0,
-                Width: 1280.0,
-                Height: 800.0,
+                Width: screen_w,
+                Height: screen_h,
                 MinDepth: 0.0,
                 MaxDepth: 1.0,
             }];
@@ -726,7 +757,7 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
 
         // 6. Run egui Layout and Draw Primitives
         if let Some((_egui_ctx, clipped_primitives, textures_delta)) =
-            super::overlay::render_in_game_egui(1280.0, 800.0)
+            super::overlay::render_in_game_egui(screen_w, screen_h)
         {
             // 6a. Delete freed textures
             for id in &textures_delta.free {

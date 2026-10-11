@@ -87,7 +87,9 @@ static D3D12_RENDERER: Mutex<Option<D3D12RendererState>> = Mutex::new(None);
 pub fn shutdown() {
     if let Ok(mut lock) = D3D12_RENDERER.lock() {
         if lock.is_some() {
-            super::log_render("d3d12::shutdown: releasing all D3D12 render targets, command lists, and device references");
+            super::log_render(
+                "d3d12::shutdown: releasing all D3D12 render targets, command lists, and device references",
+            );
             *lock = None;
         }
     }
@@ -129,12 +131,59 @@ pub unsafe fn try_render_d3d12_overlay(swapchain_ptr: *mut c_void) -> bool {
         return false;
     }
 
+    // D3D11On12 interop requires both D3D11 and D3D12 to share a single
+    // Microsoft DirectX runtime.  Under Wine/Proton, D3D12 is VKD3D-Proton
+    // and D3D11 is DXVK — separate Vulkan-based implementations that cannot
+    // interoperate.  Fall back to the D3D11 renderer which works on the
+    // DXVK-backed DXGI swapchain directly.
+    if std::env::var("WINEPREFIX").is_ok()
+        || std::env::var("PROTON_VERSION").is_ok()
+        || std::env::var("WINE_PROCESS_NAME").is_ok()
+    {
+        return false;
+    }
+
     let sc: &IDXGISwapChain = std::mem::transmute(&swapchain_ptr);
 
     let mut lock = match D3D12_RENDERER.lock() {
         Ok(l) => l,
         Err(_) => return false,
     };
+
+    // Detect swapchain resize: if the buffer dimensions changed since we
+    // wrapped the backbuffers, drop the entire renderer so it re-initializes
+    // with fresh wrapped resources on the next frame.
+    let needs_resize = if let Some(state) = lock.as_ref() {
+        if let Ok(desc) = sc.GetDesc() {
+            let cur_w = if desc.BufferDesc.Width > 0 {
+                desc.BufferDesc.Width as f32
+            } else {
+                1280.0
+            };
+            let cur_h = if desc.BufferDesc.Height > 0 {
+                desc.BufferDesc.Height as f32
+            } else {
+                800.0
+            };
+            if (cur_w - state.screen_width).abs() > 0.5 || (cur_h - state.screen_height).abs() > 0.5
+            {
+                super::log_render(format!(
+                    "d3d12: swapchain resized {}x{} -> {}x{}, invalidating wrapped backbuffers",
+                    state.screen_width, state.screen_height, cur_w, cur_h
+                ));
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if needs_resize {
+        *lock = None;
+    }
 
     if lock.is_none() {
         // Query CommandQueue or Device from SwapChain

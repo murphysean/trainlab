@@ -100,7 +100,9 @@ pub unsafe extern "system" fn hooked_present(
     let fc = super::STATE.frame_count.fetch_add(1, Ordering::Relaxed) + 1;
     let vis = super::STATE.overlay_visible.load(Ordering::Relaxed);
     if fc == 1 {
-        super::log_render(format!("hooked_present: first frame confirmed (swapchain={swapchain:?})"));
+        super::log_render(format!(
+            "hooked_present: first frame confirmed (swapchain={swapchain:?})"
+        ));
     }
 
     // 2. On the first frame, extract the game's actual HWND from swapchain description safely
@@ -119,7 +121,10 @@ pub unsafe extern "system" fn hooked_present(
                 if get_desc_fn(swapchain, &mut desc) == 0
                     && desc.output_window != std::ptr::null_mut()
                 {
-                    super::log_render(format!("hooked_present: captured game HWND={:?}", desc.output_window));
+                    super::log_render(format!(
+                        "hooked_present: captured game HWND={:?}",
+                        desc.output_window
+                    ));
                     super::input::install_wndproc_hook(desc.output_window);
                     HWND_INITIALIZED.store(true, Ordering::Relaxed);
                     // Proactively assert foreground focus on the game window so Gamescope/Remote Play
@@ -145,7 +150,23 @@ pub unsafe extern "system" fn hooked_present(
     // 5. Call original Present trampoline
     if !orig.is_null() {
         let orig_fn: FnPresent = std::mem::transmute(orig);
-        orig_fn(swapchain, sync_interval, flags)
+        let hr = orig_fn(swapchain, sync_interval, flags);
+
+        // DXGI_ERROR_DEVICE_REMOVED / DEVICE_RESET: the GPU or driver
+        // recycled the device.  Force full renderer teardown so the next
+        // frame re-acquires fresh device/context/backbuffer references.
+        const DXGI_ERROR_DEVICE_REMOVED: i32 = -2005270523_i32; // 0x887A0005
+        const DXGI_ERROR_DEVICE_RESET: i32 = -2005270521_i32; // 0x887A0007
+        if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
+            super::log_render(format!(
+                "hooked_present: Present returned device-lost 0x{:08X}, tearing down renderers",
+                hr as u32
+            ));
+            super::d3d11::shutdown();
+            super::d3d12::shutdown();
+        }
+
+        hr
     } else {
         0
     }
@@ -161,7 +182,9 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
 
     let create_fn_ptr = GetProcAddress(d3d11_dll, b"D3D11CreateDeviceAndSwapChain\0".as_ptr());
     if create_fn_ptr.is_none() {
-        super::log_render("find_dxgi_present_vmt: GetProcAddress(D3D11CreateDeviceAndSwapChain) is None");
+        super::log_render(
+            "find_dxgi_present_vmt: GetProcAddress(D3D11CreateDeviceAndSwapChain) is None",
+        );
         return None;
     }
 
@@ -245,9 +268,13 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
     );
 
     if hr == 0 && !swapchain.is_null() {
-        super::log_render("find_dxgi_present_vmt: successfully created WARP software swapchain (zero GPU queue footprint)");
+        super::log_render(
+            "find_dxgi_present_vmt: successfully created WARP software swapchain (zero GPU queue footprint)",
+        );
     } else {
-        super::log_render(format!("find_dxgi_present_vmt: WARP software driver failed (hr=0x{hr:08X}), falling back to HARDWARE..."));
+        super::log_render(format!(
+            "find_dxgi_present_vmt: WARP software driver failed (hr=0x{hr:08X}), falling back to HARDWARE..."
+        ));
         hr = d3d11_create(
             std::ptr::null_mut(),
             D3D_DRIVER_TYPE_HARDWARE,
@@ -270,7 +297,9 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
         let vtable = *(swapchain as *mut *mut usize);
         // Index 8 is IDXGISwapChain::Present
         let present_ptr = *vtable.add(8);
-        super::log_render(format!("find_dxgi_present_vmt: SUCCESS! IDXGISwapChain::Present at 0x{present_ptr:X} (feature_level=0x{feature_level:X})"));
+        super::log_render(format!(
+            "find_dxgi_present_vmt: SUCCESS! IDXGISwapChain::Present at 0x{present_ptr:X} (feature_level=0x{feature_level:X})"
+        ));
         present_addr = Some(present_ptr as *mut usize);
 
         // Release dummy COM objects
@@ -287,7 +316,9 @@ unsafe fn find_dxgi_present_vmt() -> Option<*mut usize> {
         release_fn(device as *mut usize);
         release_fn(context as *mut usize);
     } else {
-        super::log_render(format!("find_dxgi_present_vmt: FAILED to create D3D11 swapchain (hr=0x{hr:08X})"));
+        super::log_render(format!(
+            "find_dxgi_present_vmt: FAILED to create D3D11 swapchain (hr=0x{hr:08X})"
+        ));
     }
 
     DestroyWindow(hwnd);
@@ -317,7 +348,10 @@ pub fn init_dxgi_hook() {
                 || d3d11_mod != std::ptr::null_mut()
                 || d3d12_mod != std::ptr::null_mut()
             {
-                super::log_render(format!("init_dxgi_hook: attempt {attempt}, graphics modules found (dxgi={:?}, d3d11={:?})", dxgi_mod, d3d11_mod));
+                super::log_render(format!(
+                    "init_dxgi_hook: attempt {attempt}, graphics modules found (dxgi={:?}, d3d11={:?})",
+                    dxgi_mod, d3d11_mod
+                ));
                 if let Some(target_present) = find_dxgi_present_vmt() {
                     let target_u64 = target_present as u64;
 
@@ -344,15 +378,22 @@ pub fn init_dxgi_hook() {
                     };
 
                     // Atomic reservation: only ONE thread in the entire process can attempt installation
-                    if HOOK_INSTALLED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-                        super::log_render("init_dxgi_hook: already installed by another thread, skipping");
+                    if HOOK_INSTALLED
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_err()
+                    {
+                        super::log_render(
+                            "init_dxgi_hook: already installed by another thread, skipping",
+                        );
                         break;
                     }
 
                     // Verify target site is not already detoured to our hooked_present callback
                     if let Ok(current_bytes) = read(target_u64, 14) {
                         if current_bytes.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
-                            let dest = u64::from_le_bytes(current_bytes[6..14].try_into().unwrap_or_default());
+                            let dest = u64::from_le_bytes(
+                                current_bytes[6..14].try_into().unwrap_or_default(),
+                            );
                             if dest == callback_addr {
                                 super::log_render(format!(
                                     "init_dxgi_hook: target 0x{:X} is ALREADY hooked with our callback 0x{:X}, skipping install",
@@ -399,9 +440,7 @@ pub fn init_dxgi_hook() {
 
                             super::log_render(format!(
                                 "init_dxgi_hook: HOOK INSTALLED at 0x{:X} -> cave 0x{:X} ({})",
-                                target_u64,
-                                installed.cave_addr,
-                                api_name
+                                target_u64, installed.cave_addr, api_name
                             ));
                             break;
                         }
@@ -410,14 +449,15 @@ pub fn init_dxgi_hook() {
                             HOOK_INSTALLED.store(false, Ordering::SeqCst);
                             super::log_render(format!(
                                 "init_dxgi_hook: cave::install FAILED at 0x{:X}: {:?}",
-                                target_u64,
-                                err
+                                target_u64, err
                             ));
                         }
                     }
                 }
             } else if attempt == 1 || attempt % 5 == 0 {
-                super::log_render(format!("init_dxgi_hook: attempt {attempt}, waiting for dxgi/d3d11 modules..."));
+                super::log_render(format!(
+                    "init_dxgi_hook: attempt {attempt}, waiting for dxgi/d3d11 modules..."
+                ));
             }
         }
 
