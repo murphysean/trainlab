@@ -36,6 +36,7 @@ This performs the full compilation, packages the clean release directory, syncs 
 - Steam Deck (`deck@192.168.0.32` / `192.168.254.27`)
 - Steam Machine (`deck@192.168.0.30` / `192.168.254.143`)
 - Steam Frame (`steamos@192.168.0.36`)
+- Furiosa (`sean@192.168.0.20` / `192.168.254.20`)
 
 ### C. Package/Deploy without Rebuilding:
 ```bash

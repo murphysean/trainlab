@@ -20,7 +20,7 @@ struct Args {
     #[arg(long, default_value_t = true)]
     sync_mirror: bool,
 
-    /// Also deploy to target devices (Steam Deck & Steam Machine) via scp
+    /// Also deploy to target devices (Steam Deck, Steam Machine, Steam Frame & Furiosa) via scp
     #[arg(long)]
     deploy: bool,
 
@@ -201,7 +201,7 @@ fn main() -> Result<()> {
 
     if args.deploy {
         println!("\n\x1b[1;36m=== 5. Deploying to Remote Devices ===\x1b[0m");
-        let targets: [(&str, &str, &[&str], Option<String>); 3] = [
+        let targets: [(&str, &str, &[&str], Option<String>); 4] = [
             (
                 "Steam Deck",
                 "deck",
@@ -219,6 +219,12 @@ fn main() -> Result<()> {
                 "steamos",
                 &["192.168.0.36"],
                 std::env::var("STEAM_FRAME_IP").ok(),
+            ),
+            (
+                "Furiosa",
+                "sean",
+                &["192.168.0.20", "192.168.254.20"],
+                std::env::var("FURIOSA_IP").ok(),
             ),
         ];
         for (name, user, default_ips, override_ip) in &targets {
