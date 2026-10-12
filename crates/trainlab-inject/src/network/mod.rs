@@ -30,6 +30,14 @@ static IGNORE_PORTS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static IGNORE_HOSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+// Lazy hook installation: hooks are only physically installed (detoured) when
+// the user explicitly starts capturing, not at session init.
+static HOOKS_INSTALLED: AtomicBool = AtomicBool::new(false);
+static REQUESTED_WINSOCK: AtomicBool = AtomicBool::new(false);
+static REQUESTED_WINHTTP: AtomicBool = AtomicBool::new(false);
+static REQUESTED_SCHANNEL: AtomicBool = AtomicBool::new(false);
+static REQUESTED_STEAMWORKS: AtomicBool = AtomicBool::new(false);
+
 // Raw packet and byte counters tracked directly at hook invocation sites
 static STATS_TCP_IN_PACKETS: AtomicU64 = AtomicU64::new(0);
 static STATS_TCP_IN_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -199,19 +207,64 @@ pub fn configure_hooks(winsock: bool, winhttp: bool, schannel: bool, steamworks:
     STEAMWORKS_ENABLED.store(steamworks, Ordering::SeqCst);
 }
 
-/// Configure network capture filter: enable flag, ignored ports, loopback toggle, and ignored hostnames/domains.
+/// Store which hooks are available for this session without installing them.
+/// Called during `InitializeSession` — hooks are deferred until the user
+/// explicitly starts capturing via `ConfigureNetworkHook { enabled: true }`.
+pub fn store_session_config(
+    winsock: bool,
+    winhttp: bool,
+    schannel: bool,
+    steamworks: bool,
+    ignore_ports: &[u16],
+    capture_loopback: bool,
+    ignore_hosts: &[String],
+) {
+    REQUESTED_WINSOCK.store(winsock, Ordering::SeqCst);
+    REQUESTED_WINHTTP.store(winhttp, Ordering::SeqCst);
+    REQUESTED_SCHANNEL.store(schannel, Ordering::SeqCst);
+    REQUESTED_STEAMWORKS.store(steamworks, Ordering::SeqCst);
+    configure_hooks(winsock, winhttp, schannel, steamworks);
+    CAPTURE_LOOPBACK.store(capture_loopback, Ordering::SeqCst);
+    if let Ok(mut ports) = IGNORE_PORTS.lock() {
+        *ports = ignore_ports.to_vec();
+    }
+    if let Ok(mut hosts) = IGNORE_HOSTS.lock() {
+        *hosts = ignore_hosts
+            .iter()
+            .map(|h| h.trim().to_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+    }
+}
+
+/// Install the requested hooks (idempotent). Only called when the user
+/// explicitly starts network capture, not at session init.
+fn ensure_hooks_installed() {
+    if HOOKS_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let ws = REQUESTED_WINSOCK.load(Ordering::Relaxed);
+    let wh = REQUESTED_WINHTTP.load(Ordering::Relaxed);
+    let sc = REQUESTED_SCHANNEL.load(Ordering::Relaxed);
+    let sw = REQUESTED_STEAMWORKS.load(Ordering::Relaxed);
+    if ws || wh || sc || sw {
+        init_with_config(ws, wh, sc, sw);
+    }
+}
+
+/// Enable or disable network capture. On first enable, installs the hooks
+/// that were configured during `InitializeSession`.
 pub fn configure(
     enabled: bool,
     ignore_ports: &[u16],
     capture_loopback: bool,
     ignore_hosts: &[String],
 ) {
+    if enabled {
+        ensure_hooks_installed();
+    }
     NETWORK_ENABLED.store(enabled, Ordering::SeqCst);
     CAPTURE_LOOPBACK.store(capture_loopback, Ordering::SeqCst);
-    WINSOCK_ENABLED.store(true, Ordering::SeqCst);
-    WINHTTP_ENABLED.store(true, Ordering::SeqCst);
-    SCHANNEL_ENABLED.store(true, Ordering::SeqCst);
-    STEAMWORKS_ENABLED.store(true, Ordering::SeqCst);
     if let Ok(mut ports) = IGNORE_PORTS.lock() {
         *ports = ignore_ports.to_vec();
     }

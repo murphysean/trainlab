@@ -138,7 +138,7 @@ pub unsafe extern "system" fn hooked_steam_networking_send_p2p_packet(
         false
     };
 
-    if ret && !pub_data.is_null() && cub_data > 0 {
+    if ret && !pub_data.is_null() && cub_data > 0 && super::is_enabled() {
         super::count_raw_packet(
             PacketKind::Steam,
             PacketDirection::Outbound,
@@ -188,7 +188,7 @@ pub unsafe extern "system" fn hooked_steam_networking_read_p2p_packet(
         false
     };
 
-    if ret && !pub_dest.is_null() && !pcub_msg_size.is_null() {
+    if ret && !pub_dest.is_null() && !pcub_msg_size.is_null() && super::is_enabled() {
         let msg_size = unsafe { *pcub_msg_size } as usize;
         let data_len = msg_size.min(cub_dest as usize);
         if data_len > 0 {
@@ -244,7 +244,7 @@ pub unsafe extern "system" fn hooked_steam_networking_messages_send_message_to_u
         0
     };
 
-    if ret > 0 && !pub_data.is_null() && cub_data > 0 {
+    if ret > 0 && !pub_data.is_null() && cub_data > 0 && super::is_enabled() {
         super::count_raw_packet(
             PacketKind::Steam,
             PacketDirection::Outbound,
@@ -292,7 +292,7 @@ pub unsafe extern "system" fn hooked_steam_networking_messages_receive_messages_
         0
     };
 
-    if ret > 0 && !pp_out_messages.is_null() {
+    if ret > 0 && !pp_out_messages.is_null() && super::is_enabled() {
         let count = (ret as usize).min(n_max_messages as usize);
         let msgs = unsafe { std::slice::from_raw_parts(pp_out_messages, count) };
         for &msg_ptr in msgs {
@@ -358,7 +358,7 @@ pub unsafe extern "system" fn hooked_steam_networking_sockets_send_message_to_co
     };
 
     // k_EResultOK is 1 in Steamworks
-    if (ret == 1 || ret > 0) && !pub_data.is_null() && cub_data > 0 {
+    if (ret == 1 || ret > 0) && !pub_data.is_null() && cub_data > 0 && super::is_enabled() {
         super::count_raw_packet(
             PacketKind::Steam,
             PacketDirection::Outbound,
@@ -401,7 +401,7 @@ pub unsafe extern "system" fn hooked_steam_networking_sockets_receive_messages_o
         0
     };
 
-    if ret > 0 && !pp_out_messages.is_null() {
+    if ret > 0 && !pp_out_messages.is_null() && super::is_enabled() {
         let count = (ret as usize).min(n_max_messages as usize);
         let msgs = unsafe { std::slice::from_raw_parts(pp_out_messages, count) };
         for &msg_ptr in msgs {
@@ -466,7 +466,7 @@ unsafe fn handle_lsteam_send_p2p(
         false
     };
 
-    if ret && !pub_data.is_null() && cub_data > 0 {
+    if ret && !pub_data.is_null() && cub_data > 0 && super::is_enabled() {
         super::count_raw_packet(
             PacketKind::Steam,
             PacketDirection::Outbound,
@@ -513,7 +513,7 @@ unsafe fn handle_lsteam_read_p2p(
         false
     };
 
-    if ret && !pub_dest.is_null() && !pcub_msg_size.is_null() {
+    if ret && !pub_dest.is_null() && !pcub_msg_size.is_null() && super::is_enabled() {
         let msg_size = *pcub_msg_size as usize;
         let data_len = msg_size.min(cub_dest as usize);
         if data_len > 0 {
@@ -717,7 +717,7 @@ pub unsafe extern "system" fn hooked_lsteam_sockets_send_message_to_connection(
         0
     };
 
-    if (ret == 1 || ret > 0) && !pub_data.is_null() && cub_data > 0 {
+    if (ret == 1 || ret > 0) && !pub_data.is_null() && cub_data > 0 && super::is_enabled() {
         super::count_raw_packet(
             PacketKind::Steam,
             PacketDirection::Outbound,
@@ -760,7 +760,7 @@ pub unsafe extern "system" fn hooked_lsteam_sockets_receive_messages_on_connecti
         0
     };
 
-    if ret > 0 && !pp_out_messages.is_null() {
+    if ret > 0 && !pp_out_messages.is_null() && super::is_enabled() {
         let count = (ret as usize).min(n_max_messages as usize);
         let msgs = unsafe { std::slice::from_raw_parts(pp_out_messages, count) };
         for &msg_ptr in msgs {

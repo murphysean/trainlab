@@ -692,24 +692,13 @@ fn handle_request(mem: &SelfProcess, req: Request) -> Response {
                 features.input.xinput,
             );
 
-            // 2. Network Hooks
-            if features.network.winsock
-                || features.network.winhttp
-                || features.network.schannel
-                || features.network.steamworks
-            {
-                network::init_with_config(
-                    features.network.winsock,
-                    features.network.winhttp,
-                    features.network.schannel,
-                    features.network.steamworks,
-                );
-            }
-            network::configure(
-                features.network.winsock
-                    || features.network.winhttp
-                    || features.network.schannel
-                    || features.network.steamworks,
+            // 2. Network Hooks — store config but defer hook installation until the
+            //    user explicitly starts capturing via ConfigureNetworkHook
+            network::store_session_config(
+                features.network.winsock,
+                features.network.winhttp,
+                features.network.schannel,
+                features.network.steamworks,
                 &features.network.ignore_ports,
                 features.network.capture_loopback,
                 &features.network.ignore_hosts,

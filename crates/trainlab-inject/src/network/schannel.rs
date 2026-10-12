@@ -85,9 +85,13 @@ pub unsafe extern "system" fn hooked_encrypt_message(
     p_message: *const SecBufferDesc,
     message_seq_no: u32,
 ) -> i32 {
-    // Copy the plaintext request body while it is still plaintext.
-    let plaintext = unsafe { data_buffer_payload(p_message) }
-        .map(|(ptr, len)| unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec());
+    // Copy the plaintext request body while it is still plaintext (only when capturing).
+    let plaintext = if super::is_enabled() {
+        unsafe { data_buffer_payload(p_message) }
+            .map(|(ptr, len)| unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec())
+    } else {
+        None
+    };
 
     let orig = ORIGINAL_ENCRYPT_MESSAGE.load(Ordering::Relaxed);
     let ret = if !orig.is_null() {
@@ -133,7 +137,7 @@ pub unsafe extern "system" fn hooked_decrypt_message(
         -1
     };
 
-    if ret == SEC_E_OK {
+    if ret == SEC_E_OK && super::is_enabled() {
         if let Some((ptr, len)) = unsafe { data_buffer_payload(p_message) } {
             super::count_raw_packet(PacketKind::Http, PacketDirection::Inbound, len);
             let payload = unsafe { std::slice::from_raw_parts(ptr, len) };

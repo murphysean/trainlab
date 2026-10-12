@@ -608,11 +608,12 @@ pub fn attach_and_initialize(
                     features.network.schannel = false;
                     features.network.steamworks = false;
                 } else {
-                    // Profile explicitly opted into network capture: enable requested hooks or default to true
-                    features.network.winsock = net_cfg.winsock.unwrap_or(true);
-                    features.network.winhttp = net_cfg.winhttp.unwrap_or(true);
-                    features.network.schannel = net_cfg.schannel.unwrap_or(true);
-                    features.network.steamworks = net_cfg.steamworks.unwrap_or(true);
+                    // Profile explicitly opted into network capture: only enable hooks that are
+                    // individually requested — don't default to true to avoid accidental overhead
+                    features.network.winsock = net_cfg.winsock.unwrap_or(false);
+                    features.network.winhttp = net_cfg.winhttp.unwrap_or(false);
+                    features.network.schannel = net_cfg.schannel.unwrap_or(false);
+                    features.network.steamworks = net_cfg.steamworks.unwrap_or(false);
                 }
             }
             if let Some(ws) = net_cfg.winsock {

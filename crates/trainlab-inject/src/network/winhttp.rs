@@ -95,7 +95,7 @@ pub unsafe extern "system" fn hooked_winhttp_open_request(
         std::ptr::null_mut()
     };
 
-    if !handle.is_null() {
+    if !handle.is_null() && super::is_enabled() {
         let verb = unsafe { pwstr_to_string(pwsz_verb) };
         let path = unsafe { pwstr_to_string(pwsz_object_name) };
         let mut req_ctx = RequestContext::default();
@@ -139,7 +139,7 @@ pub unsafe extern "system" fn hooked_winhttp_send_request(
         0
     };
 
-    if ret != 0 {
+    if ret != 0 && super::is_enabled() {
         let headers = if !pwsz_headers.is_null() {
             if dw_headers_length > 0 && dw_headers_length != u32::MAX {
                 let slice =
@@ -233,7 +233,7 @@ pub unsafe extern "system" fn hooked_winhttp_read_data(
         0
     };
 
-    if ret != 0 && !lpdw_number_of_bytes_read.is_null() {
+    if ret != 0 && !lpdw_number_of_bytes_read.is_null() && super::is_enabled() {
         let read_bytes = unsafe { *lpdw_number_of_bytes_read } as usize;
         if read_bytes > 0 && !lp_buffer.is_null() {
             super::count_raw_packet(PacketKind::Http, PacketDirection::Inbound, read_bytes);
@@ -276,9 +276,11 @@ pub unsafe extern "system" fn hooked_winhttp_read_data(
 
 /// Hooked `WinHttpCloseHandle` callback to clean up active request metadata.
 pub unsafe extern "system" fn hooked_winhttp_close_handle(h_internet: HInternet) -> i32 {
-    if let Ok(mut lock) = ACTIVE_REQUESTS.lock() {
-        if let Some(map) = lock.as_mut() {
-            map.remove(&(h_internet as usize));
+    if super::is_enabled() {
+        if let Ok(mut lock) = ACTIVE_REQUESTS.lock() {
+            if let Some(map) = lock.as_mut() {
+                map.remove(&(h_internet as usize));
+            }
         }
     }
 

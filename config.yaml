@@ -28,8 +28,10 @@ inject:
   dll_port: 31337
   dll_path: "trainlab_inject.dll"
 
-# Injected DLL feature configuration (opt-out / blacklist semantics)
-# By default, all capabilities are requested and enabled.
+# Injected DLL feature configuration (opt-in for network hooks)
+# Display, input, and memory features are enabled by default.
+# Network hooks must be explicitly enabled — they add per-packet overhead
+# (syscalls, allocations, mutex contention) that can destabilize streaming.
 inject_features:
   display:
     overlay: true              # DXGI/D3D in-game overlay rendering
@@ -37,10 +39,10 @@ inject_features:
     wndproc: true              # Window message hook for keyboard hotkeys
     xinput: true               # Controller polling detour for gamepad nav
   network:
-    winsock: true              # Winsock send/recv/sendto/recvfrom detours
-    winhttp: true              # WinHTTP REST API detours
-    schannel: true             # SChannel TLS/HTTPS plaintext detours (EncryptMessage/DecryptMessage)
-    steamworks: true           # Steamworks P2P networking detours (steam_api64.dll)
+    winsock: false             # Winsock send/recv/sendto/recvfrom detours
+    winhttp: false             # WinHTTP REST API detours
+    schannel: false            # SChannel TLS/HTTPS plaintext detours (EncryptMessage/DecryptMessage)
+    steamworks: false          # Steamworks P2P networking detours (steam_api64.dll)
     capture_loopback: false     # Set to true to include 127.0.0.1 loopback traffic
     ignore_ports: []           # Additional ports to filter out (trainer IPC & MCP ignored automatically)
     ignore_hosts: []           # Hostnames, domains, or substrings to drop (e.g. ["api.helldivers.com", "telemetry.arrowhead.com"])

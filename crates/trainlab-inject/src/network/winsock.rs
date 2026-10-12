@@ -231,7 +231,7 @@ pub unsafe extern "system" fn hooked_send(s: SOCKET, buf: *const u8, len: i32, f
         -1
     };
 
-    if ret > 0 && !buf.is_null() {
+    if ret > 0 && !buf.is_null() && super::is_enabled() {
         let kind = unsafe { query_socket_kind(s) };
         let data_len = (ret as usize).min(len as usize);
         super::count_raw_packet(kind, PacketDirection::Outbound, data_len);
@@ -263,7 +263,7 @@ pub unsafe extern "system" fn hooked_recv(s: SOCKET, buf: *mut u8, len: i32, fla
         -1
     };
 
-    if ret > 0 && !buf.is_null() {
+    if ret > 0 && !buf.is_null() && super::is_enabled() {
         let kind = unsafe { query_socket_kind(s) };
         let data_len = (ret as usize).min(len as usize);
         super::count_raw_packet(kind, PacketDirection::Inbound, data_len);
@@ -302,7 +302,7 @@ pub unsafe extern "system" fn hooked_sendto(
         -1
     };
 
-    if ret > 0 && !buf.is_null() {
+    if ret > 0 && !buf.is_null() && super::is_enabled() {
         let kind = unsafe { query_socket_kind(s) };
         let data_len = (ret as usize).min(len as usize);
         super::count_raw_packet(kind, PacketDirection::Outbound, data_len);
@@ -341,7 +341,7 @@ pub unsafe extern "system" fn hooked_recvfrom(
         -1
     };
 
-    if ret > 0 && !buf.is_null() {
+    if ret > 0 && !buf.is_null() && super::is_enabled() {
         let kind = unsafe { query_socket_kind(s) };
         let data_len = (ret as usize).min(len as usize);
         super::count_raw_packet(kind, PacketDirection::Inbound, data_len);
@@ -394,6 +394,10 @@ pub unsafe extern "system" fn hooked_wsasendto(
     } else {
         -1
     };
+
+    if !super::is_enabled() {
+        return ret;
+    }
 
     // On Windows/Proton, asynchronous/overlapped I/O returns SOCKET_ERROR (-1) with WSA_IO_PENDING (997).
     // The outbound data buffer is already valid and queued for send, so we can extract it.
@@ -477,6 +481,10 @@ pub unsafe extern "system" fn hooked_wsarecvfrom(
         -1
     };
 
+    if !super::is_enabled() {
+        return ret;
+    }
+
     if ret == 0 {
         let bytes_recvd = if !number_of_bytes_recvd.is_null() {
             (unsafe { *number_of_bytes_recvd }) as usize
@@ -550,7 +558,7 @@ pub unsafe extern "system" fn hooked_wsagetoverlappedresult(
     };
 
     // If overlapped operation completed successfully (non-zero BOOL) and bytes were transferred:
-    if ret != 0 && !transfer_bytes.is_null() && !overlapped.is_null() {
+    if ret != 0 && !transfer_bytes.is_null() && !overlapped.is_null() && super::is_enabled() {
         let bytes_transferred = (unsafe { *transfer_bytes }) as usize;
         if bytes_transferred > 0 {
             let pending_entry = if let Ok(mut pending) = PENDING_UDP_RECVS.lock() {
@@ -618,6 +626,10 @@ pub unsafe extern "system" fn hooked_wsasend(
     } else {
         -1
     };
+
+    if !super::is_enabled() {
+        return ret;
+    }
 
     let is_success = ret == 0 || ret > 0;
     let is_pending = ret == -1 && unsafe { WSAGetLastError() } == WSA_IO_PENDING;
@@ -692,6 +704,10 @@ pub unsafe extern "system" fn hooked_wsarecv(
     } else {
         -1
     };
+
+    if !super::is_enabled() {
+        return ret;
+    }
 
     if ret == 0 {
         let bytes_recvd = if !number_of_bytes_recvd.is_null() {

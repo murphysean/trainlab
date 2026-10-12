@@ -137,10 +137,13 @@ if [ "$SPAWN_TRAINER" -eq 1 ]; then
         echo "[trainlab] Launching Windows trainer via Proton: $PROTON_RUNNER ($TARGET_WIN_EXE $AUTO_ARGS)" >>/tmp/trainlab_launch_out.log
         # Scrub Steam AppID, LD_PRELOAD (to avoid 32-bit gameoverlayrenderer mismatch), and client launch env
         # Completely disable Wine audio drivers (winepulse, winealsa, mmdevapi) so companion never touches PipeWire/PulseAudio
+        # Force software rendering (llvmpipe) so the companion's GL context doesn't compete
+        # with the game, Gamescope, and VAAPI encoder for GPU scheduling on the APU
         env -u LD_PRELOAD -u SteamAppId -u SteamGameId -u STEAM_COMPAT_APP_ID -u SteamClientLaunch \
             SteamAppId=0 SteamGameId=0 \
             WINEDLLOVERRIDES="winepulse.drv=d;winealsa.drv=d;mmdevapi=d" \
             WINELOADERNOEXEC=1 \
+            LIBGL_ALWAYS_SOFTWARE=1 \
             TRAINLAB_GAMESCOPE="${TRAINLAB_GAMESCOPE:-0}" TRAINLAB_AUTO_INJECT=1 TRAINLAB_AUTO_EXIT=1 TRAINLAB_SCALE="${TRAINLAB_SCALE:-1.0}" \
             "$PROTON_RUNNER" run "$TARGET_WIN_EXE" $AUTO_ARGS 200>&- >>/tmp/trainlab_launch_out.log 2>&1 &
         TRAINER_PID=$!
