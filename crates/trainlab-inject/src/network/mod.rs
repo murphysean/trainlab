@@ -264,6 +264,8 @@ pub fn configure(
         ensure_hooks_installed();
     }
     NETWORK_ENABLED.store(enabled, Ordering::SeqCst);
+    #[cfg(test)]
+    configure_hooks(true, true, true, true);
     CAPTURE_LOOPBACK.store(capture_loopback, Ordering::SeqCst);
     if let Ok(mut ports) = IGNORE_PORTS.lock() {
         *ports = ignore_ports.to_vec();
