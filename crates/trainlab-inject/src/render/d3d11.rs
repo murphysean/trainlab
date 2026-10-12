@@ -66,6 +66,8 @@ struct RendererState {
     depth_stencil_state: Option<ID3D11DepthStencilState>,
     sampler_state: Option<ID3D11SamplerState>,
     textures: HashMap<egui::TextureId, TextureEntry>,
+    screen_width: f32,
+    screen_height: f32,
 }
 
 static RENDERER: Mutex<Option<RendererState>> = Mutex::new(None);
@@ -309,9 +311,38 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
             Err(_) => return,
         };
 
-        if lock.is_none() {
-            let sc: &IDXGISwapChain = unsafe { std::mem::transmute(&swapchain_ptr) };
+        // Detect swapchain resize: if the buffer dimensions changed since we
+        // created our device/shaders/buffers, drop the entire renderer so it
+        // re-initializes with a fresh device from the current swapchain.
+        // Stale COM references on a reconfigured DXVK device prevent clean
+        // Vulkan surface recycling, which can break Gamescope's PipeWire
+        // capture source for Steam Remote Play.
+        let sc: &IDXGISwapChain = unsafe { std::mem::transmute(&swapchain_ptr) };
+        if let Some(state) = lock.as_ref() {
+            if let Ok(desc) = unsafe { sc.GetDesc() } {
+                let cur_w = if desc.BufferDesc.Width > 0 {
+                    desc.BufferDesc.Width as f32
+                } else {
+                    1280.0
+                };
+                let cur_h = if desc.BufferDesc.Height > 0 {
+                    desc.BufferDesc.Height as f32
+                } else {
+                    800.0
+                };
+                if (cur_w - state.screen_width).abs() > 0.5
+                    || (cur_h - state.screen_height).abs() > 0.5
+                {
+                    crate::render::log_render(format!(
+                        "d3d11: swapchain resized {}x{} -> {}x{}, dropping cached device and all GPU objects",
+                        state.screen_width, state.screen_height, cur_w, cur_h
+                    ));
+                    *lock = None;
+                }
+            }
+        }
 
+        if lock.is_none() {
             let device: ID3D11Device = match unsafe { sc.GetDevice() } {
                 Ok(d) => d,
                 Err(e) => {
@@ -332,9 +363,26 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                 }
             };
 
-            crate::render::log_render(
-                "render_overlay_frame: acquired D3D11 device and immediate context",
-            );
+            let init_dims = match unsafe { sc.GetDesc() } {
+                Ok(desc) => (
+                    if desc.BufferDesc.Width > 0 {
+                        desc.BufferDesc.Width as f32
+                    } else {
+                        1280.0
+                    },
+                    if desc.BufferDesc.Height > 0 {
+                        desc.BufferDesc.Height as f32
+                    } else {
+                        800.0
+                    },
+                ),
+                Err(_) => (1280.0, 800.0),
+            };
+
+            crate::render::log_render(format!(
+                "render_overlay_frame: acquired D3D11 device and context ({}x{})",
+                init_dims.0, init_dims.1
+            ));
 
             *lock = Some(RendererState {
                 device,
@@ -353,6 +401,8 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
                 depth_stencil_state: None,
                 sampler_state: None,
                 textures: HashMap::new(),
+                screen_width: init_dims.0,
+                screen_height: init_dims.1,
             });
         }
 
@@ -364,26 +414,9 @@ pub unsafe fn render_overlay_frame(swapchain_ptr: *mut c_void) {
         // Capture Game Pipeline State before applying overlay render pipeline states
         let _state_guard = unsafe { D3D11StateBackup::capture(&state.context) };
 
-        // 1. Re-acquire backbuffer and swapchain dimensions every frame.
-        //    ResizeBuffers (called by Steam streaming encoder on resolution
-        //    changes, player joins, HEVC renegotiation) invalidates all prior
-        //    backbuffer references — a cached RTV would use-after-free.
-        let sc: &IDXGISwapChain = unsafe { std::mem::transmute(&swapchain_ptr) };
-        let (screen_w, screen_h) = match unsafe { sc.GetDesc() } {
-            Ok(desc) => (
-                if desc.BufferDesc.Width > 0 {
-                    desc.BufferDesc.Width as f32
-                } else {
-                    1280.0
-                },
-                if desc.BufferDesc.Height > 0 {
-                    desc.BufferDesc.Height as f32
-                } else {
-                    800.0
-                },
-            ),
-            Err(_) => (1280.0, 800.0),
-        };
+        // 1. Re-acquire backbuffer every frame.
+        //    ResizeBuffers invalidates all prior backbuffer references.
+        let (screen_w, screen_h) = (state.screen_width, state.screen_height);
         state.rtv = None;
         match unsafe { sc.GetBuffer::<ID3D11Texture2D>(0) } {
             Ok(backbuffer) => {

@@ -231,7 +231,10 @@ cleanup() {
         kill "$GUARDIAN_PID" 2>/dev/null
     fi
 
-    # 3. Promptly terminate all Trainlab GUI and helper processes to ensure zero lingering D3D devices
+    # 3. Terminate Trainlab GUI and companion processes, coordinating with the
+    #    Wine server when running under Proton so DRI/Vulkan/DMA-BUF resources
+    #    are released cleanly (a SIGKILL'd Proton process can orphan DRM contexts
+    #    that block Steam's VAAPI encoder on the next streaming session).
     if [ -n "$TRAINER_PID" ]; then
         kill -TERM "$TRAINER_PID" 2>/dev/null
     fi
@@ -240,8 +243,24 @@ cleanup() {
     pkill -TERM -f trainlab-gui-linux 2>/dev/null
     pkill -TERM -x trainlab 2>/dev/null
 
-    # Allow companion processes up to 1.5s to shut down cleanly before SIGKILL
-    for _ in $(seq 1 15); do
+    # If running under Proton, ask the Wine server to shut down gracefully —
+    # this coordinates DRI handle cleanup across all Wine processes in the prefix.
+    if [ -n "$PROTON_RUNNER" ]; then
+        WINESERVER="$(dirname "$PROTON_RUNNER")/files/bin/wineserver"
+        if [ ! -x "$WINESERVER" ]; then
+            WINESERVER="$(dirname "$PROTON_RUNNER")/../files/bin/wineserver"
+        fi
+        _PFX="${WINEPREFIX:-}"
+        if [ -z "$_PFX" ] && [ -n "$STEAM_COMPAT_DATA_PATH" ] && [ -d "$STEAM_COMPAT_DATA_PATH/pfx" ]; then
+            _PFX="$STEAM_COMPAT_DATA_PATH/pfx"
+        fi
+        if [ -x "$WINESERVER" ] && [ -n "$_PFX" ]; then
+            WINEPREFIX="$_PFX" "$WINESERVER" --kill 2>/dev/null || true
+        fi
+    fi
+
+    # Allow companion processes up to 5s to shut down cleanly before SIGKILL
+    for _ in $(seq 1 50); do
         if ! pgrep -x "trainlab" >/dev/null 2>&1 && ! pgrep -f "trainlab-gui" >/dev/null 2>&1 && ! pgrep -f "trainlab.exe" >/dev/null 2>&1; then
             break
         fi
@@ -256,19 +275,7 @@ cleanup() {
     pkill -9 -f trainlab-gui-linux 2>/dev/null
     pkill -9 -x trainlab 2>/dev/null
 
-    # 4. Proactively clear any stuck PipeWire streaming metadata if left lingering by Steam teardown
-    if command -v pw-metadata >/dev/null 2>&1; then
-        cur_sink=$(pw-metadata 0 default.configured.audio.sink 2>/dev/null | grep -o 'steam-streaming' || true)
-        if [ -n "$cur_sink" ]; then
-            pw-metadata 0 default.configured.audio.sink null 2>/dev/null || true
-        fi
-        cur_src=$(pw-metadata 0 default.configured.audio.source 2>/dev/null | grep -o 'steam-streaming' || true)
-        if [ -n "$cur_src" ]; then
-            pw-metadata 0 default.configured.audio.source null 2>/dev/null || true
-        fi
-    fi
-
-    # 5. Release and remove lock
+    # 4. Release and remove lock
     flock -u 200 2>/dev/null || true
     exec 200>&-
     rm -f "$LOCK_FILE" 2>/dev/null
