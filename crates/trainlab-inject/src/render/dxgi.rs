@@ -150,6 +150,22 @@ pub unsafe extern "system" fn hooked_present(
     // 5. Call original Present trampoline
     if !orig.is_null() {
         let orig_fn: FnPresent = std::mem::transmute(orig);
+
+        // Periodic frame timing diagnostic: sample one frame every ~60 seconds at 60fps.
+        // Measures how long the real Present call takes to detect GPU contention from
+        // the VAAPI encoder or other consumers sharing the AMD APU.
+        if fc % 3600 == 0 {
+            let t0 = std::time::Instant::now();
+            let hr = orig_fn(swapchain, sync_interval, flags);
+            let elapsed = t0.elapsed();
+            let pins = super::overlay::HAS_ACTIVE_PINS.load(Ordering::Relaxed);
+            super::log_render(format!(
+                "hooked_present: frame {fc}, Present={elapsed:?}, overlay_vis={vis}, pins={pins}, hr=0x{:08X}",
+                hr as u32
+            ));
+            return hr;
+        }
+
         let hr = orig_fn(swapchain, sync_interval, flags);
 
         // DXGI_ERROR_DEVICE_REMOVED / DEVICE_RESET: the GPU or driver

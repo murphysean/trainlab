@@ -69,7 +69,11 @@ pub fn shutdown() {
     if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
         return; // Idempotent teardown guard: run at most once per process lifetime
     }
-    log_render("render::shutdown initiated");
+    let frames = STATE.frame_count.load(Ordering::Relaxed);
+    let hooked = STATE.present_hooked.load(Ordering::Relaxed);
+    log_render(format!(
+        "render::shutdown initiated (total_frames={frames}, present_hooked={hooked})"
+    ));
 
     #[cfg(windows)]
     {
@@ -86,6 +90,8 @@ pub fn shutdown() {
         d3d11::shutdown();
         d3d12::shutdown();
     }
+
+    log_render("render::shutdown complete — all hooks restored, GPU resources released");
 }
 
 pub fn log_render(msg: impl std::fmt::Display) {
@@ -153,6 +159,10 @@ pub fn init() {
 }
 
 /// Configure and optionally initialize in-game render and input hooks via IPC instructions.
+///
+/// Set `TRAINLAB_NO_RENDER_HOOK=1` in the environment to suppress the DXGI
+/// Present hook entirely (diagnostic: isolates whether the trampoline is
+/// causing frame-timing instability for Steam Remote Play's HEVC encoder).
 pub fn configure(overlay: bool, hook_wndproc: bool, xinput_hooks: bool) {
     // Always update runtime visibility state
     STATE.overlay_visible.store(overlay, Ordering::Relaxed);
@@ -165,6 +175,19 @@ pub fn configure(overlay: bool, hook_wndproc: bool, xinput_hooks: bool) {
             log_render(format!(
                 "render::configure: already initialized for this process; updated overlay_visible={overlay}"
             ));
+            return;
+        }
+
+        if std::env::var("TRAINLAB_NO_RENDER_HOOK")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            log_render(
+                "render::configure: TRAINLAB_NO_RENDER_HOOK set — all render/input hooks suppressed",
+            );
+            tracing::info!(
+                "TRAINLAB_NO_RENDER_HOOK: skipping DXGI Present hook and XInput hooks"
+            );
             return;
         }
 

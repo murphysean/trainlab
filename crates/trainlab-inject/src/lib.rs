@@ -146,6 +146,8 @@ pub fn start(port: u16) -> std::io::Result<u16> {
     BOUND_PORT.store(actual, Ordering::SeqCst);
     tracing::info!(host = bind_addr, port = actual, "trainlab-inject listening");
 
+    log_startup_diagnostics();
+
     // Initialize passive detection (e.g. third-party overlay scanning) without installing hooks
     render::init();
 
@@ -183,6 +185,40 @@ pub fn start(port: u16) -> std::io::Result<u16> {
         })?;
 
     Ok(actual)
+}
+
+/// Log environment and runtime state at DLL load for post-crash diagnostics.
+fn log_startup_diagnostics() {
+    let vars = [
+        "LIBGL_ALWAYS_SOFTWARE",
+        "TRAINLAB_NO_RENDER_HOOK",
+        "TRAINLAB_GAMESCOPE",
+        "TRAINLAB_HIDDEN",
+        "TRAINLAB_AUTO_EXIT",
+        "TRAINLAB_AUTO_INJECT",
+        "WINEPREFIX",
+        "PROTON_VERSION",
+        "WINEDLLOVERRIDES",
+        "WINELOADERNOEXEC",
+        "SteamAppId",
+        "SteamGameId",
+        "STEAM_COMPAT_DATA_PATH",
+    ];
+    let mut lines = Vec::new();
+    for var in &vars {
+        if let Ok(val) = std::env::var(var) {
+            lines.push(format!("  {var}={val}"));
+        }
+    }
+    let env_block = if lines.is_empty() {
+        "  (none set)".to_string()
+    } else {
+        lines.join("\n")
+    };
+    render::log_render(format!(
+        "startup diagnostics (PID {}):\n{env_block}",
+        std::process::id()
+    ));
 }
 
 /// Handle a single connection from the GUI.
