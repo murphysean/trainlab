@@ -449,8 +449,18 @@ pub fn resolve_dll_path(input: &str) -> String {
     match std::env::current_exe() {
         Ok(exe) => match exe.parent() {
             Some(dir) => {
-                if input == "trainlab_inject.dll" && dir.join("trainlab.dll").exists() {
-                    dir.join("trainlab.dll").to_string_lossy().into_owned()
+                if input == "trainlab_inject.dll" || input == "trainlab.dll" {
+                    #[cfg(target_pointer_width = "32")]
+                    if dir.join("trainlab32.dll").exists() {
+                        return dir.join("trainlab32.dll").to_string_lossy().into_owned();
+                    }
+                    if dir.join("trainlab.dll").exists() {
+                        dir.join("trainlab.dll").to_string_lossy().into_owned()
+                    } else if dir.join("trainlab32.dll").exists() {
+                        dir.join("trainlab32.dll").to_string_lossy().into_owned()
+                    } else {
+                        dir.join(input).to_string_lossy().into_owned()
+                    }
                 } else {
                     dir.join(input).to_string_lossy().into_owned()
                 }

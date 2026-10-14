@@ -42,11 +42,60 @@ fi
 
 TRAINLAB_DIR="${TRAINLAB_DIR:-$HOME/Documents/Trainers/Trainlab}"
 
+# Detect game executable name and path from Steam command line arguments
+GAME_EXE=""
+GAME_EXE_PATH=""
+for arg in "$@"; do
+    if [[ "$arg" == *.exe ]] || [[ "$arg" == *.x86_64 ]]; then
+        GAME_EXE=$(basename "$arg")
+        GAME_EXE_PATH="$arg"
+        break
+    fi
+done
+
+# Detect whether game executable is 32-bit x86 (e.g. DREDGE) or 64-bit x86-64
+IS_32BIT=0
+if [ -n "$GAME_EXE_PATH" ] && [ -f "$GAME_EXE_PATH" ]; then
+    if command -v file >/dev/null 2>&1; then
+        if file -b "$GAME_EXE_PATH" 2>/dev/null | grep -qi "PE32 .*Intel 80386"; then
+            IS_32BIT=1
+        fi
+    fi
+    if [ "$IS_32BIT" -eq 0 ] && command -v od >/dev/null 2>&1; then
+        pe_offset=$(od -An -j 60 -N 4 -t u4 "$GAME_EXE_PATH" 2>/dev/null | tr -d ' ')
+        if [ -n "$pe_offset" ] && [ "$pe_offset" -gt 0 ] 2>/dev/null; then
+            machine=$(od -An -j "$((pe_offset + 4))" -N 2 -t x2 "$GAME_EXE_PATH" 2>/dev/null | tr -d ' ')
+            if [ "$machine" = "014c" ]; then
+                IS_32BIT=1
+            fi
+        fi
+    fi
+fi
+
 TARGET_WIN_EXE=""
-if [ -f "$TRAINLAB_DIR/trainlab.exe" ]; then
-    TARGET_WIN_EXE="$TRAINLAB_DIR/trainlab.exe"
-elif [ -f "$TRAINLAB_DIR/trainlab-gui.exe" ]; then
-    TARGET_WIN_EXE="$TRAINLAB_DIR/trainlab-gui.exe"
+TARGET_WIN_DLL=""
+if [ "$IS_32BIT" -eq 1 ]; then
+    log "Detected 32-bit game executable ($GAME_EXE)"
+    if [ -f "$TRAINLAB_DIR/trainlab32.exe" ]; then
+        TARGET_WIN_EXE="$TRAINLAB_DIR/trainlab32.exe"
+    elif [ -f "$TRAINLAB_DIR/trainlab.exe" ]; then
+        TARGET_WIN_EXE="$TRAINLAB_DIR/trainlab.exe"
+    fi
+    if [ -f "$TRAINLAB_DIR/trainlab32.dll" ]; then
+        TARGET_WIN_DLL="$TRAINLAB_DIR/trainlab32.dll"
+    elif [ -f "$TRAINLAB_DIR/trainlab.dll" ]; then
+        TARGET_WIN_DLL="$TRAINLAB_DIR/trainlab.dll"
+    fi
+else
+    log "Detected 64-bit game executable ($GAME_EXE)"
+    if [ -f "$TRAINLAB_DIR/trainlab.exe" ]; then
+        TARGET_WIN_EXE="$TRAINLAB_DIR/trainlab.exe"
+    elif [ -f "$TRAINLAB_DIR/trainlab-gui.exe" ]; then
+        TARGET_WIN_EXE="$TRAINLAB_DIR/trainlab-gui.exe"
+    fi
+    if [ -f "$TRAINLAB_DIR/trainlab.dll" ]; then
+        TARGET_WIN_DLL="$TRAINLAB_DIR/trainlab.dll"
+    fi
 fi
 
 TARGET_LINUX_EXE=""
@@ -70,15 +119,6 @@ if [ "$(hostname 2>/dev/null)" = "frame" ] || grep -q 'VARIANT_ID="vr"' /etc/os-
     export TRAINLAB_SCALE="${TRAINLAB_SCALE:-1.0}"
 fi
 
-# Detect game executable name from Steam command line arguments
-GAME_EXE=""
-for arg in "$@"; do
-    if [[ "$arg" == *.exe ]] || [[ "$arg" == *.x86_64 ]]; then
-        GAME_EXE=$(basename "$arg")
-        break
-    fi
-done
-
 if [ -n "$GAMESCOPE_WAYLAND_DISPLAY" ] || [ -n "$STEAM_DECK" ] || [ -n "$SteamGamepadUI" ]; then
     export TRAINLAB_GAMESCOPE=1
 fi
@@ -86,6 +126,9 @@ fi
 AUTO_ARGS="--auto-attach --no-fullscreen --hidden --auto-exit"
 if [ -n "$GAME_EXE" ]; then
     AUTO_ARGS="$AUTO_ARGS --game $GAME_EXE"
+fi
+if [ -n "$TARGET_WIN_DLL" ]; then
+    AUTO_ARGS="$AUTO_ARGS --dll $TARGET_WIN_DLL"
 fi
 if [ -n "$TRAINLAB_SCALE" ]; then
     AUTO_ARGS="$AUTO_ARGS --scale $TRAINLAB_SCALE"

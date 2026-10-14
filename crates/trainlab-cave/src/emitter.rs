@@ -27,9 +27,17 @@
 /// RIP-relative `E9 rel32` would be more compact (5 bytes) but has a ±2GB limit
 /// that is fragile for caves allocated far from the target code, so we use the
 /// memory-indirect absolute form instead.
-///
-/// Returns all 14 bytes (the `jmp` plus its embedded target slot), so the
-/// caller writes them contiguously.
+/// Returns the jump bytes (either 6-byte push imm32; ret on 32-bit, or 14-byte FF 25 on 64-bit).
+#[cfg(target_pointer_width = "32")]
+pub fn jmp_abs(target: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(6);
+    out.push(0x68); // push imm32
+    out.extend_from_slice(&(target as u32).to_le_bytes());
+    out.push(0xC3); // ret
+    out
+}
+
+#[cfg(not(target_pointer_width = "32"))]
 pub fn jmp_abs(target: u64) -> Vec<u8> {
     // FF 25 <rel32>: jmp qword ptr [rip+rel32]. rip at the end of this
     // instruction points to the slot, so rel32 = 0 reads the slot.
@@ -91,6 +99,10 @@ pub fn mov_dword_ptr_rax_disp_ecx(disp: i32) -> Vec<u8> {
 /// The length of a full `jmp_abs` trampoline (14 bytes): the `FF 25 rel32`
 /// instruction plus its embedded 8-byte absolute target slot. Exposed so
 /// callers can size the patched region / require a cave large enough.
+#[cfg(target_pointer_width = "32")]
+pub const JMP_ABS_LEN: usize = 6;
+
+#[cfg(not(target_pointer_width = "32"))]
 pub const JMP_ABS_LEN: usize = 14;
 
 #[cfg(test)]
@@ -98,6 +110,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(target_pointer_width = "32"))]
     fn jmp_abs_len_and_prefix() {
         let b = jmp_abs(0x12345678);
         // 14 bytes: FF 25 disp32 + 8-byte target slot.
@@ -105,6 +118,16 @@ mod tests {
         assert_eq!(&b[0..2], &[0xFF, 0x25]);
         assert_eq!(i32::from_le_bytes(b[2..6].try_into().unwrap()), 0);
         assert_eq!(u64::from_le_bytes(b[6..14].try_into().unwrap()), 0x12345678);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "32")]
+    fn jmp_abs_len_and_prefix_32() {
+        let b = jmp_abs(0x12345678);
+        assert_eq!(b.len(), 6);
+        assert_eq!(b[0], 0x68);
+        assert_eq!(u32::from_le_bytes(b[1..5].try_into().unwrap()), 0x12345678);
+        assert_eq!(b[5], 0xC3);
     }
 
     #[test]

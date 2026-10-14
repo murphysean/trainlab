@@ -11,8 +11,10 @@ All release artifacts share the clean, unified `trainlab` naming scheme:
 | Artifact Name | Platform | Description |
 | :--- | :--- | :--- |
 | **`trainlab`** | Linux | Native ELF GUI & Memory Control Process |
-| **`trainlab.exe`** | Windows | PE32+ GUI executable (executed under Wine/Proton) |
-| **`trainlab.dll`** | Windows | PE32+ dynamic library injected into Windows games |
+| **`trainlab.exe`** | Windows (64-bit) | PE32+ GUI executable (executed under Wine/Proton) |
+| **`trainlab.dll`** | Windows (64-bit) | PE32+ dynamic library injected into 64-bit Windows games |
+| **`trainlab32.exe`** | Windows (32-bit) | PE32 GUI executable (executed under WOW64/Wine/Proton) |
+| **`trainlab32.dll`** | Windows (32-bit) | PE32 dynamic library injected into 32-bit Windows games |
 | **`trainlab.so`** | Linux | ELF shared object injected via `LD_PRELOAD` into Linux games |
 
 ---

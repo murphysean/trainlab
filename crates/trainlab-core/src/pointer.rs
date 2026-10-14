@@ -128,10 +128,33 @@ pub fn chase_object<P: ProcessMemory + ?Sized>(
     Ok(hops)
 }
 
-/// Read a single 64-bit pointer from a process.
-fn read_ptr<P: ProcessMemory + ?Sized>(proc: &P, address: u64) -> Result<u64, MemoryError> {
-    let buf = proc.read(address, 8)?;
-    Ok(u64::from_le_bytes(buf.try_into().unwrap_or([0u8; 8])))
+/// Read a single pointer from a process (4 bytes on 32-bit targets, 8 bytes on 64-bit targets).
+pub fn read_ptr<P: ProcessMemory + ?Sized>(proc: &P, address: u64) -> Result<u64, MemoryError> {
+    #[cfg(target_pointer_width = "32")]
+    {
+        let buf = proc.read(address, 4)?;
+        Ok(u32::from_le_bytes(buf.try_into().unwrap_or([0u8; 4])) as u64)
+    }
+    #[cfg(not(target_pointer_width = "32"))]
+    {
+        let buf = proc.read(address, 8)?;
+        Ok(u64::from_le_bytes(buf.try_into().unwrap_or([0u8; 8])))
+    }
+}
+
+/// Read a single pointer of explicit byte width (4 or 8 bytes) from a process.
+pub fn read_ptr_width<P: ProcessMemory + ?Sized>(
+    proc: &P,
+    address: u64,
+    width: usize,
+) -> Result<u64, MemoryError> {
+    if width == 4 {
+        let buf = proc.read(address, 4)?;
+        Ok(u32::from_le_bytes(buf.try_into().unwrap_or([0u8; 4])) as u64)
+    } else {
+        let buf = proc.read(address, 8)?;
+        Ok(u64::from_le_bytes(buf.try_into().unwrap_or([0u8; 8])))
+    }
 }
 
 /// A reverse-reference / pointer-scan: find addresses in writable memory whose

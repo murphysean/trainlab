@@ -125,10 +125,10 @@ pub fn install_wndproc_hook(hwnd: HWND) -> bool {
     }
 
     unsafe {
-        let prev = SetWindowLongPtrA(hwnd, GWLP_WNDPROC, hooked_wndproc as *const () as isize);
+        let prev = SetWindowLongPtrA(hwnd, GWLP_WNDPROC, hooked_wndproc as *const () as usize as _);
 
         if prev != 0 {
-            ORIGINAL_WNDPROC.store(prev as *mut std::ffi::c_void, Ordering::SeqCst);
+            ORIGINAL_WNDPROC.store(prev as usize as *mut std::ffi::c_void, Ordering::SeqCst);
             HOOKED_HWND.store(hwnd, Ordering::SeqCst);
             super::STATE.wndproc_hooked.store(true, Ordering::SeqCst);
             tracing::info!("Successfully hooked game WndProc on HWND {:?}", hwnd);
@@ -146,7 +146,7 @@ pub fn uninstall_wndproc_hook() {
     let orig = ORIGINAL_WNDPROC.swap(std::ptr::null_mut(), Ordering::SeqCst);
     if !hwnd.is_null() && !orig.is_null() {
         unsafe {
-            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, orig as isize);
+            SetWindowLongPtrA(hwnd, GWLP_WNDPROC, orig as usize as _);
         }
         super::STATE.wndproc_hooked.store(false, Ordering::SeqCst);
         tracing::info!("Successfully restored original WndProc on HWND {:?}", hwnd);

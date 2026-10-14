@@ -22,12 +22,21 @@ pub struct RelocatedBlock {
     pub ends_in_branch: bool,
 }
 
-/// Disassemble `bytes` starting at virtual address `base`.
-///
-/// Returns one string per decoded instruction. If `count` is `Some(n)`, stop
-/// after `n` instructions; otherwise decode the whole buffer.
+/// Default bitness matching target pointer width (32 for i686, 64 for x86-64).
+#[cfg(target_pointer_width = "32")]
+pub const DEFAULT_BITNESS: u32 = 32;
+
+#[cfg(not(target_pointer_width = "32"))]
+pub const DEFAULT_BITNESS: u32 = 64;
+
+/// Disassemble `bytes` starting at virtual address `base` using the default architecture bitness.
 pub fn disassemble(base: u64, bytes: &[u8], count: Option<usize>) -> Vec<String> {
-    let mut decoder = Decoder::with_ip(64, bytes, base, DecoderOptions::NONE);
+    disassemble_bitness(DEFAULT_BITNESS, base, bytes, count)
+}
+
+/// Disassemble `bytes` starting at virtual address `base` with explicit bitness (32 or 64).
+pub fn disassemble_bitness(bitness: u32, base: u64, bytes: &[u8], count: Option<usize>) -> Vec<String> {
+    let mut decoder = Decoder::with_ip(bitness, bytes, base, DecoderOptions::NONE);
     decoder.set_ip(base);
     let mut formatter = NasmFormatter::new();
     formatter.options_mut().set_uppercase_hex(false);
@@ -60,7 +69,12 @@ pub fn disassemble(base: u64, bytes: &[u8], count: Option<usize>) -> Vec<String>
 /// an instruction, so we need the exact length of the instruction we're about
 /// to redirect.
 pub fn first_instruction_len(bytes: &[u8]) -> Option<usize> {
-    let mut decoder = Decoder::with_ip(64, bytes, 0, DecoderOptions::NONE);
+    first_instruction_len_bitness(DEFAULT_BITNESS, bytes)
+}
+
+/// Decode just the first instruction at `bytes` with explicit `bitness` (32 or 64).
+pub fn first_instruction_len_bitness(bitness: u32, bytes: &[u8]) -> Option<usize> {
+    let mut decoder = Decoder::with_ip(bitness, bytes, 0, DecoderOptions::NONE);
     let start = decoder.position();
     let insn = decoder.decode();
     if insn.is_invalid() {
@@ -76,7 +90,12 @@ pub fn first_instruction_len(bytes: &[u8]) -> Option<usize> {
 /// that a `jmp` of `min_len` bytes fits without splitting an instruction, and
 /// the jump-back lands on a real instruction boundary.
 pub fn instruction_aligned_len(bytes: &[u8], min_len: usize) -> Option<usize> {
-    let mut decoder = Decoder::with_ip(64, bytes, 0, DecoderOptions::NONE);
+    instruction_aligned_len_bitness(DEFAULT_BITNESS, bytes, min_len)
+}
+
+/// Walk instructions with explicit `bitness` (32 or 64).
+pub fn instruction_aligned_len_bitness(bitness: u32, bytes: &[u8], min_len: usize) -> Option<usize> {
+    let mut decoder = Decoder::with_ip(bitness, bytes, 0, DecoderOptions::NONE);
     let mut total = 0usize;
     loop {
         let start = decoder.position();
@@ -99,6 +118,16 @@ pub fn instruction_aligned_len(bytes: &[u8], min_len: usize) -> Option<usize> {
 /// Returns `Ok(())` if `target == base` or if an instruction starts exactly at `target`.
 /// Returns `Err(message)` if `target` lands inside an instruction, with the enclosing instruction details.
 pub fn verify_instruction_boundary(base: u64, bytes: &[u8], target: u64) -> Result<(), String> {
+    verify_instruction_boundary_bitness(DEFAULT_BITNESS, base, bytes, target)
+}
+
+/// Check if `target` lands on an instruction boundary with explicit `bitness` (32 or 64).
+pub fn verify_instruction_boundary_bitness(
+    bitness: u32,
+    base: u64,
+    bytes: &[u8],
+    target: u64,
+) -> Result<(), String> {
     if target < base || target >= base + bytes.len() as u64 {
         return Err(format!(
             "target address {target:#x} is outside context window [{base:#x}..{:#x}]",
@@ -109,7 +138,7 @@ pub fn verify_instruction_boundary(base: u64, bytes: &[u8], target: u64) -> Resu
         return Ok(());
     }
 
-    let mut decoder = Decoder::with_ip(64, bytes, base, DecoderOptions::NONE);
+    let mut decoder = Decoder::with_ip(bitness, bytes, base, DecoderOptions::NONE);
     decoder.set_ip(base);
     let mut formatter = NasmFormatter::new();
     formatter.options_mut().set_uppercase_hex(false);
@@ -154,12 +183,29 @@ pub fn verify_steal_window_branch_targets(
     steal_target: u64,
     steal_len: usize,
 ) -> Result<(), String> {
+    verify_steal_window_branch_targets_bitness(
+        DEFAULT_BITNESS,
+        context_base,
+        context_bytes,
+        steal_target,
+        steal_len,
+    )
+}
+
+/// Verify branch targets with explicit `bitness` (32 or 64).
+pub fn verify_steal_window_branch_targets_bitness(
+    bitness: u32,
+    context_base: u64,
+    context_bytes: &[u8],
+    steal_target: u64,
+    steal_len: usize,
+) -> Result<(), String> {
     if steal_len <= 1 {
         return Ok(());
     }
     let steal_end = steal_target + steal_len as u64;
 
-    let mut decoder = Decoder::with_ip(64, context_bytes, context_base, DecoderOptions::NONE);
+    let mut decoder = Decoder::with_ip(bitness, context_bytes, context_base, DecoderOptions::NONE);
     decoder.set_ip(context_base);
     let mut formatter = NasmFormatter::new();
     formatter.options_mut().set_uppercase_hex(false);
@@ -222,8 +268,13 @@ pub fn verify_steal_window_branch_targets(
 ///
 /// Returns `None` if any instruction in `bytes` fails to decode or re-encode.
 pub fn relocate(bytes: &[u8], orig_ip: u64, new_ip: u64) -> Option<RelocatedBlock> {
+    relocate_bitness(DEFAULT_BITNESS, bytes, orig_ip, new_ip)
+}
+
+/// Relocate a block of stolen instructions with explicit `bitness` (32 or 64).
+pub fn relocate_bitness(bitness: u32, bytes: &[u8], orig_ip: u64, new_ip: u64) -> Option<RelocatedBlock> {
     // Decode every whole instruction from `bytes`.
-    let mut decoder = Decoder::with_ip(64, bytes, orig_ip, DecoderOptions::NONE);
+    let mut decoder = Decoder::with_ip(bitness, bytes, orig_ip, DecoderOptions::NONE);
     let mut instrs: Vec<Instruction> = Vec::new();
     let mut consumed = 0usize;
     loop {
@@ -248,7 +299,7 @@ pub fn relocate(bytes: &[u8], orig_ip: u64, new_ip: u64) -> Option<RelocatedBloc
 
     // Re-encode the decoded instructions to run at `new_ip`.
     let block = iced_x86::InstructionBlock::new(&instrs, new_ip);
-    let result = BlockEncoder::encode(64, block, 0).ok()?;
+    let result = BlockEncoder::encode(bitness, block, 0).ok()?;
     let ends_in_branch = instrs
         .last()
         .map(|i| {

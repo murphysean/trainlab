@@ -1802,21 +1802,7 @@ impl TrainlabMcpServer {
             } else {
                 &current_dll
             };
-            let resolved_dll = if raw_dll.contains('/') || raw_dll.contains('\\') {
-                raw_dll.to_string()
-            } else if let Ok(exe) = std::env::current_exe() {
-                exe.parent()
-                    .map(|d| {
-                        if raw_dll == "trainlab_inject.dll" && d.join("trainlab.dll").exists() {
-                            d.join("trainlab.dll").to_string_lossy().into_owned()
-                        } else {
-                            d.join(raw_dll).to_string_lossy().into_owned()
-                        }
-                    })
-                    .unwrap_or_else(|| raw_dll.to_string())
-            } else {
-                raw_dll.to_string()
-            };
+            let resolved_dll = crate::controller::resolve_dll_path(raw_dll);
             s.set_dll_path(resolved_dll);
             drop(s);
 

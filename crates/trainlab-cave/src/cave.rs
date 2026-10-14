@@ -107,9 +107,16 @@ where
     let buf = read(target, window).map_err(|e| format!("read window: {e}"))?;
 
     // Check if target is already hooked by inspecting the initial bytes:
-    // - Absolute jump hook: starts with `FF 25 00 00 00 00` (jmp [rip+0])
+    // - Absolute jump hook: starts with `FF 25 00 00 00 00` (jmp [rip+0]) or `68 .. C3` (push imm32; ret)
     // - Relative jump hook: starts with `E9`
     // - Direct jump / short hook: `EB`
+    #[cfg(target_pointer_width = "32")]
+    if buf.starts_with(&[0x68]) && buf.len() >= 6 && buf[5] == 0xC3 {
+        return Err(format!(
+            "target {target:#x} is already hooked (starts with push imm32 / ret); sequence aborted to prevent double-hook corruption"
+        ));
+    }
+    #[cfg(not(target_pointer_width = "32"))]
     if buf.starts_with(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]) {
         return Err(format!(
             "target {target:#x} is already hooked (starts with absolute jmp FF 25 00 00 00 00); sequence aborted to prevent double-hook corruption"

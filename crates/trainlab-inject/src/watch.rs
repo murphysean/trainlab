@@ -32,9 +32,20 @@ use windows_sys::Win32::Foundation::{
     EXCEPTION_SINGLE_STEP, GetLastError, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, CONTEXT, CONTEXT_CONTROL_AMD64, CONTEXT_DEBUG_REGISTERS_AMD64,
-    CONTEXT_INTEGER_AMD64, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH,
+    AddVectoredExceptionHandler, CONTEXT, EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH,
     EXCEPTION_POINTERS, FlushInstructionCache, GetThreadContext, SetThreadContext,
+};
+#[cfg(target_arch = "x86")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    CONTEXT_CONTROL_X86 as CONTEXT_CONTROL_ARCH,
+    CONTEXT_DEBUG_REGISTERS_X86 as CONTEXT_DEBUG_REGISTERS_ARCH,
+    CONTEXT_INTEGER_X86 as CONTEXT_INTEGER_ARCH,
+};
+#[cfg(target_arch = "x86_64")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    CONTEXT_CONTROL_AMD64 as CONTEXT_CONTROL_ARCH,
+    CONTEXT_DEBUG_REGISTERS_AMD64 as CONTEXT_DEBUG_REGISTERS_ARCH,
+    CONTEXT_INTEGER_AMD64 as CONTEXT_INTEGER_ARCH,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
@@ -50,6 +61,104 @@ use windows_sys::Win32::System::Threading::{
 };
 
 const TRAP_FLAG: u32 = 0x100;
+
+#[inline]
+unsafe fn get_rip(ctx: *const CONTEXT) -> u64 {
+    #[cfg(target_arch = "x86")]
+    {
+        (*ctx).Eip as u64
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        (*ctx).Rip
+    }
+}
+
+#[inline]
+unsafe fn set_rip(ctx: *mut CONTEXT, val: u64) {
+    #[cfg(target_arch = "x86")]
+    {
+        (*ctx).Eip = val as u32;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        (*ctx).Rip = val;
+    }
+}
+
+#[inline]
+#[allow(dead_code)]
+unsafe fn get_rsp(ctx: *const CONTEXT) -> u64 {
+    #[cfg(target_arch = "x86")]
+    {
+        (*ctx).Esp as u64
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        (*ctx).Rsp
+    }
+}
+
+#[inline]
+unsafe fn get_dr6(ctx: *const CONTEXT) -> u64 {
+    (*ctx).Dr6 as u64
+}
+
+#[inline]
+unsafe fn clear_dr6_low(ctx: *mut CONTEXT) {
+    (*ctx).Dr6 &= !0xF;
+}
+
+#[inline]
+unsafe fn get_dr7(ctx: *const CONTEXT) -> u64 {
+    (*ctx).Dr7 as u64
+}
+
+#[inline]
+unsafe fn set_dr0(ctx: *mut CONTEXT, val: u64) {
+    (*ctx).Dr0 = val as _;
+}
+
+#[inline]
+unsafe fn set_dr7(ctx: *mut CONTEXT, val: u64) {
+    (*ctx).Dr7 = val as _;
+}
+
+#[inline]
+unsafe fn make_hit_info(ctx: *const CONTEXT, rip: u64, description: String) -> HitInfo {
+    #[cfg(target_arch = "x86")]
+    {
+        HitInfo {
+            rip,
+            rax: (*ctx).Eax as u64,
+            rbx: (*ctx).Ebx as u64,
+            rcx: (*ctx).Ecx as u64,
+            rdx: (*ctx).Edx as u64,
+            rsi: (*ctx).Esi as u64,
+            rdi: (*ctx).Edi as u64,
+            rsp: (*ctx).Esp as u64,
+            rbp: (*ctx).Ebp as u64,
+            description,
+            stack: capture_stack((*ctx).Esp as u64, 16),
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        HitInfo {
+            rip,
+            rax: (*ctx).Rax,
+            rbx: (*ctx).Rbx,
+            rcx: (*ctx).Rcx,
+            rdx: (*ctx).Rdx,
+            rsi: (*ctx).Rsi,
+            rdi: (*ctx).Rdi,
+            rsp: (*ctx).Rsp,
+            rbp: (*ctx).Rbp,
+            description,
+            stack: capture_stack((*ctx).Rsp, 16),
+        }
+    }
+}
 
 /// Register + stack snapshot reported when a watchpoint/breakpoint fires.
 #[derive(Debug, Clone)]
@@ -383,7 +492,7 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                         );
                     }
                     PendingStep::ReapplyHardwareDr { dr7 } => {
-                        (*ctx).Dr7 = dr7;
+                        set_dr7(ctx, dr7);
                     }
                 }
                 return EXCEPTION_CONTINUE_EXECUTION;
@@ -417,22 +526,14 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                         let is_write = access_type == 1;
 
                         if in_range && is_write {
-                            let hit = HitInfo {
-                                rip: (*ctx).Rip,
-                                rax: (*ctx).Rax,
-                                rbx: (*ctx).Rbx,
-                                rcx: (*ctx).Rcx,
-                                rdx: (*ctx).Rdx,
-                                rsi: (*ctx).Rsi,
-                                rdi: (*ctx).Rdi,
-                                rsp: (*ctx).Rsp,
-                                rbp: (*ctx).Rbp,
-                                description: format!(
+                            let hit = make_hit_info(
+                                ctx,
+                                get_rip(ctx),
+                                format!(
                                     "page-guard write hit at 0x{:x} (target 0x{:x}) by thread {}",
                                     fault_addr, active.address, tid
                                 ),
-                                stack: capture_stack((*ctx).Rsp, 16),
-                            };
+                            );
                             record_hit(hit);
 
                             if active.one_shot {
@@ -482,36 +583,28 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                     // AVs or single-steps from other code get misattributed.
                     let dr6_hit = (code == EXCEPTION_SINGLE_STEP
                         || code == EXCEPTION_ACCESS_VIOLATION)
-                        && ((*ctx).Dr6 & 0x1) != 0;
+                        && (get_dr6(ctx) & 0x1) != 0;
                     if dr6_hit {
-                        (*ctx).Dr6 &= !0xF;
-                        let hit = HitInfo {
-                            rip: (*ctx).Rip,
-                            rax: (*ctx).Rax,
-                            rbx: (*ctx).Rbx,
-                            rcx: (*ctx).Rcx,
-                            rdx: (*ctx).Rdx,
-                            rsi: (*ctx).Rsi,
-                            rdi: (*ctx).Rdi,
-                            rsp: (*ctx).Rsp,
-                            rbp: (*ctx).Rbp,
-                            description: format!(
+                        clear_dr6_low(ctx);
+                        let hit = make_hit_info(
+                            ctx,
+                            get_rip(ctx),
+                            format!(
                                 "data-write watchpoint fired at 0x{:x} by thread {}",
                                 active.address, tid
                             ),
-                            stack: capture_stack((*ctx).Rsp, 16),
-                        };
+                        );
                         record_hit(hit);
 
                         if active.one_shot {
-                            (*ctx).Dr0 = 0;
-                            (*ctx).Dr7 = 0;
+                            set_dr0(ctx, 0);
+                            set_dr7(ctx, 0);
                             add_tombstone(active.address, 0);
                             let _ = guard.take();
                             return EXCEPTION_CONTINUE_EXECUTION;
                         } else {
-                            let dr7_saved = (*ctx).Dr7;
-                            (*ctx).Dr7 = 0;
+                            let dr7_saved = get_dr7(ctx);
+                            set_dr7(ctx, 0);
                             (*ctx).EFlags |= TRAP_FLAG;
                             match runtime().pending_steps.lock() {
                                 Ok(mut m) => {
@@ -538,29 +631,20 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                             .ExceptionRecord
                             .as_mut()
                             .map_or(0, |r| r.ExceptionAddress as u64);
-                        let rip = (*ctx).Rip;
+                        let rip = get_rip(ctx);
                         if exc_addr == active.address || rip.wrapping_sub(1) == active.address {
                             // Restore original instruction byte immediately
                             let _ = write_byte(active.address, active.original_byte);
-                            (*ctx).Rip = active.address;
+                            set_rip(ctx, active.address);
 
-                            let stack = capture_stack((*ctx).Rsp, 16);
-                            let hit = HitInfo {
-                                rip: active.address,
-                                rax: (*ctx).Rax,
-                                rbx: (*ctx).Rbx,
-                                rcx: (*ctx).Rcx,
-                                rdx: (*ctx).Rdx,
-                                rsi: (*ctx).Rsi,
-                                rdi: (*ctx).Rdi,
-                                rsp: (*ctx).Rsp,
-                                rbp: (*ctx).Rbp,
-                                description: format!(
+                            let hit = make_hit_info(
+                                ctx,
+                                active.address,
+                                format!(
                                     "breakpoint hit at 0x{:x} by thread {}",
                                     active.address, tid
                                 ),
-                                stack,
-                            };
+                            );
                             record_hit(hit);
 
                             if active.one_shot {
@@ -592,7 +676,7 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                 .ExceptionRecord
                 .as_mut()
                 .map_or(0, |r| r.ExceptionAddress as u64);
-            let rip = (*ctx).Rip;
+            let rip = get_rip(ctx);
             let target_addr = if let Some(t) = find_tombstone(exc_addr) {
                 Some((exc_addr, t))
             } else if let Some(t) = find_tombstone(rip.wrapping_sub(1)) {
@@ -605,25 +689,16 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                 // Ensure original byte is restored
                 let _ = write_byte(addr, tombstone.original_byte);
                 // Rewind RIP to instruction start so thread executes normally
-                (*ctx).Rip = addr;
+                set_rip(ctx, addr);
 
-                let stack = capture_stack((*ctx).Rsp, 16);
-                let hit = HitInfo {
-                    rip: addr,
-                    rax: (*ctx).Rax,
-                    rbx: (*ctx).Rbx,
-                    rcx: (*ctx).Rcx,
-                    rdx: (*ctx).Rdx,
-                    rsi: (*ctx).Rsi,
-                    rdi: (*ctx).Rdi,
-                    rsp: (*ctx).Rsp,
-                    rbp: (*ctx).Rbp,
-                    description: format!(
+                let hit = make_hit_info(
+                    ctx,
+                    addr,
+                    format!(
                         "concurrent breakpoint hit at 0x{:x} by straggler thread {} (safely resumed)",
                         addr, tid
                     ),
-                    stack,
-                };
+                );
                 record_hit(hit);
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
@@ -645,22 +720,14 @@ unsafe extern "system" fn veh_handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
                     PAGE_EXECUTE_READWRITE,
                     &mut old,
                 );
-                let hit = HitInfo {
-                    rip: (*ctx).Rip,
-                    rax: (*ctx).Rax,
-                    rbx: (*ctx).Rbx,
-                    rcx: (*ctx).Rcx,
-                    rdx: (*ctx).Rdx,
-                    rsi: (*ctx).Rsi,
-                    rdi: (*ctx).Rdi,
-                    rsp: (*ctx).Rsp,
-                    rbp: (*ctx).Rbp,
-                    description: format!(
+                let hit = make_hit_info(
+                    ctx,
+                    get_rip(ctx),
+                    format!(
                         "concurrent page guard hit at 0x{:x} (target 0x{:x}) by thread {} (safely resumed)",
                         fault_addr, tombstone.address, tid
                     ),
-                    stack: capture_stack((*ctx).Rsp, 16),
-                };
+                );
                 record_hit(hit);
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
@@ -693,19 +760,23 @@ fn write_byte(address: u64, byte: u8) -> Result<(), String> {
     Ok(())
 }
 
-/// Read `count` u64 words upward from `rsp` and format them as hex.
+/// Read `count` words upward from `sp` and format them as hex.
 /// Stops early if the next address is unreadable to avoid faulting near
 /// the stack guard page (a nested exception inside the VEH is fatal).
-fn capture_stack(rsp: u64, count: usize) -> Vec<String> {
+fn capture_stack(sp: u64, count: usize) -> Vec<String> {
+    let word_size = std::mem::size_of::<usize>();
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
-        let addr = rsp.wrapping_add((i as u64) * 8);
+        let addr = sp.wrapping_add((i * word_size) as u64);
         #[cfg(windows)]
         {
-            if unsafe { IsBadReadPtr(addr as *const c_void, 8) } != 0 {
+            if unsafe { IsBadReadPtr(addr as *const c_void, word_size) } != 0 {
                 break;
             }
         }
+        #[cfg(target_pointer_width = "32")]
+        let val = unsafe { *(addr as *const u32) as u64 };
+        #[cfg(target_pointer_width = "64")]
         let val = unsafe { *(addr as *const u64) };
         out.push(format!("0x{val:016x}"));
     }
@@ -756,7 +827,7 @@ fn apply_debug_registers_all(dr0: u64, dr7: u64) {
         }
         let mut ctx: CONTEXT = unsafe { std::mem::zeroed() };
         ctx.ContextFlags =
-            CONTEXT_DEBUG_REGISTERS_AMD64 | CONTEXT_CONTROL_AMD64 | CONTEXT_INTEGER_AMD64;
+            CONTEXT_DEBUG_REGISTERS_ARCH | CONTEXT_CONTROL_ARCH | CONTEXT_INTEGER_ARCH;
 
         let suspended = if tid == current {
             0xFFFF_FFFFu32
@@ -765,8 +836,8 @@ fn apply_debug_registers_all(dr0: u64, dr7: u64) {
         };
 
         if unsafe { GetThreadContext(handle, &mut ctx) } != 0 {
-            ctx.Dr0 = dr0;
-            ctx.Dr7 = dr7;
+            ctx.Dr0 = dr0 as _;
+            ctx.Dr7 = dr7 as _;
             unsafe {
                 SetThreadContext(handle, &ctx);
             }

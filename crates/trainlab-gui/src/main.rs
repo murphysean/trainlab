@@ -2644,7 +2644,7 @@ fn apply_companion_window_hints() {
                 let required = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
                 if (ex_style as u32 & required) != required {
                     let new_ex_style = ex_style as u32 | required;
-                    SetWindowLongPtrA(hwnd, GWL_EXSTYLE, new_ex_style as isize);
+                    SetWindowLongPtrA(hwnd, GWL_EXSTYLE, new_ex_style as isize as _);
                     SetWindowPos(
                         hwnd,
                         std::ptr::null_mut(),

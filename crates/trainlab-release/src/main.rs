@@ -104,6 +104,23 @@ fn main() -> Result<()> {
                 "trainlab-inject",
             ],
         )?;
+
+        println!(
+            "\x1b[1;36m=== 2b. Cross-compiling 32-bit Windows Targets (trainlab32.exe, trainlab32.dll) ===\x1b[0m"
+        );
+        run_cmd(
+            "cargo",
+            &[
+                "build",
+                "--release",
+                "--target",
+                "i686-pc-windows-gnu",
+                "-p",
+                "trainlab-gui",
+                "-p",
+                "trainlab-inject",
+            ],
+        )?;
     }
 
     let dist_dir = if args.out_dir.is_absolute() {
@@ -132,12 +149,32 @@ fn main() -> Result<()> {
         true,
     )?;
 
+    // 2b. trainlab32.exe <- 32-bit windows exe
+    let win32_exe = root.join("target/i686-pc-windows-gnu/release/trainlab-gui.exe");
+    if win32_exe.exists() {
+        copy_artifact(
+            &win32_exe,
+            &dist_dir.join("trainlab32.exe"),
+            true,
+        )?;
+    }
+
     // 3. trainlab.dll <- windows dll
     copy_artifact(
         &root.join("target/x86_64-pc-windows-gnu/release/trainlab_inject.dll"),
         &dist_dir.join("trainlab.dll"),
         false,
     )?;
+
+    // 3b. trainlab32.dll <- 32-bit windows dll
+    let win32_dll = root.join("target/i686-pc-windows-gnu/release/trainlab_inject.dll");
+    if win32_dll.exists() {
+        copy_artifact(
+            &win32_dll,
+            &dist_dir.join("trainlab32.dll"),
+            false,
+        )?;
+    }
 
     // 4. trainlab.so <- linux so
     copy_artifact(
@@ -186,6 +223,8 @@ fn main() -> Result<()> {
             "trainlab",
             "trainlab.exe",
             "trainlab.dll",
+            "trainlab32.exe",
+            "trainlab32.dll",
             "trainlab.so",
             "launch.sh",
             "config.yaml",
@@ -270,6 +309,8 @@ fn main() -> Result<()> {
                 dist_dir.join("trainlab"),
                 dist_dir.join("trainlab.exe"),
                 dist_dir.join("trainlab.dll"),
+                dist_dir.join("trainlab32.exe"),
+                dist_dir.join("trainlab32.dll"),
                 dist_dir.join("trainlab.so"),
                 dist_dir.join("launch.sh"),
                 dist_dir.join("config.yaml"),
@@ -306,7 +347,7 @@ fn main() -> Result<()> {
                     name, ip
                 );
             } else {
-                let chmod_cmd = "chmod +x ~/Documents/Trainers/Trainlab/trainlab ~/Documents/Trainers/Trainlab/trainlab.exe ~/Documents/Trainers/Trainlab/launch.sh 2>/dev/null || true";
+                let chmod_cmd = "chmod +x ~/Documents/Trainers/Trainlab/trainlab ~/Documents/Trainers/Trainlab/trainlab.exe ~/Documents/Trainers/Trainlab/trainlab32.exe ~/Documents/Trainers/Trainlab/launch.sh 2>/dev/null || true";
                 let _ = run_cmd(
                     "ssh",
                     &[
