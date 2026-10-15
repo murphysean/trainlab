@@ -119,11 +119,32 @@ if [ "$(hostname 2>/dev/null)" = "frame" ] || grep -q 'VARIANT_ID="vr"' /etc/os-
     export TRAINLAB_SCALE="${TRAINLAB_SCALE:-1.0}"
 fi
 
+# Detect Gamescope / Handheld / Console environment (Steam Deck & Steam Machine)
+IS_CONSOLE_MODE=0
 if [ -n "$GAMESCOPE_WAYLAND_DISPLAY" ] || [ -n "$STEAM_DECK" ] || [ -n "$SteamGamepadUI" ]; then
+    IS_CONSOLE_MODE=1
     export TRAINLAB_GAMESCOPE=1
 fi
 
-AUTO_ARGS="--auto-attach --no-fullscreen --hidden --auto-exit"
+# Configurable backgrounding:
+# On Steam Frame, Steam Deck, and Steam Machine (Console/Gamescope mode), trainlab must
+# background itself so Gamescope does not capture or steal focus from the game.
+# On desktop (e.g. Furiosa or PC workstation), default to visible unless TRAINLAB_HIDDEN is set.
+if [ -n "$TRAINLAB_HIDDEN" ]; then
+    if [ "$TRAINLAB_HIDDEN" = "1" ] || [ "$TRAINLAB_HIDDEN" = "true" ]; then
+        HIDDEN_ARG="--hidden"
+    else
+        HIDDEN_ARG="--visible"
+    fi
+elif [ "$IS_STEAM_FRAME" -eq 1 ] || [ "$IS_CONSOLE_MODE" -eq 1 ]; then
+    HIDDEN_ARG="--hidden"
+    export TRAINLAB_HIDDEN=1
+else
+    HIDDEN_ARG="--visible"
+    export TRAINLAB_HIDDEN=0
+fi
+
+AUTO_ARGS="--auto-attach --no-fullscreen $HIDDEN_ARG --auto-exit"
 if [ -n "$GAME_EXE" ]; then
     AUTO_ARGS="$AUTO_ARGS --game $GAME_EXE"
 fi
@@ -134,7 +155,6 @@ if [ -n "$TRAINLAB_SCALE" ]; then
     AUTO_ARGS="$AUTO_ARGS --scale $TRAINLAB_SCALE"
 fi
 export TRAINLAB_AUTO_INJECT=1
-export TRAINLAB_HIDDEN=1
 export TRAINLAB_AUTO_EXIT=1
 
 # Single-instance companion lock: only one launch.sh instance spawns trainlab per game
